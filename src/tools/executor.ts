@@ -1,6 +1,6 @@
 /*
  * File: executor.ts
- * Project: deepsproxy
+ * Project: qwenproxy
  * Execution loop for tool calling - agentic loop that handles
  * send -> tool calls -> execute -> re-send until completion
  */

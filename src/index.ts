@@ -1,6 +1,6 @@
 /*
  * File: index.ts
- * Project: deepsproxy
+ * Project: qwenproxy
  * Author: Pedro Farias
  * Created: 2026-05-09
  * 

@@ -1,6 +1,6 @@
 /*
  * File: schema.ts
- * Project: deepsproxy
+ * Project: qwenproxy
  * Strict JSON Schema validator for tool calling
  */
 

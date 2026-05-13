@@ -1,6 +1,6 @@
 /*
  * File: engine.ts
- * Project: deepsproxy
+ * Project: qwenproxy
  * Agent State Machine Engine - core orchestration loop
  * Manages phase transitions, LLM calls, tool execution, and event emission.
  */

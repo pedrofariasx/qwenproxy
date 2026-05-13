@@ -1,6 +1,6 @@
 /*
  * File: registry.ts
- * Project: deepsproxy
+ * Project: qwenproxy
  * Tool registry with register/lookup and OpenAI-compatible schema export
  */
 

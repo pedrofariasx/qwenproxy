@@ -1,6 +1,6 @@
 /*
  * File: types.ts
- * Project: deepsproxy
+ * Project: qwenproxy
  * Agent runtime state machine types
  */
 

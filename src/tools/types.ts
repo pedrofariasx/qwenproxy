@@ -1,6 +1,6 @@
 /*
  * File: types.ts
- * Project: deepsproxy
+ * Project: qwenproxy
  * Tool system types
  */
 
