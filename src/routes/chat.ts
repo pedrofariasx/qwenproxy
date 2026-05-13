@@ -15,6 +15,7 @@ import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
 import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
 import { registry } from '../tools/registry.ts';
 import type { FunctionToolDefinition } from '../tools/types.ts';
+import { robustParseJSON } from '../utils/json.ts';
 
 function getIncrementalDelta(oldStr: string, newStr: string): string {
   if (!oldStr) return newStr;
@@ -85,7 +86,7 @@ export async function chatCompletions(c: Context) {
       });
       const toolsJson = JSON.stringify(formattedTools, null, 2);
       
-      systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags must be valid and follow the tool's schema exactly.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
+      systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
       
       if (bodyAny.tool_choice && typeof bodyAny.tool_choice === 'object' && bodyAny.tool_choice.function) {
         const forcedTool = bodyAny.tool_choice.function.name;
@@ -301,15 +302,9 @@ export async function chatCompletions(c: Context) {
                     if (endIdx !== -1) {
                       let toolJsonStr = contentEmitBuffer.substring(0, endIdx).trim();
                       try {
-                        // Robust JSON sanitization
-                        toolJsonStr = toolJsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
-                        const startJ = toolJsonStr.indexOf('{');
-                        const endJ = toolJsonStr.lastIndexOf('}');
-                        if (startJ !== -1 && endJ !== -1 && endJ >= startJ) {
-                          toolJsonStr = toolJsonStr.substring(startJ, endJ + 1);
-                        }
-
-                        const toolCallObj = JSON.parse(toolJsonStr);
+                        const toolCallObj = robustParseJSON(toolJsonStr);
+                        if (!toolCallObj) throw new Error('Failed to parse JSON');
+                        
                         const toolId = 'call_' + uuidv4();
                         
                         let toolName = toolCallObj.name || '';
@@ -323,10 +318,6 @@ export async function chatCompletions(c: Context) {
                           // If 'arguments' key is missing, treat the rest of the object as arguments
                           const { name, ...rest } = toolCallObj;
                           toolArgs = JSON.stringify(rest);
-                          // If name was also missing, it might be just the arguments object
-                          if (!toolName && Object.keys(rest).length > 0) {
-                            // Try to infer tool name if possible, or leave it to fail gracefully
-                          }
                         }
 
                         console.log(`[Tool Call] Name: ${toolName}, Args: ${toolArgs}`);
@@ -350,6 +341,7 @@ export async function chatCompletions(c: Context) {
                         });
                         emittedToolCallCount++;
                       } catch (e) {
+                        console.warn(`[Tool Call] Parsing failed for: ${toolJsonStr}`, e);
                         // Failed to parse tool call JSON, emit as regular text
                         if (emittedToolCallCount === 0) {
                           await writeEvent({
@@ -365,6 +357,7 @@ export async function chatCompletions(c: Context) {
                       insideTool = false;
                       contentEmitBuffer = contentEmitBuffer.substring(endIdx + TOOL_END.length);
                     } else {
+
                       // Waiting for TOOL_END, buffer the content
                       break;
                     }
@@ -379,14 +372,58 @@ export async function chatCompletions(c: Context) {
       }
 
       // Flush any remaining content emit buffer
-      if (!insideTool && contentEmitBuffer.length > 0 && emittedToolCallCount === 0) {
-        await writeEvent({
-          id: completionId,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: body.model,
-          choices: [makeChoice({ content: contentEmitBuffer })]
-        });
+      if (contentEmitBuffer.length > 0) {
+        if (insideTool) {
+          // If we were inside a tool call but it never ended, try to parse it anyway
+          try {
+            const toolCallObj = robustParseJSON(contentEmitBuffer);
+            if (toolCallObj) {
+              const toolId = 'call_' + uuidv4();
+              let toolName = toolCallObj.name || '';
+              let toolArgs = '';
+              if (toolCallObj.arguments) {
+                toolArgs = typeof toolCallObj.arguments === 'object' ? JSON.stringify(toolCallObj.arguments) : String(toolCallObj.arguments);
+              } else {
+                const { name, ...rest } = toolCallObj;
+                toolArgs = JSON.stringify(rest);
+              }
+              await writeEvent({
+                id: completionId,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: body.model,
+                choices: [makeChoice({
+                  tool_calls: [{
+                    index: emittedToolCallCount,
+                    id: toolId,
+                    type: 'function',
+                    function: { name: toolName, arguments: toolArgs }
+                  }]
+                })]
+              });
+              emittedToolCallCount++;
+            }
+          } catch (e) {
+            // If even robust parsing fails, emit as text if no tools were emitted yet
+            if (emittedToolCallCount === 0) {
+              await writeEvent({
+                id: completionId,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: body.model,
+                choices: [makeChoice({ content: TOOL_START + contentEmitBuffer })]
+              });
+            }
+          }
+        } else if (emittedToolCallCount === 0) {
+          await writeEvent({
+            id: completionId,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: body.model,
+            choices: [makeChoice({ content: contentEmitBuffer })]
+          });
+        }
       }
   
       // Send finish reason

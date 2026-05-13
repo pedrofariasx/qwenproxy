@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ParsedToolCall, ToolCallResult, ToolContext } from './types.ts';
 import { SchemaValidationError } from './schema.ts';
 import { registry } from './registry.ts';
+import { robustParseJSON } from '../utils/json.ts';
 
 export interface ExecutionLoopConfig {
   maxTurns?: number;
@@ -66,20 +67,18 @@ export function parseToolCallsFromContent(content: string): {
       .trim();
 
     try {
-      let sanitized = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
-      const braceStart = sanitized.indexOf('{');
-      const braceEnd = sanitized.lastIndexOf('}');
-      if (braceStart !== -1 && braceEnd !== -1 && braceEnd >= braceStart) {
-        sanitized = sanitized.substring(braceStart, braceEnd + 1);
-      }
-
-      const parsed = JSON.parse(sanitized);
+      const parsed = robustParseJSON(jsonStr);
+      if (!parsed) throw new Error('Failed to parse JSON');
+      
       toolCalls.push({
         id: 'call_' + uuidv4(),
         name: parsed.name || '',
-        arguments: typeof parsed.arguments === 'string'
-          ? JSON.parse(parsed.arguments)
-          : (parsed.arguments || {}),
+        arguments: parsed.arguments 
+          ? (typeof parsed.arguments === 'string' ? JSON.parse(parsed.arguments) : parsed.arguments)
+          : (() => {
+              const { name, ...rest } = parsed;
+              return rest;
+            })(),
       });
     } catch (e) {
       textContent += TOOL_START_TAG + jsonStr + TOOL_END_TAG;
