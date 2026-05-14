@@ -16,6 +16,7 @@ import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
 import { registry } from '../tools/registry.ts';
 import type { FunctionToolDefinition } from '../tools/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
+import { StreamingToolParser } from '../tools/parser.ts';
 
 function getIncrementalDelta(oldStr: string, newStr: string): string {
   if (!oldStr) return newStr;
@@ -157,12 +158,8 @@ export async function chatCompletions(c: Context) {
       let currentAppendPath = '';
       
       let reasoningBuffer = '';
-      let contentEmitBuffer = '';
       let lastFullContent = '';
-      let insideTool = false;
-      let emittedToolCallCount = 0;
-      const TOOL_START = '<tool_call>';
-      const TOOL_END = '</tool_call>';
+      const toolParser = new StreamingToolParser();
 
       let buffer = '';
       let completionTokens = 0;
@@ -213,7 +210,6 @@ export async function chatCompletions(c: Context) {
                 if (delta.extra && delta.extra.summary_thought && delta.extra.summary_thought.content) {
                   const thoughts = delta.extra.summary_thought.content;
                   if (thoughts.length > currentThoughtIndex) {
-                    // Qwen accumulates thoughts in the array, so we only emit the new ones
                     vStr = thoughts.slice(currentThoughtIndex).join('\n');
                     currentThoughtIndex = thoughts.length;
                     foundStr = true;
@@ -236,132 +232,48 @@ export async function chatCompletions(c: Context) {
             if (foundStr && vStr !== '') {
               if (vStr === 'FINISHED') continue;
 
-              const delta: ChoiceDelta = {};
-              
-              // Map chunk to either reasoning_content or content
               if (isThinkingChunk) {
                 inThinkingState = true;
                 reasoningBuffer += vStr;
-                delta.reasoning_content = vStr;
-
                 await writeEvent({
                   id: completionId,
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
                   model: body.model,
-                  choices: [makeChoice(delta)]
+                  choices: [makeChoice({ reasoning_content: vStr })]
                 });
               } else {
                 inThinkingState = false;
-                contentEmitBuffer += vStr;
+                const { text, toolCalls } = toolParser.feed(vStr);
 
-                while (contentEmitBuffer.length > 0) {
-                  if (!insideTool) {
-                    const startIdx = contentEmitBuffer.indexOf(TOOL_START);
-                    if (startIdx !== -1) {
-                      // Found tool start. Emit everything before it as text
-                      const textToEmit = contentEmitBuffer.substring(0, startIdx);
-                      if (textToEmit && emittedToolCallCount === 0) {
-                        await writeEvent({
-                          id: completionId,
-                          object: 'chat.completion.chunk',
-                          created: Math.floor(Date.now() / 1000),
-                          model: body.model,
-                          choices: [makeChoice({ content: textToEmit })]
-                        });
-                      }
-                      insideTool = true;
-                      contentEmitBuffer = contentEmitBuffer.substring(startIdx + TOOL_START.length);
-                      continue; // re-evaluate loop for tool end
-                    } else {
-                      // No full start tag. Check for partial match at the end
-                      let flushIndex = contentEmitBuffer.length;
-                      for (let i = 1; i <= TOOL_START.length; i++) {
-                        if (contentEmitBuffer.endsWith(TOOL_START.substring(0, i))) {
-                          flushIndex = contentEmitBuffer.length - i;
-                          break;
+                if (text) {
+                  await writeEvent({
+                    id: completionId,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: body.model,
+                    choices: [makeChoice({ content: text })]
+                  });
+                }
+
+                for (const tc of toolCalls) {
+                  await writeEvent({
+                    id: completionId,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: body.model,
+                    choices: [makeChoice({
+                      tool_calls: [{
+                        index: toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc),
+                        id: tc.id,
+                        type: 'function',
+                        function: {
+                          name: tc.name,
+                          arguments: JSON.stringify(tc.arguments)
                         }
-                      }
-                      
-                      const textToEmit = contentEmitBuffer.substring(0, flushIndex);
-                      if (textToEmit && emittedToolCallCount === 0) {
-                        await writeEvent({
-                          id: completionId,
-                          object: 'chat.completion.chunk',
-                          created: Math.floor(Date.now() / 1000),
-                          model: body.model,
-                          choices: [makeChoice({ content: textToEmit })]
-                        });
-                      }
-                      contentEmitBuffer = contentEmitBuffer.substring(flushIndex);
-                      break; // wait for more chunks
-                    }
-                  } else {
-                    // Inside tool
-                    const endIdx = contentEmitBuffer.indexOf(TOOL_END);
-                    if (endIdx !== -1) {
-                      let toolJsonStr = contentEmitBuffer.substring(0, endIdx).trim();
-                      try {
-                        const toolCallObj = robustParseJSON(toolJsonStr);
-                        if (!toolCallObj) throw new Error('Failed to parse JSON');
-                        
-                        const toolId = 'call_' + uuidv4();
-                        
-                        let toolName = toolCallObj.name || '';
-                        let toolArgs = '';
-
-                        if (toolCallObj.arguments) {
-                          toolArgs = typeof toolCallObj.arguments === 'object'
-                            ? JSON.stringify(toolCallObj.arguments)
-                            : String(toolCallObj.arguments);
-                        } else {
-                          // If 'arguments' key is missing, treat the rest of the object as arguments
-                          const { name, ...rest } = toolCallObj;
-                          toolArgs = JSON.stringify(rest);
-                        }
-
-                        console.log(`[Tool Call] Name: ${toolName}, Args: ${toolArgs}`);
-                        
-                        await writeEvent({
-                          id: completionId,
-                          object: 'chat.completion.chunk',
-                          created: Math.floor(Date.now() / 1000),
-                          model: body.model,
-                          choices: [makeChoice({
-                            tool_calls: [{
-                              index: emittedToolCallCount,
-                              id: toolId,
-                              type: 'function',
-                              function: {
-                                name: toolName,
-                                arguments: toolArgs
-                              }
-                            }]
-                          })]
-                        });
-                        emittedToolCallCount++;
-                      } catch (e) {
-                        console.warn(`[Tool Call] Parsing failed for: ${toolJsonStr}`, e);
-                        // Failed to parse tool call JSON, emit as regular text
-                        if (emittedToolCallCount === 0) {
-                          await writeEvent({
-                            id: completionId,
-                            object: 'chat.completion.chunk',
-                            created: Math.floor(Date.now() / 1000),
-                            model: body.model,
-                            choices: [makeChoice({ content: TOOL_START + toolJsonStr + TOOL_END })]
-                          });
-                        }
-                      }
-                      
-                      insideTool = false;
-                      contentEmitBuffer = contentEmitBuffer.substring(endIdx + TOOL_END.length);
-                    } else {
-
-                      // Waiting for TOOL_END, buffer the content
-                      break;
-                    }
-                  }
+                      }]
+                    })]
+                  });
                 }
               }
             }
@@ -371,59 +283,35 @@ export async function chatCompletions(c: Context) {
         }
       }
 
-      // Flush any remaining content emit buffer
-      if (contentEmitBuffer.length > 0) {
-        if (insideTool) {
-          // If we were inside a tool call but it never ended, try to parse it anyway
-          try {
-            const toolCallObj = robustParseJSON(contentEmitBuffer);
-            if (toolCallObj) {
-              const toolId = 'call_' + uuidv4();
-              let toolName = toolCallObj.name || '';
-              let toolArgs = '';
-              if (toolCallObj.arguments) {
-                toolArgs = typeof toolCallObj.arguments === 'object' ? JSON.stringify(toolCallObj.arguments) : String(toolCallObj.arguments);
-              } else {
-                const { name, ...rest } = toolCallObj;
-                toolArgs = JSON.stringify(rest);
+      // Flush tool parser
+      const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
+      if (remainingText) {
+        await writeEvent({
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model,
+          choices: [makeChoice({ content: remainingText })]
+        });
+      }
+      for (const tc of remainingToolCalls) {
+        await writeEvent({
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model,
+          choices: [makeChoice({
+            tool_calls: [{
+              index: toolParser.getEmittedToolCallCount() - remainingToolCalls.length + remainingToolCalls.indexOf(tc),
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.name,
+                arguments: JSON.stringify(tc.arguments)
               }
-              await writeEvent({
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: body.model,
-                choices: [makeChoice({
-                  tool_calls: [{
-                    index: emittedToolCallCount,
-                    id: toolId,
-                    type: 'function',
-                    function: { name: toolName, arguments: toolArgs }
-                  }]
-                })]
-              });
-              emittedToolCallCount++;
-            }
-          } catch (e) {
-            // If even robust parsing fails, emit as text if no tools were emitted yet
-            if (emittedToolCallCount === 0) {
-              await writeEvent({
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: body.model,
-                choices: [makeChoice({ content: TOOL_START + contentEmitBuffer })]
-              });
-            }
-          }
-        } else if (emittedToolCallCount === 0) {
-          await writeEvent({
-            id: completionId,
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: body.model,
-            choices: [makeChoice({ content: contentEmitBuffer })]
-          });
-        }
+            }]
+          })]
+        });
       }
   
       // Send finish reason
@@ -431,12 +319,10 @@ export async function chatCompletions(c: Context) {
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
         total_tokens: promptTokens + completionTokens,
-        prompt_tokens_details: {
-          cached_tokens: 0 // Mock cache compatibility
-        }
+        prompt_tokens_details: { cached_tokens: 0 }
       };
   
-      const finalFinishReason = emittedToolCallCount > 0 ? 'tool_calls' : 'stop';
+      const finalFinishReason = toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : 'stop';
   
       await writeEvent({
         id: completionId,

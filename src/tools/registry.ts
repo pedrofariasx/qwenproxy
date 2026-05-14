@@ -29,11 +29,11 @@ export class ToolRegistry {
    * @param strict      When true, additionalProperties:false is enforced and
    *                    missing required fields are rejected (default true)
    */
-  register(
+  register<TArgs = any, TResult = any>(
     name: string,
     description: string,
     parameters: JsonSchema,
-    handler: ToolHandler,
+    handler: ToolHandler<TArgs, TResult>,
     strict = true
   ): void {
     if (this.tools.has(name)) {
@@ -50,7 +50,7 @@ export class ToolRegistry {
       description,
       parameters: enforcedParams,
       strict,
-      handler,
+      handler: handler as ToolHandler,
     });
   }
 

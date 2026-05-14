@@ -65,10 +65,10 @@ export interface ToolRegistration {
  * Receives the parsed and validated arguments.
  * Returns the result as a string (or object that will be JSON-stringified).
  */
-export type ToolHandler = (
-  args: Record<string, unknown>,
+export type ToolHandler<TArgs = any, TResult = any> = (
+  args: TArgs,
   context: ToolContext
-) => Promise<unknown>;
+) => Promise<TResult>;
 
 /**
  * Context passed to tool handlers during execution.
@@ -80,6 +80,8 @@ export interface ToolContext {
   turn: number;
   /** The model being used */
   model: string;
+  /** Custom state or services can be attached here */
+  [key: string]: any;
 }
 
 /**

@@ -10,7 +10,7 @@ export function robustParseJSON(str: string): any {
   // Remove markdown code blocks if present
   sanitized = sanitized.replace(/^```json\s*/, '').replace(/```$/, '').trim();
 
-  // Try to find the first '{' and last '}'
+  // Try to find the first '{'
   const firstBrace = sanitized.indexOf('{');
   if (firstBrace === -1) return null;
 
@@ -23,61 +23,109 @@ export function robustParseJSON(str: string): any {
     // If it fails, let's try to fix common issues
   }
 
-  // Attempt to fix missing closing braces
-  let tempJson = jsonPart;
+  // 1. Clean trailing noise from the end of the string
+  let cleaned = jsonPart.trim();
+  while (cleaned.length > 0 && !/[}\]"0-9a-z]/i.test(cleaned[cleaned.length - 1])) {
+    cleaned = cleaned.slice(0, -1).trim();
+  }
+
+  // 2. Pre-process to escape control characters in strings and count braces
+  let fixedJson = '';
   let openBraces = 0;
+  let openBrackets = 0;
   let inString = false;
   let escaped = false;
+  let lastBalancedIndex = -1;
 
-  for (let i = 0; i < tempJson.length; i++) {
-    const char = tempJson[i];
+  for (let i = 0; i < cleaned.length; i++) {
+    const char = cleaned[i];
+    
     if (escaped) {
+      fixedJson += char;
       escaped = false;
       continue;
     }
+    
     if (char === '\\') {
+      fixedJson += char;
       escaped = true;
       continue;
     }
+    
     if (char === '"') {
       inString = !inString;
+      fixedJson += char;
       continue;
     }
-    if (!inString) {
+    
+    if (inString) {
+      // Escape literal control characters that are invalid in JSON strings
+      if (char === '\n') fixedJson += '\\n';
+      else if (char === '\r') fixedJson += '\\r';
+      else if (char === '\t') fixedJson += '\\t';
+      else if (char.charCodeAt(0) < 32) {
+        fixedJson += '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0');
+      }
+      else fixedJson += char;
+    } else {
+      fixedJson += char;
       if (char === '{') openBraces++;
       if (char === '}') openBraces--;
+      if (char === '[') openBrackets++;
+      if (char === ']') openBrackets--;
+      
+      if (openBraces === 0 && openBrackets === 0 && i > 0) {
+        lastBalancedIndex = fixedJson.length - 1;
+      }
     }
   }
 
-  // Append missing closing braces
-  if (openBraces > 0) {
-    tempJson += '}'.repeat(openBraces);
+  let tempJson = fixedJson;
+
+  // If we found a point where it was balanced and there is trailing noise or it didn't stay balanced
+  if (lastBalancedIndex !== -1 && (openBraces !== 0 || openBrackets !== 0 || fixedJson.length > lastBalancedIndex + 1)) {
+    tempJson = fixedJson.substring(0, lastBalancedIndex + 1);
+  } else if (openBraces > 0 || openBrackets > 0) {
+    // If it never balanced, attempt to close everything that is open
+    if (openBrackets > 0) tempJson += ']'.repeat(openBrackets);
+    if (openBraces > 0) tempJson += '}'.repeat(openBraces);
   }
 
   try {
     return JSON.parse(tempJson);
   } catch (e) {
-    // Still fails, try one more aggressive approach: find the last valid JSON structure
-    // This is a bit complex, but for now let's just try to remove trailing comma if present before appending braces
-    let aggressiveJson = jsonPart.trim();
-    if (aggressiveJson.endsWith(',')) {
-      aggressiveJson = aggressiveJson.slice(0, -1);
-    }
+    // Still fails, try one more aggressive approach: remove trailing comma before closing
+    let aggressive = fixedJson.trim();
+    if (aggressive.endsWith(',')) aggressive = aggressive.slice(0, -1);
     
-    // Recalculate braces for the aggressive version
-    let openB = 0;
-    let inS = false;
-    for (let i = 0; i < aggressiveJson.length; i++) {
-      if (aggressiveJson[i] === '"' && (i === 0 || aggressiveJson[i-1] !== '\\')) inS = !inS;
-      if (!inS) {
-        if (aggressiveJson[i] === '{') openB++;
-        if (aggressiveJson[i] === '}') openB--;
+    // Recount for the aggressive version
+    let ob = 0, bk = 0, is = false, esc = false;
+    let aggFixed = '';
+    for (let i = 0; i < aggressive.length; i++) {
+      const char = aggressive[i];
+      if (esc) { aggFixed += char; esc = false; continue; }
+      if (char === '\\') { aggFixed += char; esc = true; continue; }
+      if (char === '"') { is = !is; aggFixed += char; continue; }
+      
+      if (is) {
+        if (char === '\n') aggFixed += '\\n';
+        else if (char === '\r') aggFixed += '\\r';
+        else if (char === '\t') aggFixed += '\\t';
+        else aggFixed += char;
+      } else {
+        aggFixed += char;
+        if (char === '{') ob++;
+        if (char === '}') ob--;
+        if (char === '[') bk++;
+        if (char === ']') bk--;
       }
     }
-    if (openB > 0) aggressiveJson += '}'.repeat(openB);
+    
+    if (bk > 0) aggFixed += ']'.repeat(bk);
+    if (ob > 0) aggFixed += '}'.repeat(ob);
     
     try {
-      return JSON.parse(aggressiveJson);
+      return JSON.parse(aggFixed);
     } catch (e2) {
       throw e; // Throw original error if all fixes fail
     }

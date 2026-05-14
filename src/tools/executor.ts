@@ -94,44 +94,41 @@ export async function executeToolCalls(
   toolCalls: ParsedToolCall[],
   context: ToolContext
 ): Promise<ToolCallResult[]> {
-  const results: ToolCallResult[] = [];
+  return await Promise.all(
+    toolCalls.map(async (tc) => {
+      try {
+        if (!registry.has(tc.name)) {
+          return {
+            toolCallId: tc.id,
+            name: tc.name,
+            result: JSON.stringify({ error: `Unknown tool: '${tc.name}'` }),
+            isError: true,
+          };
+        }
 
-  for (const tc of toolCalls) {
-    try {
-      if (!registry.has(tc.name)) {
-        results.push({
+        const result = await registry.execute(tc.name, tc.arguments, context);
+        return {
           toolCallId: tc.id,
           name: tc.name,
-          result: JSON.stringify({ error: `Unknown tool: '${tc.name}'` }),
+          result,
+          isError: false,
+        };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        const isValidation = err instanceof SchemaValidationError;
+        return {
+          toolCallId: tc.id,
+          name: tc.name,
+          result: JSON.stringify({
+            error: isValidation ? 'Schema validation failed' : 'Tool execution error',
+            details: message,
+            ...(isValidation ? { path: (err as SchemaValidationError).path } : {}),
+          }),
           isError: true,
-        });
-        continue;
+        };
       }
-
-      const result = await registry.execute(tc.name, tc.arguments, context);
-      results.push({
-        toolCallId: tc.id,
-        name: tc.name,
-        result,
-        isError: false,
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      const isValidation = err instanceof SchemaValidationError;
-      results.push({
-        toolCallId: tc.id,
-        name: tc.name,
-        result: JSON.stringify({
-          error: isValidation ? 'Schema validation failed' : 'Tool execution error',
-          details: message,
-          ...(isValidation ? { path: (err as SchemaValidationError).path } : {}),
-        }),
-        isError: true,
-      });
-    }
-  }
-
-  return results;
+    })
+  );
 }
 
 function buildToolMessage(result: ToolCallResult): Record<string, unknown> {
