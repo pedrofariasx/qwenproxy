@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
+import { resetHybridConversationState } from './services/qwen.ts';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 
@@ -22,7 +23,8 @@ function setupFetchMock(handler: (url: string, init?: RequestInit) => Response |
   return () => { globalThis.fetch = originalFetch; };
 }
 
-test('multiturn-thinking-tools: maintains reasoning_content history', async () => {
+test('multiturn-thinking-tools: preserves conversation history in fresh chat mode', async () => {
+  resetHybridConversationState();
   let capturedPrompt = '';
 
   const restore = setupFetchMock((url, init) => {
@@ -55,17 +57,17 @@ test('multiturn-thinking-tools: maintains reasoning_content history', async () =
     const res = await app.fetch(req);
     assert.strictEqual(res.status, 200);
 
-    // Validate that only the last message is sent (as requested by user)
-    // In this case, the last message is the tool response
+    assert.ok(capturedPrompt.includes('User: hello'), 'Must include previous user message');
     assert.ok(capturedPrompt.includes('Tool Response (test): success'), 'Must include tool response signature');
-    assert.ok(!capturedPrompt.includes('<think>\nthinking about hello\n</think>'), 'Should not include previous thinking');
-    assert.ok(!capturedPrompt.includes('<tool_call>{"name": "test", "arguments": {}}</tool_call>'), 'Should not include previous tool call');
+    assert.ok(capturedPrompt.includes('<think>\nthinking about hello\n</think>'), 'Should include previous thinking');
+    assert.ok(capturedPrompt.includes('<tool_call>{"name": "test", "arguments": {}}</tool_call>'), 'Should include previous tool call');
   } finally {
     restore();
   }
 });
 
 test('streaming-whitespace: preserves exact whitespace', async () => {
+  resetHybridConversationState();
   const restore = setupFetchMock((url) => {
     const stream = new ReadableStream({
       start(c) {
@@ -114,6 +116,7 @@ test('streaming-whitespace: preserves exact whitespace', async () => {
 });
 
 test('caching-streaming and cache-control: returns prompt_tokens_details', async () => {
+  resetHybridConversationState();
   const restore = setupFetchMock((url) => {
     const stream = new ReadableStream({
       start(c) {
@@ -161,19 +164,20 @@ test('caching-streaming and cache-control: returns prompt_tokens_details', async
   }
 });
 
-test('session-parent-tracking: appends messages using response message_id as parent', async () => {
-  let capturedPayloads: any[] = [];
+test('headerless-requests: rebuild full history instead of reusing Qwen chat state', async () => {
+  resetHybridConversationState();
+  let capturedPayloads: unknown[] = [];
+  let capturedUrls: string[] = [];
 
   const restore = setupFetchMock((url, init) => {
+    capturedUrls.push(url);
     const bodyObj = JSON.parse(init?.body as string || '{}');
     capturedPayloads.push(bodyObj);
     
-    // Simulate Qwen returning a response_id
-    const mockMessageId = capturedPayloads.length === 1 ? 'qwen-1001' : 'qwen-1002';
-    
     const stream = new ReadableStream({
       start(c) {
-        c.enqueue(new TextEncoder().encode(`data: {"response.created":{"response_id":"${mockMessageId}"}}\n\n`));
+        c.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-1"}}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Response 1"}}]}\n\n'));
         c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
         c.close();
       }
@@ -182,7 +186,8 @@ test('session-parent-tracking: appends messages using response message_id as par
   });
 
   try {
-    process.env.TEST_SESSION_ID = 'test-session-parent-tracking';
+    process.env.TEST_SESSION_ID = 'fresh-chat-session';
+
     // Turn 1
     const req1 = new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
@@ -195,7 +200,7 @@ test('session-parent-tracking: appends messages using response message_id as par
     
     const res1 = await app.fetch(req1);
     assert.strictEqual(res1.status, 200);
-    // Consume the stream to ensure the message_id is processed
+    // Consume the stream to complete the request lifecycle
     await res1.text();
 
     // Turn 2
@@ -217,12 +222,221 @@ test('session-parent-tracking: appends messages using response message_id as par
     await res2.text();
 
     assert.strictEqual(capturedPayloads.length, 2);
-    // In Turn 1, parent_id should be null (mock-session is fresh)
-    assert.strictEqual(capturedPayloads[0].parent_id, null);
-    // In Turn 2, parent_id should be qwen-1001 (the ID returned in Turn 1)
-    assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-1001', 'Turn 2 should use response_id from Turn 1 as parent');
-    assert.strictEqual(capturedPayloads[1].messages[0].content, 'User: Turn 2\n\n', 'Should only send the last message');
+    assert.strictEqual(capturedUrls.length, 2);
+    const firstPayload = capturedPayloads[0] as { parent_id: string | null; chat_id: string | null; messages: Array<{ content: string }> };
+    const secondPayload = capturedPayloads[1] as { parent_id: string | null; chat_id: string | null; messages: Array<{ content: string }> };
+
+    assert.strictEqual(firstPayload.parent_id, null);
+    assert.strictEqual(firstPayload.chat_id, 'fresh-chat-session');
+    assert.strictEqual(secondPayload.parent_id, null);
+    assert.strictEqual(secondPayload.chat_id, 'fresh-chat-session');
+    assert.ok(capturedUrls[0].includes('chat_id=fresh-chat-session'));
+    assert.ok(capturedUrls[1].includes('chat_id=fresh-chat-session'));
+    assert.strictEqual(
+      secondPayload.messages[0].content,
+      'User: Turn 1\n\nAssistant: Response 1\n\nUser: Turn 2\n\n',
+      'Should rebuild the full conversation when no explicit chat key exists'
+    );
   } finally {
+    delete process.env.TEST_SESSION_ID;
+    restore();
+  }
+});
+
+test('explicit-chat-key: reuses the same Qwen chat and sends only the delta', async () => {
+  resetHybridConversationState();
+  let capturedPayloads: unknown[] = [];
+
+  const restore = setupFetchMock((url, init) => {
+    const bodyObj = JSON.parse(init?.body as string || '{}');
+    capturedPayloads.push(bodyObj);
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const responseId = capturedPayloads.length === 1 ? 'qwen-parent-1' : 'qwen-parent-2';
+        controller.enqueue(new TextEncoder().encode(`data: {"response.created":{"response_id":"${responseId}"}}\n\n`));
+        controller.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Response"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'explicit-chat-session';
+
+    const baseHeaders = {
+      'Content-Type': 'application/json',
+      'x-opencode-chat-key': 'fixed-session:nexus:qwen-local:qwen3.6-plus'
+    };
+
+    const req1 = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: baseHeaders,
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'Turn 1' }]
+      })
+    });
+
+    const res1 = await app.fetch(req1);
+    assert.strictEqual(res1.status, 200);
+    await res1.text();
+
+    const req2 = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: baseHeaders,
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [
+          { role: 'user', content: 'Turn 1' },
+          { role: 'assistant', content: 'Response' },
+          { role: 'user', content: 'Turn 2' }
+        ]
+      })
+    });
+
+    const res2 = await app.fetch(req2);
+    assert.strictEqual(res2.status, 200);
+    await res2.text();
+
+    const firstPayload = capturedPayloads[0] as { parent_id: string | null; messages: Array<{ content: string }> };
+    const secondPayload = capturedPayloads[1] as { parent_id: string | null; messages: Array<{ content: string }> };
+
+    assert.strictEqual(firstPayload.parent_id, null);
+    assert.strictEqual(firstPayload.messages[0].content, 'User: Turn 1\n\n');
+    assert.strictEqual(secondPayload.parent_id, 'qwen-parent-1');
+    assert.strictEqual(secondPayload.messages[0].content, 'User: Turn 2\n\n');
+  } finally {
+    delete process.env.TEST_SESSION_ID;
+    restore();
+  }
+});
+
+test('json-error-response: returns a clear server error when Qwen does not stream', async () => {
+  resetHybridConversationState();
+  const restore = setupFetchMock(() => {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        data: {
+          code: 'RequestValidationError',
+          details: 'chat_id is required'
+        }
+      }),
+      {
+        status: 200,
+        headers: {
+          'content-type': 'application/json'
+        }
+      }
+    );
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'Oi' }]
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 500);
+
+    const body = await res.json();
+    assert.match(body.error.message, /Qwen returned JSON instead of stream/);
+  } finally {
+    restore();
+  }
+});
+
+test('hybrid-retry: retries when Qwen rate limits a reused chat before emitting content', async () => {
+  resetHybridConversationState();
+  let callCount = 0;
+
+  const restore = setupFetchMock(() => {
+    callCount += 1;
+
+    if (callCount === 2) {
+      const rateLimitedStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-1"}}\n\n'));
+          controller.enqueue(new TextEncoder().encode('data: {"error":{"code":"internal_error","details":"Request rate increased too quickly. To ensure system stability, please adjust your client logic to scale requests more smoothly over time."},"response_id":"qwen-parent-1"}\n\n'));
+          controller.close();
+        }
+      });
+
+      return new Response(rateLimitedStream, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' }
+      });
+    }
+
+    const successStream = new ReadableStream({
+      start(controller) {
+        const responseId = callCount === 1 ? 'qwen-parent-1' : 'qwen-parent-2';
+        controller.enqueue(new TextEncoder().encode(`data: {"response.created":{"response_id":"${responseId}"}}\n\n`));
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"Resposta final"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    return new Response(successStream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' }
+    });
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'fresh-chat-session';
+
+    const req1 = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-opencode-chat-key': 'fixed-session:nexus:qwen-local:qwen3.6-plus'
+      },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'Primeiro turno' }]
+      })
+    });
+
+    const res1 = await app.fetch(req1);
+    assert.strictEqual(res1.status, 200);
+    await res1.text();
+
+    const req2 = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-opencode-chat-key': 'fixed-session:nexus:qwen-local:qwen3.6-plus'
+      },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [
+          { role: 'user', content: 'Primeiro turno' },
+          { role: 'assistant', content: 'Resposta 1' },
+          { role: 'user', content: 'Segundo turno' }
+        ],
+        stream: true
+      })
+    });
+
+    const res2 = await app.fetch(req2);
+    assert.strictEqual(res2.status, 200);
+
+    const bodyText = await res2.text();
+    assert.match(bodyText, /Resposta final/);
+    assert.strictEqual(callCount, 3);
+  } finally {
+    delete process.env.TEST_SESSION_ID;
     restore();
   }
 });

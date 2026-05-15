@@ -8,13 +8,207 @@
 import { getQwenHeaders, getBasicHeaders } from './playwright.ts';
 import { v4 as uuidv4 } from 'uuid';
 
-const sessionStates: Record<string, string | null> = (globalThis as any)._sessionStates || {};
-(globalThis as any)._sessionStates = sessionStates;
+function isDebugEnabled(): boolean {
+  return process.env.DEBUG_QWEN_PROXY === '1';
+}
 
-export function updateSessionParent(sessionId: string, parentId: string | null) {
-  if (sessionId) {
-    sessionStates[sessionId] = parentId;
+const HYBRID_SESSION_TTL_MS = 30 * 60 * 1000;
+const HYBRID_CHAT_COOLDOWN_MS = 1000;
+
+interface HybridConversationState {
+  key: string;
+  modelId: string;
+  systemPrompt: string;
+  messageEntries: string[];
+  chatSessionId: string;
+  parentMessageId: string | null;
+  updatedAt: number;
+}
+
+interface HybridRequestGateState {
+  tail: Promise<void>;
+  releaseAt: number;
+}
+
+export interface HybridConversationPlan {
+  key: string;
+  prompt: string;
+  chatSessionId: string | null;
+  parentMessageId: string | null;
+  reusedSession: boolean;
+}
+
+export interface CreateQwenStreamOptions {
+  chatSessionId: string | null;
+  parentMessageId: string | null;
+  forceFreshChat: boolean;
+  pageKey?: string | null;
+}
+
+const hybridConversationStates = new Map<string, HybridConversationState>();
+const hybridRequestGates = new Map<string, HybridRequestGateState>();
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function resetHybridConversationState(): void {
+  hybridConversationStates.clear();
+  hybridRequestGates.clear();
+}
+
+function pruneHybridConversationStates(): void {
+  const now = Date.now();
+
+  for (const [key, state] of hybridConversationStates.entries()) {
+    if (now - state.updatedAt > HYBRID_SESSION_TTL_MS) {
+      hybridConversationStates.delete(key);
+    }
   }
+}
+
+function isExactPrefix(source: string[], target: string[]): boolean {
+  if (source.length > target.length) {
+    return false;
+  }
+
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] !== target[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export function prepareHybridConversation(
+  conversationKey: string | null,
+  modelId: string,
+  systemPrompt: string,
+  messageEntries: string[]
+): HybridConversationPlan {
+  pruneHybridConversationStates();
+
+  if (!conversationKey) {
+    return {
+      key: uuidv4(),
+      prompt: `${systemPrompt}${messageEntries.join('')}`,
+      chatSessionId: null,
+      parentMessageId: null,
+      reusedSession: false,
+    };
+  }
+
+  const existingState = hybridConversationStates.get(conversationKey);
+
+  if (!existingState) {
+    return {
+      key: conversationKey,
+      prompt: `${systemPrompt}${messageEntries.join('')}`,
+      chatSessionId: null,
+      parentMessageId: null,
+      reusedSession: false,
+    };
+  }
+
+  const isCompatibleConversation =
+    existingState.modelId === modelId &&
+    existingState.systemPrompt === systemPrompt &&
+    isExactPrefix(existingState.messageEntries, messageEntries) &&
+    existingState.messageEntries.length < messageEntries.length;
+
+  if (!isCompatibleConversation) {
+    hybridConversationStates.delete(conversationKey);
+
+    return {
+      key: conversationKey,
+      prompt: `${systemPrompt}${messageEntries.join('')}`,
+      chatSessionId: null,
+      parentMessageId: null,
+      reusedSession: false,
+    };
+  }
+
+  const deltaEntries = messageEntries.slice(existingState.messageEntries.length);
+
+  return {
+    key: existingState.key,
+    prompt: deltaEntries.join(''),
+    chatSessionId: existingState.chatSessionId,
+    parentMessageId: existingState.parentMessageId,
+    reusedSession: true,
+  };
+}
+
+export function finalizeHybridConversation(
+  key: string,
+  modelId: string,
+  systemPrompt: string,
+  messageEntries: string[],
+  chatSessionId: string,
+  parentMessageId: string | null
+): void {
+  hybridConversationStates.set(key, {
+    key,
+    modelId,
+    systemPrompt,
+    messageEntries,
+    chatSessionId,
+    parentMessageId,
+    updatedAt: Date.now(),
+  });
+}
+
+export async function acquireHybridRequestWindow(
+  key: string,
+  reusedSession: boolean
+): Promise<() => void> {
+  if (!reusedSession) {
+    return () => undefined;
+  }
+
+  const currentGate = hybridRequestGates.get(key) ?? {
+    tail: Promise.resolve(),
+    releaseAt: 0,
+  };
+
+  let releaseGate!: () => void;
+  const nextTail = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+
+  hybridRequestGates.set(key, {
+    tail: currentGate.tail.then(() => nextTail),
+    releaseAt: currentGate.releaseAt,
+  });
+
+  await currentGate.tail;
+
+  const latestGate = hybridRequestGates.get(key);
+  const releaseAt = latestGate?.releaseAt ?? 0;
+  const waitMs = Math.max(0, releaseAt - Date.now());
+
+  if (waitMs > 0) {
+    await delay(waitMs);
+  }
+
+  return () => {
+    releaseGate();
+  };
+}
+
+export function markHybridRequestCooldown(key: string, reusedSession: boolean): void {
+  if (!reusedSession) {
+    return;
+  }
+
+  const gate = hybridRequestGates.get(key);
+  if (!gate) {
+    return;
+  }
+
+  gate.releaseAt = Date.now() + HYBRID_CHAT_COOLDOWN_MS;
+  hybridRequestGates.set(key, gate);
 }
 
 export interface QwenMessage {
@@ -61,8 +255,8 @@ export interface QwenPayload {
 let cachedModels: any[] | null = null;
 let lastModelsFetch = 0;
 
-export async function disableNativeTools(): Promise<void> {
-  const { headers } = await getQwenHeaders();
+export async function disableNativeTools(preloadedHeaders?: Record<string, string>): Promise<void> {
+  const headers = preloadedHeaders ?? (await getQwenHeaders()).headers;
   
   const payload = {
     tools_enabled: {
@@ -161,34 +355,34 @@ export async function createQwenStream(
   prompt: string, 
   enableThinking: boolean, 
   modelId: string,
-  forcedParentId?: string | null
-): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string }> {
-  const { headers, chatSessionId, parentMessageId } = await getQwenHeaders(forcedParentId === null);
-
-  let actualParentId: string | null = parentMessageId;
-  
-  if (forcedParentId !== undefined) {
-    actualParentId = forcedParentId;
-  } else if (chatSessionId && sessionStates[chatSessionId] !== undefined) {
-    actualParentId = sessionStates[chatSessionId];
-  }
+  options: CreateQwenStreamOptions
+): Promise<{ stream: ReadableStream; headers: Record<string, string>; chatSessionId: string }> {
+  const shouldCreateFreshChat = options.forceFreshChat || !options.chatSessionId;
+  const headerSession = await getQwenHeaders(shouldCreateFreshChat, options.pageKey);
+  const headers = headerSession.headers;
+  const chatSessionId = shouldCreateFreshChat ? headerSession.chatSessionId : options.chatSessionId;
 
   const timestamp = Math.floor(Date.now() / 1000);
   const fid = uuidv4();
   const model = modelId.replace('-no-thinking', '');
+  const parentMessageId = shouldCreateFreshChat ? null : options.parentMessageId;
+
+  if (!chatSessionId) {
+    throw new Error('Failed to obtain a fresh Qwen chat_id for this request');
+  }
 
   const payload: QwenPayload = {
     stream: true,
     version: '2.1',
     incremental_output: true,
-    chat_id: chatSessionId || null,
+    chat_id: chatSessionId,
     chat_mode: 'normal',
     model: model,
-    parent_id: actualParentId,
+    parent_id: parentMessageId,
     messages: [
       {
         fid: fid,
-        parentId: actualParentId,
+        parentId: parentMessageId,
         childrenIds: [],
         role: 'user',
         content: prompt,
@@ -212,15 +406,13 @@ export async function createQwenStream(
           }
         },
         sub_chat_type: 't2t',
-        parent_id: actualParentId
+        parent_id: parentMessageId
       }
     ],
     timestamp: timestamp + 1
   };
 
-  const url = chatSessionId 
-    ? `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatSessionId}`
-    : 'https://chat.qwen.ai/api/v2/chat/completions';
+  const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${encodeURIComponent(chatSessionId)}`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -230,7 +422,7 @@ export async function createQwenStream(
       'content-type': 'application/json',
       'cookie': headers['cookie'],
       'origin': 'https://chat.qwen.ai',
-      'referer': chatSessionId ? `https://chat.qwen.ai/c/${chatSessionId}` : 'https://chat.qwen.ai/',
+      'referer': 'https://chat.qwen.ai/',
       'sec-fetch-dest': 'empty',
       'sec-fetch-mode': 'cors',
       'sec-fetch-site': 'same-origin',
@@ -245,10 +437,27 @@ export async function createQwenStream(
     body: JSON.stringify(payload)
   });
 
+  if (isDebugEnabled()) {
+    console.log('[Qwen][Debug] Response status:', response.status, response.statusText);
+    console.log('[Qwen][Debug] Response content-type:', response.headers.get('content-type'));
+  }
+
+  const responseContentType = response.headers.get('content-type') || '';
+
+  if (responseContentType.includes('application/json')) {
+    const responseText = await response.text();
+
+    if (isDebugEnabled()) {
+      console.log('[Qwen][Debug] JSON response body:', responseText);
+    }
+
+    throw new Error(`Qwen returned JSON instead of stream: ${responseText}`);
+  }
+
   if (!response.ok || !response.body) {
     const errText = await response.text().catch(() => '');
     throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
   }
 
-  return { stream: response.body, headers, uiSessionId: chatSessionId };
+  return { stream: response.body, headers, chatSessionId };
 }

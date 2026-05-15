@@ -11,12 +11,23 @@
 import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
+import {
+  acquireHybridRequestWindow,
+  createQwenStream,
+  finalizeHybridConversation,
+  markHybridRequestCooldown,
+  prepareHybridConversation,
+} from '../services/qwen.ts';
 import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
 import { registry } from '../tools/registry.ts';
 import type { FunctionToolDefinition } from '../tools/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
+import type { ParsedToolCall } from '../tools/types.ts';
+
+function isDebugEnabled(): boolean {
+  return process.env.DEBUG_QWEN_PROXY === '1';
+}
 
 function getIncrementalDelta(oldStr: string, newStr: string): string {
   if (!oldStr) return newStr;
@@ -26,48 +37,115 @@ function getIncrementalDelta(oldStr: string, newStr: string): string {
   return newStr;
 }
 
+type MessageContentPart = {
+  text?: string;
+};
+
+function serializeMessageContent(content: Message['content']): string {
+  if (Array.isArray(content)) {
+    return content
+      .map((part: MessageContentPart | unknown) => {
+        if (typeof part === 'object' && part !== null && 'text' in part) {
+          const typedPart = part as MessageContentPart;
+          return typedPart.text || JSON.stringify(part);
+        }
+
+        return JSON.stringify(part);
+      })
+      .join('\n');
+  }
+
+  if (typeof content === 'object' && content !== null) {
+    return JSON.stringify(content);
+  }
+
+  return content || '';
+}
+
+function formatConversationMessage(msg: Message, content: string): string {
+  if (msg.role === 'user') {
+    return `User: ${content}\n\n`;
+  }
+
+  if (msg.role === 'assistant') {
+    let assistantContent = content;
+
+    if (msg.reasoning_content) {
+      assistantContent = `<think>\n${msg.reasoning_content}\n</think>\n${assistantContent}`;
+    }
+
+    if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+      for (const toolCall of msg.tool_calls) {
+        let args = toolCall.function?.arguments || '{}';
+        if (typeof args !== 'string') {
+          args = JSON.stringify(args);
+        }
+
+        assistantContent += `\n<tool_call>{"name": "${toolCall.function?.name}", "arguments": ${args}}</tool_call>`;
+      }
+    }
+
+    return `Assistant: ${assistantContent.trim()}\n\n`;
+  }
+
+  if (msg.role === 'tool' || msg.role === 'function') {
+    return `Tool Response (${msg.name || 'tool'}): ${content}\n\n`;
+  }
+
+  return `${msg.role}: ${content}\n\n`;
+}
+
+function getOpencodeChatKey(c: Context): string | null {
+  const chatKey = c.req.header('x-opencode-chat-key');
+  if (!chatKey) {
+    return null;
+  }
+
+  const normalizedChatKey = chatKey.trim();
+  return normalizedChatKey.length > 0 ? normalizedChatKey : null;
+}
+
+class RetryableQwenStreamError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(message: string, retryAfterMs: number) {
+    super(message);
+    this.name = 'RetryableQwenStreamError';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function isQwenRateLimitError(chunk: unknown): chunk is { error: { details?: string } } {
+  if (typeof chunk !== 'object' || chunk === null || !('error' in chunk)) {
+    return false;
+  }
+
+  const errorValue = (chunk as { error?: unknown }).error;
+  if (typeof errorValue !== 'object' || errorValue === null) {
+    return false;
+  }
+
+  const details = (errorValue as { details?: unknown }).details;
+  return typeof details === 'string' && details.includes('Request rate increased too quickly');
+}
+
 export async function chatCompletions(c: Context) {
   try {
     const body: OpenAIRequest = await c.req.json();
     const isStream = body.stream ?? false;
     
     // Extract the prompt
-    let prompt = '';
     const messages = body.messages || [];
     let systemPrompt = '';
+    const messageEntries: string[] = [];
     
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      let contentStr = '';
-      if (Array.isArray(msg.content)) {
-        contentStr = msg.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
-      } else if (typeof msg.content === 'object' && msg.content !== null) {
-        contentStr = JSON.stringify(msg.content);
-      } else {
-        contentStr = msg.content || '';
-      }
+    for (const msg of messages) {
+      const contentStr = serializeMessageContent(msg.content);
 
       if (msg.role === 'system') {
         systemPrompt += contentStr + '\n\n';
-      } else if (i === messages.length - 1) {
-        if (msg.role === 'user') {
-          prompt += `User: ${contentStr}\n\n`;
-        } else if (msg.role === 'assistant') {
-          let assistantContent = contentStr;
-          if ((msg as any).reasoning_content) {
-            assistantContent = `<think>\n${(msg as any).reasoning_content}\n</think>\n${assistantContent}`;
-          }
-          if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-             for (const tc of msg.tool_calls) {
-               let args = tc.function?.arguments || '{}';
-               if (typeof args !== 'string') args = JSON.stringify(args);
-               assistantContent += `\n<tool_call>{"name": "${tc.function?.name}", "arguments": ${args}}</tool_call>`;
-             }
-          }
-          prompt += `Assistant: ${assistantContent.trim()}\n\n`;
-        } else if (msg.role === 'tool' || msg.role === 'function') {
-          prompt += `Tool Response (${msg.name || 'tool'}): ${contentStr}\n\n`;
-        }
+      } else {
+        messageEntries.push(formatConversationMessage(msg, contentStr));
       }
     }
 
@@ -95,31 +173,30 @@ export async function chatCompletions(c: Context) {
       }
     }
 
-    const finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
+    const opencodeChatKey = getOpencodeChatKey(c);
+    const conversationPlan = prepareHybridConversation(opencodeChatKey, body.model, systemPrompt, messageEntries);
+    const finalPrompt = conversationPlan.prompt;
+    const releaseHybridWindow = await acquireHybridRequestWindow(
+      conversationPlan.key,
+      conversationPlan.reusedSession,
+    );
 
     const isThinkingModel = !body.model.includes('no-thinking');
-    
-    // A session is new if it doesn't have any assistant messages yet.
-    // This handles cases where the first request has [System, User] messages.
-    const isNewSession = !messages.some(m => m.role === 'assistant');
 
-    // Empty response retry logic
-    let stream: ReadableStream;
-    let uiSessionId = '';
-    let retries = 3;
-    while (retries > 0) {
-      try {
-        // If it's a new session, force parent_message_id to null
-        const result = await createQwenStream(finalPrompt, isThinkingModel, body.model, isNewSession ? null : undefined);
-        stream = result.stream;
-        uiSessionId = result.uiSessionId;
-        break; // Success
-      } catch (err: any) {
-        retries--;
-        if (retries === 0) throw err;
-        // Wait a bit before retrying
-        await new Promise(r => setTimeout(r, 1000));
-      }
+    const streamOptions = {
+      chatSessionId: conversationPlan.chatSessionId,
+      parentMessageId: conversationPlan.parentMessageId,
+      forceFreshChat: !conversationPlan.reusedSession,
+      pageKey: opencodeChatKey,
+    };
+
+    let initialStreamResult: Awaited<ReturnType<typeof createQwenStream>>;
+    try {
+      initialStreamResult = await createQwenStream(finalPrompt, isThinkingModel, body.model, streamOptions);
+    } catch (error) {
+      markHybridRequestCooldown(conversationPlan.key, conversationPlan.reusedSession);
+      releaseHybridWindow();
+      throw error;
     }
 
     c.header('Content-Type', 'text/event-stream');
@@ -148,144 +225,202 @@ export async function chatCompletions(c: Context) {
         model: body.model,
         choices: [makeChoice({ role: 'assistant', content: '' })]
       });
-
-      const reader = stream.getReader();
-      const decoder = new TextDecoder();
       
       let inThinkingState = false;
-      let thinkingFragments: Record<string, boolean> = {};
       let currentThoughtIndex = 0;
-      let currentAppendPath = '';
       
       let reasoningBuffer = '';
+      let assistantContentBuffer = '';
+      const emittedToolCalls: ParsedToolCall[] = [];
+      let latestResponseId: string | null = conversationPlan.parentMessageId;
       let lastFullContent = '';
       const toolParser = new StreamingToolParser();
 
       let buffer = '';
       let completionTokens = 0;
       let promptTokens = Math.ceil(finalPrompt.length / 3.5);
+      let debugChunkCount = 0;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      let activeChatSessionId = conversationPlan.chatSessionId;
+      let streamDoneSent = false;
+      let fetchAttempt = 1;
+      const maxFetchAttempts = 4;
+      let currentStream = initialStreamResult.stream;
+      activeChatSessionId = initialStreamResult.chatSessionId;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data: ')) continue;
-          
-          const dataStr = trimmed.slice(6);
-          if (dataStr === '[DONE]') {
-            await streamWriter.write('data: [DONE]\n\n');
-            continue;
-          }
-
+      try {
+        while (fetchAttempt <= maxFetchAttempts) {
           try {
-            const chunk = JSON.parse(dataStr);
+            const reader = currentStream.getReader();
+            const decoder = new TextDecoder();
 
-            // Extract response_id for session tracking
-            if (chunk['response.created'] && chunk['response.created'].response_id) {
-              updateSessionParent(uiSessionId, chunk['response.created'].response_id);
-            } else if (chunk.response_id) {
-              updateSessionParent(uiSessionId, chunk.response_id);
-            }
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
 
-            if (chunk.usage) {
-              if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
-              if (chunk.usage.input_tokens) promptTokens = chunk.usage.input_tokens;
-            }
+              buffer += decoder.decode(value, { stream: true });
 
-            let vStr = '';
-            let foundStr = false;
-            let isThinkingChunk = false;
+              if (isDebugEnabled() && debugChunkCount < 5) {
+                console.log(`[Qwen][Debug] Raw chunk ${debugChunkCount + 1}:`, JSON.stringify(buffer.slice(0, 1200)));
+                debugChunkCount++;
+              }
 
-            if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
-              const delta = chunk.choices[0].delta;
-              
-              if (delta.phase === 'thinking_summary') {
-                isThinkingChunk = true;
-                if (delta.extra && delta.extra.summary_thought && delta.extra.summary_thought.content) {
-                  const thoughts = delta.extra.summary_thought.content;
-                  if (thoughts.length > currentThoughtIndex) {
-                    vStr = thoughts.slice(currentThoughtIndex).join('\n');
-                    currentThoughtIndex = thoughts.length;
-                    foundStr = true;
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+                const dataStr = trimmed.slice(6);
+                if (dataStr === '[DONE]') {
+                  continue;
+                }
+
+                let chunk: Record<string, unknown>;
+                try {
+                  chunk = JSON.parse(dataStr) as Record<string, unknown>;
+                } catch {
+                  continue;
+                }
+
+                if (isDebugEnabled() && debugChunkCount <= 5) {
+                  console.log('[Qwen][Debug] Parsed event keys:', Object.keys(chunk));
+                }
+
+                if (isQwenRateLimitError(chunk)) {
+                  const hasVisibleOutput = Boolean(reasoningBuffer || assistantContentBuffer || emittedToolCalls.length > 0);
+
+                  if (!hasVisibleOutput && fetchAttempt < maxFetchAttempts) {
+                    throw new RetryableQwenStreamError(
+                      'Qwen rate limited the conversation reuse; retrying with backoff.',
+                      1200 * fetchAttempt,
+                    );
+                  }
+
+                  throw new Error(chunk.error.details || 'Qwen returned a stream error');
+                }
+
+                if (chunk['response.created'] && typeof chunk['response.created'] === 'object' && chunk['response.created'] !== null) {
+                  const responseCreated = chunk['response.created'] as { response_id?: unknown };
+                  if (typeof responseCreated.response_id === 'string') {
+                    latestResponseId = responseCreated.response_id;
+                  }
+                } else if (typeof chunk.response_id === 'string') {
+                  latestResponseId = chunk.response_id;
+                }
+
+                const usage = chunk.usage as { output_tokens?: number; input_tokens?: number } | undefined;
+                if (usage) {
+                  if (typeof usage.output_tokens === 'number') completionTokens = usage.output_tokens;
+                  if (typeof usage.input_tokens === 'number') promptTokens = usage.input_tokens;
+                }
+
+                let vStr = '';
+                let foundStr = false;
+                let isThinkingChunk = false;
+                const chunkChoices = Array.isArray(chunk.choices) ? chunk.choices : [];
+                const firstChoice = chunkChoices[0] as { delta?: Record<string, unknown> } | undefined;
+
+                if (firstChoice?.delta) {
+                  const delta = firstChoice.delta;
+
+                  if (delta.phase === 'thinking_summary') {
+                    isThinkingChunk = true;
+                    const extra = delta.extra as { summary_thought?: { content?: string[] } } | undefined;
+                    const thoughts = extra?.summary_thought?.content;
+                    if (Array.isArray(thoughts) && thoughts.length > currentThoughtIndex) {
+                      vStr = thoughts.slice(currentThoughtIndex).join('\n');
+                      currentThoughtIndex = thoughts.length;
+                      foundStr = true;
+                    }
+                  } else if (delta.phase === 'answer') {
+                    isThinkingChunk = false;
+                    if (typeof delta.content === 'string') {
+                      const newContent = delta.content;
+                      vStr = getIncrementalDelta(lastFullContent, newContent);
+
+                      if (vStr) {
+                        lastFullContent += vStr;
+                        foundStr = true;
+                      }
+                    }
                   }
                 }
-              } else if (delta.phase === 'answer') {
-                isThinkingChunk = false;
-                if (delta.content !== undefined) {
-                  const newContent = delta.content || '';
-                  vStr = getIncrementalDelta(lastFullContent, newContent);
-                  
-                  if (vStr) {
-                    lastFullContent += vStr;
-                    foundStr = true;
+
+                if (foundStr && vStr !== '') {
+                  if (vStr === 'FINISHED') continue;
+
+                  if (isThinkingChunk) {
+                    inThinkingState = true;
+                    reasoningBuffer += vStr;
+                    await writeEvent({
+                      id: completionId,
+                      object: 'chat.completion.chunk',
+                      created: Math.floor(Date.now() / 1000),
+                      model: body.model,
+                      choices: [makeChoice({ reasoning_content: vStr })]
+                    });
+                  } else {
+                    inThinkingState = false;
+                    const { text, toolCalls } = toolParser.feed(vStr);
+
+                    if (text) {
+                      assistantContentBuffer += text;
+                      await writeEvent({
+                        id: completionId,
+                        object: 'chat.completion.chunk',
+                        created: Math.floor(Date.now() / 1000),
+                        model: body.model,
+                        choices: [makeChoice({ content: text })]
+                      });
+                    }
+
+                    for (const tc of toolCalls) {
+                      emittedToolCalls.push(tc);
+                      await writeEvent({
+                        id: completionId,
+                        object: 'chat.completion.chunk',
+                        created: Math.floor(Date.now() / 1000),
+                        model: body.model,
+                        choices: [makeChoice({
+                          tool_calls: [{
+                            index: toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc),
+                            id: tc.id,
+                            type: 'function',
+                            function: {
+                              name: tc.name,
+                              arguments: JSON.stringify(tc.arguments)
+                            }
+                          }]
+                        })]
+                      });
+                    }
                   }
                 }
               }
             }
 
-            if (foundStr && vStr !== '') {
-              if (vStr === 'FINISHED') continue;
-
-              if (isThinkingChunk) {
-                inThinkingState = true;
-                reasoningBuffer += vStr;
-                await writeEvent({
-                  id: completionId,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: body.model,
-                  choices: [makeChoice({ reasoning_content: vStr })]
-                });
-              } else {
-                inThinkingState = false;
-                const { text, toolCalls } = toolParser.feed(vStr);
-
-                if (text) {
-                  await writeEvent({
-                    id: completionId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: body.model,
-                    choices: [makeChoice({ content: text })]
-                  });
-                }
-
-                for (const tc of toolCalls) {
-                  await writeEvent({
-                    id: completionId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: body.model,
-                    choices: [makeChoice({
-                      tool_calls: [{
-                        index: toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc),
-                        id: tc.id,
-                        type: 'function',
-                        function: {
-                          name: tc.name,
-                          arguments: JSON.stringify(tc.arguments)
-                        }
-                      }]
-                    })]
-                  });
-                }
-              }
+            break;
+          } catch (error) {
+            if (error instanceof RetryableQwenStreamError && fetchAttempt < maxFetchAttempts) {
+              await new Promise((resolve) => setTimeout(resolve, error.retryAfterMs));
+              buffer = '';
+              fetchAttempt += 1;
+              const retryResult = await createQwenStream(finalPrompt, isThinkingModel, body.model, streamOptions);
+              currentStream = retryResult.stream;
+              activeChatSessionId = retryResult.chatSessionId;
+              continue;
             }
-          } catch (e) {
-            // parse error, ignore partial chunk
+
+            throw error;
           }
         }
-      }
 
       // Flush tool parser
       const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
       if (remainingText) {
+        assistantContentBuffer += remainingText;
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
@@ -295,6 +430,7 @@ export async function chatCompletions(c: Context) {
         });
       }
       for (const tc of remainingToolCalls) {
+        emittedToolCalls.push(tc);
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
@@ -312,6 +448,36 @@ export async function chatCompletions(c: Context) {
             }]
           })]
         });
+      }
+
+      if (opencodeChatKey && activeChatSessionId && latestResponseId) {
+        const assistantEntry = formatConversationMessage(
+          {
+            role: 'assistant',
+            content: assistantContentBuffer,
+            reasoning_content: reasoningBuffer || undefined,
+            tool_calls: emittedToolCalls.map((toolCall) => ({
+              id: toolCall.id,
+              type: 'function',
+              function: {
+                name: toolCall.name,
+                arguments: JSON.stringify(toolCall.arguments),
+              },
+            })),
+            tool_call_id: undefined,
+            name: undefined,
+          },
+          assistantContentBuffer
+        );
+
+        finalizeHybridConversation(
+          conversationPlan.key,
+          body.model,
+          systemPrompt,
+          [...messageEntries, assistantEntry],
+          activeChatSessionId,
+          latestResponseId
+        );
       }
   
       // Send finish reason
@@ -332,7 +498,13 @@ export async function chatCompletions(c: Context) {
         choices: [makeChoice({}, finalFinishReason)],
         usage: usage
       });
-      await streamWriter.write('data: [DONE]\n\n');
+      if (!streamDoneSent) {
+        await streamWriter.write('data: [DONE]\n\n');
+      }
+      } finally {
+        markHybridRequestCooldown(conversationPlan.key, conversationPlan.reusedSession);
+        releaseHybridWindow();
+      }
 
     });
   } catch (err: any) {

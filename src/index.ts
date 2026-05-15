@@ -15,7 +15,7 @@ import { bearerAuth } from 'hono/bearer-auth';
 import { chatCompletions } from './routes/chat.ts';
 import { fetchQwenModels } from './services/qwen.ts';
 import * as dotenv from 'dotenv';
-import { initPlaywright } from './services/playwright.ts';
+import { initPlaywright, loginIfNeeded } from './services/playwright.ts';
 
 dotenv.config();
 
@@ -54,17 +54,21 @@ app.get('/v1/models', async (c) => {
 import { fileURLToPath } from 'url';
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  initPlaywright().then(() => {
-    console.log('Playwright initialized.');
-    const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-    console.log(`Server is running on port ${port}`);
+  (async () => {
+    try {
+      await initPlaywright();
+      console.log('Playwright initialized.');
+      await loginIfNeeded();
+      const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+      console.log(`Server is running on port ${port}`);
 
-    serve({
-      fetch: app.fetch,
-      port
-    });
-  }).catch((err: any) => {
-    console.error('Failed to initialize playwright:', err);
-    process.exit(1);
-  });
+      serve({
+        fetch: app.fetch,
+        port
+      });
+    } catch (err: any) {
+      console.error('Failed to initialize:', err);
+      process.exit(1);
+    }
+  })();
 }
