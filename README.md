@@ -12,6 +12,7 @@ Built for tool-calling agents (OpenCode, AI SDK, etc.) that need reasoning model
 - **OpenAI-compatible** `POST /v1/chat/completions` (streaming + tools)
 - **Reasoning / thinking** support
 - **Tool execution** (parallel, streaming parser for JSON tool calls)
+- **Robust tool-call recovery** — repairs malformed JSON, retries one invalid tool call semantically, and falls back to raw text when recovery is not safe
 - **One browser context per chat identity** — each `session+agent+model` gets its own isolated Playwright `BrowserContext` with independent cookies, localStorage, and page state. No cross-contention between parallel agents.
 - **Hybrid delta mode** — reuses the same Qwen chat when the conversation history matches as a prefix. Only new messages are sent, reducing token overhead.
 - **Automatic login** on startup using credentials from `.env`; saves full Playwright `storageState` (cookies + localStorage) for instant auth on restarts.
@@ -249,8 +250,18 @@ npm test
 
 The test suite includes:
 
-- **17 integration tests** — conversation history, streaming, caching, hybrid retry, JSON error handling, and tool parsing
-- **8 idle‑cleanup unit tests** — coverage for context lifecycle, idle removal, default context protection, mixed idle/recent, idempotency, and re-creation after cleanup
+- **Integration tests** — conversation history, streaming, caching, hybrid retry, semantic retry for invalid tool calls, JSON error handling, and tool parsing
+- **Idle‑cleanup unit tests** — coverage for context lifecycle, idle removal, default context protection, mixed idle/recent, idempotency, and re-creation after cleanup
+- **Parser-focused unit tests** — robust JSON repair, invalid tool-call tracking, fallback behavior, and mixed valid/invalid tool-call streams
+
+### Tool-call recovery behavior
+
+When Qwen emits a malformed `<tool_call>...</tool_call>` block, the proxy now follows this order:
+
+1. tries to repair the JSON payload
+2. validates whether the tool call is safe to emit
+3. if no valid tool call was emitted yet, asks Qwen once to resend only the corrected tool call
+4. if that still fails, preserves the raw `<tool_call>` block as plain text instead of dropping it silently
 
 ---
 

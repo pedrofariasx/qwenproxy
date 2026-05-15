@@ -440,3 +440,251 @@ test('hybrid-retry: retries when Qwen rate limits a reused chat before emitting 
     restore();
   }
 });
+
+test('semantic-tool-retry: asks Qwen to resend a valid tool call once', async () => {
+  resetHybridConversationState();
+  let callCount = 0;
+  const capturedPayloads: Array<{ parent_id: string | null; messages: Array<{ content: string }> }> = [];
+
+  const restore = setupFetchMock((url, init) => {
+    const bodyObj = JSON.parse(init?.body as string || '{}') as { parent_id: string | null; messages: Array<{ content: string }> };
+    capturedPayloads.push(bodyObj);
+    callCount += 1;
+
+    const stream = new ReadableStream({
+      start(controller) {
+        if (callCount === 1) {
+          controller.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-invalid"}}\n\n'));
+          controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\": null, \\"arguments\\": 123}</tool_call>"}}]}\n\n'));
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          controller.close();
+          return;
+        }
+
+        controller.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-fixed"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\": \\"apply_patch\\", \\"arguments\\": {\\"path\\": \\"demo.txt\\"}}</tool_call>"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' }
+    });
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'semantic-retry-session';
+
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-opencode-chat-key': 'fixed-session:nexus:qwen-local:qwen3.6-plus'
+      },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'Use a tool agora' }],
+        stream: true,
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'apply_patch',
+              description: 'Aplica patch',
+              parameters: {
+                type: 'object',
+                properties: {
+                  path: { type: 'string' }
+                },
+                required: ['path']
+              }
+            }
+          }
+        ]
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const bodyText = await res.text();
+    assert.strictEqual(callCount, 2);
+    assert.match(bodyText, /"tool_calls"/);
+    assert.doesNotMatch(bodyText, /<tool_call>\{\\"name\\": null, \\"arguments\\": 123}<\/tool_call>/);
+    assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-parent-invalid');
+    assert.match(capturedPayloads[1].messages[0].content, /Re-send ONLY the corrected tool call block/);
+  } finally {
+    delete process.env.TEST_SESSION_ID;
+    restore();
+  }
+ });
+
+test('semantic-tool-retry: falls back to raw tool call after retry limit is exhausted', async () => {
+  resetHybridConversationState();
+  let callCount = 0;
+
+  const restore = setupFetchMock(() => {
+    callCount += 1;
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const responseId = callCount === 1 ? 'qwen-parent-invalid-1' : 'qwen-parent-invalid-2';
+        controller.enqueue(new TextEncoder().encode(`data: {"response.created":{"response_id":"${responseId}"}}\n\n`));
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\": null, \\"arguments\\": 123}</tool_call>"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' }
+    });
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'semantic-retry-fallback-session';
+
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-opencode-chat-key': 'fixed-session:nexus:qwen-local:qwen3.6-plus'
+      },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'Use uma ferramenta' }],
+        stream: true,
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const bodyText = await res.text();
+    assert.strictEqual(callCount, 2);
+    assert.match(bodyText, /<tool_call>\{\\"name\\": null, \\"arguments\\": 123}<\/tool_call>/);
+    assert.doesNotMatch(bodyText, /"tool_calls"/);
+  } finally {
+    delete process.env.TEST_SESSION_ID;
+    restore();
+  }
+});
+
+test('semantic-tool-retry: keeps reasoning chunks before asking for corrected tool call', async () => {
+  resetHybridConversationState();
+  let callCount = 0;
+  const capturedPayloads: Array<{ parent_id: string | null; messages: Array<{ content: string }> }> = [];
+
+  const restore = setupFetchMock((url, init) => {
+    const bodyObj = JSON.parse(init?.body as string || '{}') as { parent_id: string | null; messages: Array<{ content: string }> };
+    capturedPayloads.push(bodyObj);
+    callCount += 1;
+
+    const stream = new ReadableStream({
+      start(controller) {
+        if (callCount === 1) {
+          controller.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-thinking-invalid"}}\n\n'));
+          controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"thinking_summary","extra":{"summary_thought":{"content":["Pensando no plano"]}}}}]}\n\n'));
+          controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\": null, \\"arguments\\": 123}</tool_call>"}}]}\n\n'));
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          controller.close();
+          return;
+        }
+
+        controller.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-thinking-fixed"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\": \\"apply_patch\\", \\"arguments\\": {\\"path\\": \\"reasoned.txt\\"}}</tool_call>"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' }
+    });
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'semantic-retry-reasoning-session';
+
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-opencode-chat-key': 'fixed-session:nexus:qwen-local:qwen3.6-plus'
+      },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'Pense e use uma ferramenta' }],
+        stream: true,
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const bodyText = await res.text();
+    assert.strictEqual(callCount, 2);
+    assert.match(bodyText, /Pensando no plano/);
+    assert.match(bodyText, /"tool_calls"/);
+    assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-parent-thinking-invalid');
+    assert.match(capturedPayloads[1].messages[0].content, /Re-send ONLY the corrected tool call block/);
+  } finally {
+    delete process.env.TEST_SESSION_ID;
+    restore();
+  }
+});
+
+test('semantic-tool-retry: does not retry when a valid tool call was already emitted', async () => {
+  resetHybridConversationState();
+  let callCount = 0;
+
+  const restore = setupFetchMock(() => {
+    callCount += 1;
+
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-mixed"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\": \\"apply_patch\\", \\"arguments\\": {\\"path\\": \\"ok.txt\\"}}</tool_call><tool_call>{\\"name\\": null, \\"arguments\\": 123}</tool_call>"}}]}\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' }
+    });
+  });
+
+  try {
+    process.env.TEST_SESSION_ID = 'semantic-no-retry-after-valid-session';
+
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-opencode-chat-key': 'fixed-session:nexus:qwen-local:qwen3.6-plus'
+      },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'Use duas ferramentas' }],
+        stream: true,
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const bodyText = await res.text();
+    assert.strictEqual(callCount, 1);
+    assert.match(bodyText, /"tool_calls"/);
+    assert.match(bodyText, /<tool_call>\{\\"name\\": null, \\"arguments\\": 123}<\/tool_call>/);
+  } finally {
+    delete process.env.TEST_SESSION_ID;
+    restore();
+  }
+});

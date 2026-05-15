@@ -23,6 +23,7 @@ import { registry } from '../tools/registry.ts';
 import type { FunctionToolDefinition } from '../tools/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
+import type { InvalidToolCall } from '../tools/parser.ts';
 import type { ParsedToolCall } from '../tools/types.ts';
 
 function isDebugEnabled(): boolean {
@@ -113,6 +114,34 @@ class RetryableQwenStreamError extends Error {
     this.name = 'RetryableQwenStreamError';
     this.retryAfterMs = retryAfterMs;
   }
+}
+
+class RetryableToolCallRepairError extends Error {
+  readonly retryPrompt: string;
+
+  constructor(retryPrompt: string) {
+    super('Qwen emitted an invalid tool_call payload; requesting a corrected retry.');
+    this.name = 'RetryableToolCallRepairError';
+    this.retryPrompt = retryPrompt;
+  }
+}
+
+function buildInvalidToolCallFallback(invalidToolCalls: InvalidToolCall[]): string {
+  return invalidToolCalls.map((item) => `<tool_call>${item.raw}</tool_call>`).join('');
+}
+
+function buildToolCallRepairPrompt(invalidToolCalls: InvalidToolCall[]): string {
+  const reasons = invalidToolCalls.map((item) => item.reason).join(', ');
+  return [
+    'Your immediately previous response attempted a tool call, but the JSON inside <tool_call>...</tool_call> was invalid and could not be parsed by the proxy.',
+    `Detected issue types: ${reasons || 'invalid_payload'}.`,
+    'Re-send ONLY the corrected tool call block.',
+    'Rules:',
+    '1. Output exactly one <tool_call>...</tool_call> block.',
+    '2. Do not include markdown, explanation, or normal chat text.',
+    '3. The JSON must contain a string field "name" and an object field "arguments".',
+    '4. Preserve the same intent and arguments from your previous tool call, but make the JSON valid.',
+  ].join('\n');
 }
 
 function isQwenRateLimitError(chunk: unknown): chunk is { error: { details?: string } } {
@@ -234,7 +263,7 @@ export async function chatCompletions(c: Context) {
       const emittedToolCalls: ParsedToolCall[] = [];
       let latestResponseId: string | null = conversationPlan.parentMessageId;
       let lastFullContent = '';
-      const toolParser = new StreamingToolParser();
+      const toolParser = new StreamingToolParser({ fallbackInvalidToolCallsToText: false });
 
       let buffer = '';
       let completionTokens = 0;
@@ -245,8 +274,25 @@ export async function chatCompletions(c: Context) {
       let streamDoneSent = false;
       let fetchAttempt = 1;
       const maxFetchAttempts = 4;
+      let semanticRetryAttempt = 0;
+      const maxSemanticRetryAttempts = 1;
       let currentStream = initialStreamResult.stream;
       activeChatSessionId = initialStreamResult.chatSessionId;
+
+      const emitAssistantText = async (text: string): Promise<void> => {
+        if (!text) {
+          return;
+        }
+
+        assistantContentBuffer += text;
+        await writeEvent({
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model,
+          choices: [makeChoice({ content: text })]
+        });
+      };
 
       try {
         while (fetchAttempt <= maxFetchAttempts) {
@@ -363,17 +409,26 @@ export async function chatCompletions(c: Context) {
                     });
                   } else {
                     inThinkingState = false;
-                    const { text, toolCalls } = toolParser.feed(vStr);
+                    const { text, toolCalls, invalidToolCalls } = toolParser.feed(vStr);
+
+                    if (
+                      invalidToolCalls.length > 0 &&
+                      emittedToolCalls.length === 0 &&
+                      toolCalls.length === 0 &&
+                      semanticRetryAttempt < maxSemanticRetryAttempts &&
+                      activeChatSessionId &&
+                      latestResponseId
+                    ) {
+                      await reader.cancel();
+                      throw new RetryableToolCallRepairError(buildToolCallRepairPrompt(invalidToolCalls));
+                    }
 
                     if (text) {
-                      assistantContentBuffer += text;
-                      await writeEvent({
-                        id: completionId,
-                        object: 'chat.completion.chunk',
-                        created: Math.floor(Date.now() / 1000),
-                        model: body.model,
-                        choices: [makeChoice({ content: text })]
-                      });
+                      await emitAssistantText(text);
+                    }
+
+                    if (invalidToolCalls.length > 0) {
+                      await emitAssistantText(buildInvalidToolCallFallback(invalidToolCalls));
                     }
 
                     for (const tc of toolCalls) {
@@ -413,21 +468,41 @@ export async function chatCompletions(c: Context) {
               continue;
             }
 
+            if (error instanceof RetryableToolCallRepairError && semanticRetryAttempt < maxSemanticRetryAttempts) {
+              buffer = '';
+              semanticRetryAttempt += 1;
+              lastFullContent = '';
+              currentThoughtIndex = 0;
+              inThinkingState = false;
+
+              const retryResult = await createQwenStream(
+                error.retryPrompt,
+                isThinkingModel,
+                body.model,
+                {
+                  chatSessionId: activeChatSessionId,
+                  parentMessageId: latestResponseId,
+                  forceFreshChat: false,
+                  pageKey: opencodeChatKey,
+                },
+              );
+
+              currentStream = retryResult.stream;
+              activeChatSessionId = retryResult.chatSessionId;
+              continue;
+            }
+
             throw error;
           }
         }
 
       // Flush tool parser
-      const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
+      const { text: remainingText, toolCalls: remainingToolCalls, invalidToolCalls: remainingInvalidToolCalls } = toolParser.flush();
       if (remainingText) {
-        assistantContentBuffer += remainingText;
-        await writeEvent({
-          id: completionId,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: body.model,
-          choices: [makeChoice({ content: remainingText })]
-        });
+        await emitAssistantText(remainingText);
+      }
+      if (remainingInvalidToolCalls.length > 0) {
+        await emitAssistantText(buildInvalidToolCallFallback(remainingInvalidToolCalls));
       }
       for (const tc of remainingToolCalls) {
         emittedToolCalls.push(tc);
