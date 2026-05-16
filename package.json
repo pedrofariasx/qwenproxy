@@ -5,7 +5,13 @@
   "main": "index.js",
   "scripts": {
     "start": "npx tsx src/index.ts",
+    "start:firefox": "npx tsx src/index.ts --browser=firefox",
+    "start:chrome": "npx tsx src/index.ts --browser=chrome",
+    "start:edge": "npx tsx src/index.ts --browser=edge",
     "login": "npx tsx src/login.ts",
+    "login:firefox": "npx tsx src/login.ts --browser=firefox",
+    "login:chrome": "npx tsx src/login.ts --browser=chrome",
+    "login:edge": "npx tsx src/login.ts --browser=edge",
     "test": "tsx --test src/**/*.test.ts"
   },
   "keywords": [],

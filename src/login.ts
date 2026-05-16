@@ -8,7 +8,7 @@
  * Modified By: Pedro Farias
  */
 
-import { initPlaywright, closePlaywright, activePage, loginToQwen } from './services/playwright.ts';
+import { initPlaywright, closePlaywright, activePage, loginToQwen, BrowserType } from './services/playwright.ts';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -17,9 +17,18 @@ async function main() {
   const email = process.env.QWEN_EMAIL;
   const password = process.env.QWEN_PASSWORD;
 
+  // Parse browser type from args or env
+  let browserType: BrowserType = 'chromium';
+  const browserArg = process.argv.find(arg => arg.startsWith('--browser='));
+  if (browserArg) {
+    browserType = browserArg.split('=')[1] as BrowserType;
+  } else if (process.env.BROWSER) {
+    browserType = process.env.BROWSER as BrowserType;
+  }
+
   if (email && password) {
-    console.log('[Login] Credentials found in .env. Attempting automated API login...');
-    await initPlaywright(true); // Can be headless
+    console.log(`[Login] Credentials found in .env. Attempting automated API login using ${browserType}...`);
+    await initPlaywright(true, browserType); // Can be headless
     const success = await loginToQwen(email, password);
     if (success) {
       console.log('[Login] Automated login successful! Session saved.');
@@ -31,8 +40,8 @@ async function main() {
     }
   }
 
-  console.log('Opening Qwen to allow manual login...');
-  await initPlaywright(false); // false = not headless
+  console.log(`Opening ${browserType} to allow manual login...`);
+  await initPlaywright(false, browserType); // false = not headless
   if (activePage) {
     await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
   } else {

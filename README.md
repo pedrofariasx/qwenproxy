@@ -1,147 +1,216 @@
 # QwenProxy
 
-Local proxy server that interfaces with Qwen (chat.qwen.ai) using browser automation via Playwright.  
-Provides an OpenAI-compatible API for chat interactions and tool execution.
+Proxy API local compatível com OpenAI que roteia requisições para os modelos do **Qwen (chat.qwen.ai)** via automação de navegador com Playwright. Oferece suporte a execução de ferramentas, modo de pensamento (reasoning) e persistência de sessão.
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
+[![Hono](https://img.shields.io/badge/Hono-4.0-green)](https://hono.dev/)
+[![Playwright](https://img.shields.io/badge/Playwright-1.59-blueviolet)](https://playwright.dev/)
+[![License: ISC](https://img.shields.io/badge/License-ISC-yellow.svg)](LICENSE)
 
 ---
 
-## Features
+## ✨ Features
 
-- OpenAI-compatible API endpoints for chat completion
-- Reasoning/Thinking support
-- Tool execution support
-- Persistent browser session with login state
-- Built with Hono and TypeScript
-
----
-
-## Prerequisites
-
-- Node.js v20 or later
-- Playwright browsers
+- **OpenAI API Compatible**: Interface compatível com `/v1/chat/completions` e `/v1/models`.
+- **Reasoning Support**: Suporte completo ao modo de pensamento (thinking) dos modelos Qwen.
+- **Tool Execution**: Sistema de execução de ferramentas locais integrado ao fluxo do chat.
+- **Session Persistence**: Login persistente com armazenamento de perfil do navegador em `qwen_profile/`.
+- **Network Visibility**: Exibe URLs local e de rede (IP) ao iniciar o servidor.
+- **Browser Selection**: Escolha entre Chrome, Firefox, Edge ou Chromium para execução.
+- **Docker Ready**: Deploy simplificado com suporte a Docker e Docker Compose.
 
 ---
 
-## Installation
+## 🏗️ Arquitetura
+
+```mermaid
+graph TD
+    Client[Cliente OpenAI/SDK] -->|HTTP| Proxy[QwenProxy]
+    Proxy -->|/v1/chat/completions| Handler[Chat Handler]
+    Handler --> Qwen[chat.qwen.ai]
+    Handler --> Playwright[Playwright Service]
+    Playwright --> Browser[Browser Instance]
+    Handler --> Tools[Tools Executor]
+    Tools --> Registry[Tool Registry]
+    
+    subgraph "Configuração"
+        Env[.env] --> Proxy
+        Profile[qwen_profile/] --> Playwright
+    end
+```
+
+---
+
+## 📋 Pré-requisitos
+
+| Dependência | Versão Mínima | Instalação |
+|------------|--------------|-----------|
+| Node.js | v20.x | [nvm](https://github.com/nvm-sh/nvm) |
+| npm | v9.x | Incluído com Node.js |
+| Playwright | - | `npx playwright install` |
+| Docker (opcional) | v24.x | [Docker Docs](https://docs.docker.com/get-docker/) |
+
+---
+
+## 🚀 Instalação
+
+### Via npm
 
 ```bash
+# Clonar repositório
+git clone https://github.com/pedrofariasx/qwenproxy.git
+cd qwenproxy
+
+# Instalar dependências
 npm install
+
+# Instalar browsers do Playwright
 npx playwright install
 ```
 
+### Via Docker
+
+```bash
+# Iniciar containers
+docker-compose up -d
+```
+
 ---
 
-## Configuration
+## ⚙️ Configuração
 
-Create a `.env` file in the project root:
+Crie o arquivo `.env` na raiz do projeto:
 
 ```env
+# Porta do servidor (default: 3000)
 PORT=3000
-API_KEY=your_secret_api_key
-QWEN_EMAIL=your_email@example.com
-QWEN_PASSWORD=your_password
-```
 
-- **API_KEY**: If set, all requests to `/v1/*` must include the header `Authorization: Bearer your_secret_api_key`.
-- **QWEN_EMAIL/PASSWORD**: Required for automated login in Docker or headless environments.
+# Chave de API para proteger os endpoints (opcional)
+API_KEY=sua-chave-secreta-aqui
+
+# Credenciais Qwen (para login automático)
+QWEN_EMAIL=seu-email@exemplo.com
+QWEN_PASSWORD=sua-senha-aqui
+
+# Navegador padrão (chromium, firefox, chrome, edge)
+BROWSER=chromium
+```
 
 ---
 
-## Usage
+## 📡 Uso e Comandos
 
-### Docker (Recommended)
+### Inicialização do Servidor
 
-1. Build and start the container:
-   ```bash
-   docker-compose up -d
-   ```
+```bash
+# Iniciar com o navegador padrão (Chromium)
+npm start
 
-The server will be available at `http://localhost:3000`.
+# Iniciar com navegadores específicos
+npm run start:chrome
+npm run start:firefox
+npm run start:edge
+```
 
-### Local Execution
+Ao iniciar, o console exibirá:
+```txt
+🚀 QwenProxy started!
+- Local:   http://localhost:3000
+- Network: http://192.168.1.10:3000
 
-#### Login (Manual)
+Available Routes:
+- [GET] /health
+- [POST] /v1/chat/completions
+- [GET] /v1/models
+```
 
-If you don't provide credentials in `.env`, you must log in manually once:
+### Autenticação de Sessão (Login)
+
+Se não usar credenciais no `.env`, realize o login manual:
 ```bash
 npm run login
-```
-This will open a browser window. Log in and then close it.
-
-#### Start the Server
-
-```bash
-npm start
-```
-
-The server runs by default at:
-
-```txt
-http://localhost:3000
+# Ou com browser específico
+npm run login:firefox
 ```
 
 ---
 
-## Testing
+## 📡 API Reference
 
-```bash
-npm test
+### Chat Completions
+
+```http
+POST /v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer sua-chave
+```
+
+**Modelos Suportados**:
+- `qwen-plus`: Modelo padrão com raciocínio habilitado.
+- `qwen-plus-no-thinking`: Versão sem o bloco de pensamento.
+- `qwen-max`, `qwen-turbo`, etc. (conforme disponibilidade na conta).
+
+---
+
+## 💻 Exemplos de Integração
+
+### OpenAI SDK (Node.js)
+
+```typescript
+import OpenAI from 'openai';
+
+const openai = new OpenAI({
+  baseURL: 'http://localhost:3000/v1',
+  apiKey: process.env.API_KEY || 'sk-no-key-required'
+});
+
+const completion = await openai.chat.completions.create({
+  model: 'qwen-plus',
+  messages: [{ role: 'user', content: 'Explique como funciona o Playwright.' }]
+});
+
+console.log(completion.choices[0].message.content);
 ```
 
 ---
 
-## API Endpoints
+## 📁 Estrutura do Projeto
 
-### `POST /v1/chat/completions`
-
-OpenAI-compatible endpoint.
-
-**Note**: If `API_KEY` is configured, include the Bearer token in your request headers.
-
-#### Models
-- `qwen3.6-plus` (with thinking)
-- `qwen3.6-plus-no-thinking`
-
----
-
-## Project Structure
-
-```txt
-.
+```
+qwenproxy/
 ├── src/
-│   ├── index.ts           # Server entry
-│   ├── routes/            # API routes
-│   ├── services/          # Qwen & Playwright services
-│   ├── tools/             # Tool execution
-│   └── utils/             # Utilities
-├── qwen_profile/          # Browser profile storage
+│   ├── index.ts              # Entry point e servidor Hono
+│   ├── routes/
+│   │   └── chat.ts          # Handler compatível com OpenAI
+│   ├── services/
+│   │   ├── qwen.ts          # Integração com a API do Qwen
+│   │   └── playwright.ts    # Automação de navegador
+│   ├── tools/
+│   │   ├── executor.ts      # Execução de ferramentas
+│   │   └── registry.ts      # Registro de tools
+│   └── login.ts             # Script de autenticação
+├── qwen_profile/            # Armazenamento da sessão (gitignored)
+├── Dockerfile                # Configuração Docker
+└── package.json             # Scripts e dependências
 ```
 
 ---
 
-## License
+## 🔍 Troubleshooting
 
-ISC
+- **Endereço em uso**: Verifique se a porta `3000` está livre ou altere o `PORT` no `.env`.
+- **Erro de Navegador**: Se um navegador não abrir, certifique-se de que ele está instalado (`npx playwright install`).
+- **Sessão Expirada**: Execute `npm run login` novamente para renovar os cookies.
 
 ---
 
-# Disclaimer
+## ⚠️ Disclaimer
 
-This project is provided strictly for educational and research purposes.
+> Este projeto é fornecido estritamente para fins educacionais e de pesquisa.
 
-The authors do not encourage or endorse:
+Os autores não incentivam ou endossam:
+- Violação dos Termos de Serviço da plataforma Qwen.
+- Automação não autorizada em larga escala.
+- Uso para atividades maliciosas.
 
-- Misuse
-- Unauthorized automation
-- Abuse of third-party services
-- Violations of platform Terms of Service
-
-Users are solely responsible for how they use this software, including compliance with applicable laws, regulations, and service agreements.
-
-This repository is intended to demonstrate concepts related to:
-
-- Browser automation
-- Session management
-- OpenAI-compatible runtime architectures
-
-Use at your own risk.
+**Use por sua conta e risco.**

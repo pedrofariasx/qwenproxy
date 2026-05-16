@@ -8,9 +8,11 @@
  * Modified By: Pedro Farias
  */
 
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium, firefox, webkit, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import crypto from 'crypto';
+
+export type BrowserType = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'edge';
 
 let context: BrowserContext | null = null;
 export let activePage: Page | null = null;
@@ -40,7 +42,7 @@ export async function getBasicHeaders(): Promise<{ cookie: string, userAgent: st
   return { cookie, userAgent, bxV };
 }
 
-export async function initPlaywright(headless = true) {
+export async function initPlaywright(headless = true, browserType: BrowserType = 'chromium') {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
   if (context) {
     return;
@@ -48,8 +50,35 @@ export async function initPlaywright(headless = true) {
 
   const profilePath = path.resolve('qwen_profile');
   
-  context = await chromium.launchPersistentContext(profilePath, {
+  let browserEngine;
+  let channel: string | undefined;
+
+  switch (browserType) {
+    case 'firefox':
+      browserEngine = firefox;
+      break;
+    case 'webkit':
+      browserEngine = webkit;
+      break;
+    case 'chrome':
+      browserEngine = chromium;
+      channel = 'chrome';
+      break;
+    case 'edge':
+      browserEngine = chromium;
+      channel = 'msedge';
+      break;
+    case 'chromium':
+    default:
+      browserEngine = chromium;
+      break;
+  }
+
+  console.log(`[Playwright] Launching ${browserType}...`);
+
+  context = await browserEngine.launchPersistentContext(profilePath, {
     headless,
+    channel,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
   });
 
