@@ -2,109 +2,309 @@
  * File: playwright.ts
  * Project: qwenproxy
  * Author: Pedro Farias
- * Created: 2026-05-09
- * 
- * Last Modified: Sat May 09 2026
- * Modified By: Pedro Farias
+ * Created: 2026-05-14
+ *
+ * EACH CHAT KEY = ITS OWN ISOLATED BROWSER CONTEXT.
+ * No more single-page contention. Auth cookies are shared
+ * across contexts so each one starts already logged in.
  */
 
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import crypto from 'crypto';
+import fs from 'fs/promises';
 
-let context: BrowserContext | null = null;
-export let activePage: Page | null = null;
+// ──  Globals  ───────────────────────────────────────────────
+let browser: Browser | null = null;
+const HEADERS_TTL = 10 * 60 * 1000;     // 10 min per-header cache
+const DEFAULT_KEY = '__default__';
+
+/** Read at runtime so tests can override TTL via env var after module load. */
+function idleTtl(): number {
+  const testTtl = process.env.TEST_IDLE_TTL_MS;
+  return testTtl ? parseInt(testTtl, 10) : 10 * 60 * 1000;
+}
+const AUTH_FILE = path.resolve('qwen_profile', 'auth.json');
+
 let currentHeaders: Record<string, string> = {};
-let cachedQwenHeaders: { headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null } | null = null;
-let lastHeadersTime = 0;
-const HEADERS_TTL = 10 * 60 * 1000; // 10 minutes
 
-// Lock to prevent concurrent UI interactions
-let uiLock: Promise<void> = Promise.resolve();
+// Auth state – full Playwright storageState (cookies + localStorage + sessionStorage)
+let sharedStorageState: any = null;
+let sharedUserAgent = '';
+let sharedBxV = '';
 
-export async function getCookies(): Promise<string> {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
-  if (!activePage) return '';
-  const cookies = await activePage.context().cookies();
-  return cookies.map(c => `${c.name}=${c.value}`).join('; ');
+// ──  Per-context state  ─────────────────────────────────────
+interface ContextHeaders {
+  headers: Record<string, string>;
+  chatSessionId: string;
+  parentMessageId: string | null;
 }
 
-export async function getBasicHeaders(): Promise<{ cookie: string, userAgent: string, bxV: string }> {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) return { cookie: 'token=mock', userAgent: 'mock', bxV: '2.5.36' };
-  if (!activePage) throw new Error('Playwright not initialized');
-  
-  const cookie = await getCookies();
-  const userAgent = await activePage.evaluate(() => navigator.userAgent);
-  const bxV = currentHeaders['bx-v'] || '2.5.36';
-  
-  return { cookie, userAgent, bxV };
+interface ManagedCtx {
+  key: string;
+  ctx: BrowserContext;
+  page: Page;
+  lock: Promise<void>;
+  cached: ContextHeaders | null;
+  cachedAt: number;
+  lastUsedAt: number;
+}
+
+const managed = new Map<string, ManagedCtx>();
+
+// ──  Auth persistence helpers  ──────────────────────────────
+
+async function saveStorageState(ctx: BrowserContext): Promise<void> {
+  try {
+    await fs.mkdir(path.dirname(AUTH_FILE), { recursive: true });
+    const state = await ctx.storageState();
+    await fs.writeFile(AUTH_FILE, JSON.stringify(state, null, 2), 'utf-8');
+    const cookieCount = state.cookies?.length ?? 0;
+    const originCount = state.origins?.length ?? 0;
+    if (sharedStorageState) {
+      console.log(`[Playwright] Updated saved auth (${cookieCount}c, ${originCount}o)`);
+    } else {
+      console.log(`[Playwright] Auth state saved for the first time (${cookieCount}c, ${originCount}o)`);
+    }
+    sharedStorageState = state;
+  } catch {
+    /* best-effort */
+  }
+}
+
+async function loadStorageState(): Promise<void> {
+  try {
+    const raw = await fs.readFile(AUTH_FILE, 'utf-8');
+    sharedStorageState = JSON.parse(raw);
+  } catch {
+    sharedStorageState = null;
+  }
+}
+
+// ──  Context lifecycle  ─────────────────────────────────────
+
+async function spawnCtx(key: string): Promise<ManagedCtx> {
+  if (!browser) throw new Error('Playwright not initialized');
+
+  const ctxOpts: any = {
+    userAgent:
+      sharedUserAgent ||
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  };
+
+  // Restore full storage state (cookies + localStorage) so the page is fully logged in
+  if (sharedStorageState) {
+    const cookieCount = sharedStorageState.cookies?.length ?? 0;
+    const originCount = sharedStorageState.origins?.length ?? 0;
+    console.log(`[Playwright] Spawning context "${key}" with saved auth (${cookieCount} cookies, ${originCount} origins)`);
+    ctxOpts.storageState = sharedStorageState;
+  } else {
+    console.log(`[Playwright] Spawning context "${key}" without saved auth (will need login)`);
+  }
+
+  const ctx = await browser.newContext(ctxOpts);
+  const page = await ctx.newPage();
+  const state: ManagedCtx = {
+    key,
+    ctx,
+    page,
+    lock: Promise.resolve(),
+    cached: null,
+    cachedAt: 0,
+    lastUsedAt: Date.now(),
+  };
+  managed.set(key, state);
+
+  if (key === DEFAULT_KEY) {
+    currentHeaders = {};
+  }
+  return state;
+}
+
+function resolveKey(pageKey?: string | null): string {
+  if (!pageKey) return DEFAULT_KEY;
+  const k = pageKey.trim();
+  return k || DEFAULT_KEY;
+}
+
+async function getCtx(pageKey?: string | null): Promise<ManagedCtx> {
+  const key = resolveKey(pageKey);
+  const s = managed.get(key);
+  if (s) {
+    s.lastUsedAt = Date.now();
+    return s;
+  }
+  return spawnCtx(key);
+}
+
+async function reapIdle(): Promise<void> {
+  const now = Date.now();
+  let reaped = 0;
+  for (const [key, s] of managed) {
+    if (key === DEFAULT_KEY) continue;
+    const idleFor = now - s.lastUsedAt;
+    if (idleFor > idleTtl()) {
+      try {
+        await s.ctx.close();
+        console.log(`[Playwright] Reaped idle context "${key}" (idle for ${Math.round(idleFor / 1000)}s)`);
+      } catch { /* ignore */ }
+      managed.delete(key);
+      reaped++;
+    }
+  }
+  if (reaped > 0) {
+    console.log(`[Playwright] Idle cleanup: ${reaped} context(s) closed, ${managed.size} remaining.`);
+  }
+}
+
+// ──  Public API  ────────────────────────────────────────────
+
+/**
+ * Ensure we have valid auth before accepting requests.
+ * If no saved auth exists, attempts to log in using credentials from .env.
+ * Returns true if auth is available after this call.
+ */
+export async function loginIfNeeded(): Promise<boolean> {
+  if (sharedStorageState) {
+    const cookieCount = sharedStorageState.cookies?.length ?? 0;
+    console.log(`[Playwright] Auth already available (${cookieCount} cookies).`);
+    return true;
+  }
+
+  const email = process.env.QWEN_EMAIL;
+  const password = process.env.QWEN_PASSWORD;
+
+  if (!email || !password) {
+    console.warn('[Playwright] No QWEN_EMAIL/QWEN_PASSWORD in .env — manual login via npm run login may be needed.');
+    return false;
+  }
+
+  console.log('[Playwright] No saved auth found. Attempting automatic login…');
+  const ok = await loginToQwen(email, password);
+  if (ok) {
+    console.log('[Playwright] Auto-login successful. Auth saved for future contexts.');
+  } else {
+    console.error('[Playwright] Auto-login failed. Requests may fail until login is done manually.');
+  }
+  return ok;
+}
+
+/** Build a cookie header string from the shared storage state. */
+export async function getCookies(): Promise<string> {
+  if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
+  if (!sharedStorageState?.cookies) return '';
+  return sharedStorageState.cookies
+    .map((c: { name: string; value: string }) => `${c.name}=${c.value}`)
+    .join('; ');
+}
+
+export async function getBasicHeaders(): Promise<{
+  cookie: string;
+  userAgent: string;
+  bxV: string;
+}> {
+  if (process.env.TEST_MOCK_PLAYWRIGHT)
+    return { cookie: 'token=mock', userAgent: 'mock', bxV: '2.5.36' };
+
+  // If we don't have shared UA yet, try extracting from the default page
+  if (!sharedUserAgent || !sharedBxV) {
+    const d = managed.get(DEFAULT_KEY);
+    if (d) {
+      try {
+        const ua = await d.page.evaluate(() => navigator.userAgent);
+        if (ua) sharedUserAgent = ua;
+      } catch { /* page might not be ready */ }
+    }
+  }
+
+  return {
+    cookie: await getCookies(),
+    userAgent: sharedUserAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    bxV: sharedBxV || '2.5.36',
+  };
 }
 
 export async function initPlaywright(headless = true) {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
-  if (context) {
-    return;
+  if (browser) return;
+
+  await loadStorageState();
+
+  browser = await chromium.launch({ headless });
+
+  if (sharedStorageState) {
+    // Pre-create the default context so it's ready
+    await spawnCtx(DEFAULT_KEY);
   }
-
-  const profilePath = path.resolve('qwen_profile');
-  
-  context = await chromium.launchPersistentContext(profilePath, {
-    headless,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-  });
-
-  // Keep an active page to fetch PoW headers on demand
-  activePage = await context.newPage();
 }
 
 export async function closePlaywright() {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
-  if (context) {
-    await context.close();
-    context = null;
-    activePage = null;
+  managed.clear();
+  if (browser) {
+    await browser.close();
+    browser = null;
   }
 }
 
-export async function loginToQwen(email: string, password: string): Promise<boolean> {
-  if (!activePage) throw new Error('Playwright not initialized');
+// активная страница для login.ts
+export async function getActivePage(): Promise<Page | null> {
+  const d = managed.get(DEFAULT_KEY);
+  return d?.page ?? null;
+}
+export const activePage: Page | null = null; // kept for import compat – use getActivePage()
+
+export async function loginToQwen(
+  email: string,
+  password: string,
+): Promise<boolean> {
+  const ctx = await getCtx(DEFAULT_KEY);
+  const page = ctx.page;
 
   console.log(`[Playwright] Attempting API login for ${email}...`);
-  
-  // Navigate to auth page to set up context/cookies
-  await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'networkidle' });
 
-  // Qwen expects SHA256 hashed password
-  const hashedPassword = crypto.createHash('sha256').update(password).digest('hex');
+  await page.goto('https://chat.qwen.ai/auth', { waitUntil: 'networkidle' });
 
-  const result = await activePage.evaluate(async ({ email, password }) => {
-    try {
-      const response = await fetch("https://chat.qwen.ai/api/v2/auths/signin", {
-        method: "POST",
-        headers: {
-          "accept": "application/json, text/plain, */*",
-          "content-type": "application/json",
-          "source": "web",
-          "timezone": new Date().toString().split(' (')[0],
-          "x-request-id": crypto.randomUUID()
-        },
-        body: JSON.stringify({ email, password, login_type: "email" })
-      });
-      const data = await response.json();
-      return { ok: response.ok, data };
-    } catch (e: any) {
-      return { ok: false, error: e.message };
-    }
-  }, { email, password: hashedPassword });
+  const hashedPassword = crypto
+    .createHash('sha256')
+    .update(password)
+    .digest('hex');
+
+  const result = await page.evaluate(
+    async ({ email, password }) => {
+      try {
+        const res = await fetch('https://chat.qwen.ai/api/v2/auths/signin', {
+          method: 'POST',
+          headers: {
+            accept: 'application/json, text/plain, */*',
+            'content-type': 'application/json',
+            source: 'web',
+            timezone: new Date().toString().split(' (')[0],
+            'x-request-id': crypto.randomUUID(),
+          },
+          body: JSON.stringify({ email, password, login_type: 'email' }),
+        });
+        const data = await res.json();
+        return { ok: res.ok, data };
+      } catch (e: any) {
+        return { ok: false, error: e.message };
+      }
+    },
+    { email, password: hashedPassword },
+  );
 
   if (result.ok) {
     console.log('[Playwright] API login request successful.');
-    // Navigate to home to confirm session
-    await activePage.goto('https://chat.qwen.ai/', { waitUntil: 'networkidle' });
-    const isLogged = !(activePage.url().includes('auth') || activePage.url().includes('login'));
+    // Use domcontentloaded — networkidle can timeout on Qwen's long-poll connections
+    await page.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    // Give the page a moment to finish rendering
+    await page.waitForTimeout(3000);
+    const isLogged =
+      !page.url().includes('auth') && !page.url().includes('login');
     if (isLogged) {
-       console.log('[Playwright] Login confirmed.');
-       return true;
+      console.log('[Playwright] Login confirmed.');
+      await saveStorageState(ctx.ctx);
+      return true;
     }
   }
 
@@ -112,212 +312,285 @@ export async function loginToQwen(email: string, password: string): Promise<bool
   return false;
 }
 
+// ──  Header interception (the core flow)  ───────────────────
+
 /**
  * Ensures the session is valid and extracts headers, PoW, and session ID.
+ * Each unique pageKey gets its own isolated BrowserContext.
  */
-export async function getQwenHeaders(forceNew = false): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
-  // Use a lock to ensure only one request uses the UI at a time
-  const release = await new Promise<() => void>(resolve => {
-    uiLock = uiLock.then(() => new Promise<void>(innerResolve => {
-      resolve(innerResolve);
-    }));
+export async function getQwenHeaders(
+  forceNew = false,
+  pageKey?: string | null,
+): Promise<{
+  headers: Record<string, string>;
+  chatSessionId: string;
+  parentMessageId: string | null;
+}> {
+  if (process.env.TEST_MOCK_PLAYWRIGHT) {
+    const mockSessionId = process.env.TEST_SESSION_ID || 'mock-session';
+    return {
+      headers: {
+        authorization: 'Bearer MOCK',
+        cookie: 'token=mock',
+        'user-agent': 'mock',
+        'bx-v': '2.5.36',
+      },
+      chatSessionId: mockSessionId,
+      parentMessageId: null,
+    };
+  }
+
+  await reapIdle();
+  const m = await getCtx(pageKey);
+
+  // Per-context serial lock
+  const release = await new Promise<() => void>((resolve) => {
+    m.lock = m.lock.then(
+      () => new Promise<void>((r) => resolve(r)),
+    );
   });
 
   try {
-    return await _getQwenHeadersInternal(forceNew);
+    m.lastUsedAt = Date.now();
+    return await doIntercept(m, forceNew);
   } finally {
     release();
   }
 }
 
-async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) {
-    const mockSessionId = process.env.TEST_SESSION_ID || 'mock-session';
-    return { 
-      headers: { 
-        'authorization': 'Bearer MOCK', 
-        'cookie': 'token=mock', 
-        'user-agent': 'mock',
-        'bx-v': '2.5.36'
-      }, 
-      chatSessionId: mockSessionId, 
-      parentMessageId: null 
-    };
+async function doIntercept(
+  m: ManagedCtx,
+  forceNew: boolean,
+): Promise<{
+  headers: Record<string, string>;
+  chatSessionId: string;
+  parentMessageId: string | null;
+}> {
+  if (!forceNew && m.cached && Date.now() - m.cachedAt < HEADERS_TTL) {
+    return m.cached;
   }
 
-  if (!forceNew && cachedQwenHeaders && (Date.now() - lastHeadersTime < HEADERS_TTL)) {
-    return cachedQwenHeaders;
+  const page = m.page;
+  const curUrl = page.url();
+  const isOnQwen = curUrl.includes('chat.qwen.ai');
+  const isOnChat = isOnQwen && /\/c\//.test(curUrl);
+
+  if (!isOnQwen || forceNew || isOnChat) {
+    console.log(`[Playwright] Navigating to Qwen home… (was: ${curUrl})`);
+    await page.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
   }
 
-  if (!activePage) {
-    throw new Error('Playwright not initialized');
-  }
-
-  const currentUrl = activePage.url();
-  const isOnQwen = currentUrl.includes('chat.qwen.ai');
-  const isOnSpecificChat = isOnQwen && /\/c\//.test(currentUrl);
-
-  // If we already have cookies and basic headers, and we are not forced to refresh,
-  // we can try to return what we have if it's recent enough.
-  // However, for completions we often need the latest PoW/bx headers.
-
-  if (!isOnQwen || forceNew || isOnSpecificChat) {
-    console.log(`[Playwright] Navigating to Qwen home... (Current: ${currentUrl})`);
-    await activePage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
-  }
-
-  // Check if we are on a login page and perform automated login if credentials provided
-  const isLoginPage = activePage.url().includes('login') || (await activePage.$('input[type="email"], input[placeholder*="Email"]'));
-  if (isLoginPage) {
+  // Auto-login if we land on the login page
+  if (
+    page.url().includes('login') ||
+    (await page.$('input[type="email"], input[placeholder*="Email"]'))
+  ) {
     const email = process.env.QWEN_EMAIL;
     const password = process.env.QWEN_PASSWORD;
-    
     if (email && password) {
-      console.log('[Playwright] Detected login page. Attempting automated login...');
+      console.log('[Playwright] Login page detected → automating login…');
       try {
-        // Wait for inputs
-        await activePage.waitForSelector('input[type="email"], input[placeholder*="Email"]', { timeout: 10000 });
-        await activePage.fill('input[type="email"], input[placeholder*="Email"]', email);
-        
-        // Sometimes password field only appears after clicking next or email entry
-        await activePage.keyboard.press('Enter');
-        await activePage.waitForTimeout(1000);
-        
-        await activePage.waitForSelector('input[type="password"]', { timeout: 10000 });
-        await activePage.fill('input[type="password"]', password);
-        await activePage.keyboard.press('Enter');
-        
-        // Wait for redirection back to chat
-        await activePage.waitForSelector('textarea:visible', { timeout: 30000 });
-        console.log('[Playwright] Automated login successful.');
+        await page.waitForSelector(
+          'input[type="email"], input[placeholder*="Email"]',
+          { timeout: 10000 },
+        );
+        await page.fill('input[type="email"], input[placeholder*="Email"]', email);
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(1000);
+        await page.waitForSelector('input[type="password"]', { timeout: 10000 });
+        await page.fill('input[type="password"]', password);
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('textarea:visible', { timeout: 30000 });
+        console.log('[Playwright] Auto-login finished.');
+        await saveStorageState(m.ctx);
       } catch (err: any) {
-        console.error('[Playwright] Automated login failed:', err.message);
+        console.error('[Playwright] Auto-login failed:', err.message);
       }
     } else {
-      console.warn('[Playwright] Detected login page but QWEN_EMAIL/PASSWORD not provided in .env');
+      console.warn('[Playwright] Login page but QWEN_EMAIL/PASSWORD not set.');
     }
   }
 
-  // Wait for the textarea
-  console.log('[Playwright] Waiting for chat input...');
-  const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
-  await activePage.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
-    console.error('[Playwright] Chat input not found. Current URL:', activePage!.url());
-    throw new Error('Timeout waiting for chat input. Are you logged in?');
-  });
+  // Wait for textarea
+  console.log('[Playwright] Waiting for chat input…');
+  await page
+    .waitForSelector('textarea:visible, [contenteditable="true"]:visible', {
+      timeout: 30000,
+    })
+    .catch(() => {
+      throw new Error(
+        `Timeout waiting for chat input. Current URL: ${page.url()}`,
+      );
+    });
 
+  // Intercept
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      console.error('[Playwright] Timeout waiting for Qwen headers. Current URL:', activePage!.url());
       reject(new Error('Timeout waiting for Qwen headers'));
     }, 60000);
 
-    console.log('[Playwright] Setting up route interception...');
-    const routeHandler = async (route: any, request: any) => {
+    console.log('[Playwright] Setting up route interception…');
+    const handler = async (route: any, request: any) => {
       clearTimeout(timeout);
-      
-      const reqHeaders = request.headers();
-      let uiSessionId = '';
-      let uiParentMessageId: string | null = null;
 
-      const postData = request.postData();
-      if (postData) {
+      const rh = request.headers();
+      let chatId = '';
+      let parentId: string | null = null;
+
+      try {
+        chatId = new URL(request.url()).searchParams.get('chat_id') || '';
+      } catch { /* ignore */ }
+
+      const body = request.postData();
+      if (body) {
         try {
-          const payload = JSON.parse(postData);
-          if (payload.chat_id) {
-            uiSessionId = payload.chat_id;
-          }
-          if (payload.parent_id !== undefined) {
-            uiParentMessageId = payload.parent_id;
-          }
-        } catch (e) {
-          // ignore parsing error
-        }
+          const p = JSON.parse(body);
+          if (p.chat_id) chatId = p.chat_id;
+          if (p.parent_id !== undefined) parentId = p.parent_id;
+        } catch { /* ignore */ }
       }
 
-      const extractedHeaders = {
-        'cookie': reqHeaders['cookie'] || '',
-        'bx-ua': reqHeaders['bx-ua'] || '',
-        'bx-umidtoken': reqHeaders['bx-umidtoken'] || '',
-        'bx-v': reqHeaders['bx-v'] || '',
-        'x-request-id': reqHeaders['x-request-id'] || '',
-        'user-agent': reqHeaders['user-agent'] || ''
+      const headers = {
+        cookie: rh['cookie'] || '',
+        'bx-ua': rh['bx-ua'] || '',
+        'bx-umidtoken': rh['bx-umidtoken'] || '',
+        'bx-v': rh['bx-v'] || '',
+        'x-request-id': rh['x-request-id'] || '',
+        'user-agent': rh['user-agent'] || '',
       };
 
-      // Ensure we have at least cookies and bx-ua (which are critical)
-      if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-        console.log('[Playwright] Intercepted request missing critical headers, skipping...');
+      if (!headers.cookie || !headers['bx-ua']) {
+        console.log('[Playwright] Missing critical headers, skipping…');
         await route.continue();
         return;
       }
 
-      console.log('[Playwright] Successfully intercepted headers.');
-      currentHeaders = extractedHeaders;
-      cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };
-      lastHeadersTime = Date.now();
+      console.log('[Playwright] Headers intercepted successfully.');
+      currentHeaders = headers;
+      m.cached = { headers, chatSessionId: chatId, parentMessageId: parentId };
+      m.cachedAt = Date.now();
+      m.lastUsedAt = Date.now();
 
-      // Trigger native tools disabling on first header interception
-      import('./qwen.ts').then(m => m.disableNativeTools().catch(() => {}));
+      // Share UA/bxV for new contexts
+      if (!sharedUserAgent && headers['user-agent']) sharedUserAgent = headers['user-agent'];
+      if (!sharedBxV && headers['bx-v']) sharedBxV = headers['bx-v'];
+      // Share full storage state (cookies + localStorage) so new contexts start fully logged in
+      await saveStorageState(m.ctx);
 
-      // Abort to prevent polluting chat history
+      // Disable native tools once on first interception of this context
+      if (!m.cachedAt) {
+        import('./qwen.ts').then((mod) =>
+          mod.disableNativeTools(headers).catch(() => {}),
+        );
+      }
+
       await route.abort('aborted');
-      
-      // Cleanup route
-      await activePage!.unroute('**/api/v2/chat/completions*', routeHandler);
-
-      resolve(cachedQwenHeaders);
+      await page.unroute('**/api/v2/chat/completions*', handler);
+      resolve(m.cached);
     };
 
-    activePage!.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
-      console.log('[Playwright] Triggering request...');
-      const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
-      
-      // We use type instead of fill to trigger all events
-      await activePage!.focus(inputSelector);
-      await activePage!.fill(inputSelector, ''); // clear first
-      await activePage!.type(inputSelector, 'a', { delay: 100 });
-      console.log('[Playwright] Typed char, waiting for UI to update...');
-      await activePage!.waitForTimeout(2000); // Wait more for Send button to enable
-      
-      // Improved Send Button detection & aggressive clicking
-      const selectors = [
+    page.route('**/api/v2/chat/completions*', handler).then(async () => {
+      const sel = 'textarea:visible, [contenteditable="true"]:visible';
+      await page.focus(sel);
+      await page.fill(sel, '');
+      await page.type(sel, 'a', { delay: 100 });
+      console.log('[Playwright] Typed char, waiting for UI update…');
+      await page.waitForTimeout(2000);
+
+      const sels = [
         '.message-input-right-button-send .send-button',
         '.chat-prompt-send-button',
-        'button.send-button'
+        'button.send-button',
       ];
-      
       let clicked = false;
-      for (const selector of selectors) {
+      for (const s of sels) {
         try {
-          const btn = await activePage!.$(selector);
-          if (btn && await btn.isVisible()) {
-            console.log(`[Playwright] Attempting click on: ${selector}`);
-            
-            // Try both DOM click and Playwright click
-            await activePage!.evaluate((sel) => {
-              const element = document.querySelector(sel) as HTMLElement;
-              if (element) {
-                element.focus();
-                element.click();
-              }
-            }, selector);
-            
-            // Also try a real mouse click just in case
+          const btn = await page.$(s);
+          if (btn && (await btn.isVisible())) {
+            console.log(`[Playwright] Clicking ${s}…`);
+            await page.evaluate(
+              (sel_) =>
+                (document.querySelector(sel_) as HTMLElement)?.click(),
+              s,
+            );
             await btn.click({ force: true, delay: 50 }).catch(() => {});
-            
             clicked = true;
             break;
           }
-        } catch (e) {
-          console.error(`[Playwright] Error clicking ${selector}:`, e);
-        }
+        } catch { /* try next */ }
       }
 
       if (!clicked) {
-        console.log('[Playwright] No send button found/clicked, fallback to Enter...');
-        await activePage!.focus(inputSelector);
-        await activePage!.keyboard.press('Enter');
+        console.log('[Playwright] Fallback: pressing Enter…');
+        await page.focus(sel);
+        await page.keyboard.press('Enter');
       }
     });
   });
+}
+
+// ──  Test helpers (only used by idle.test.ts)  ──────────────
+
+/**
+ * Return how many non-default contexts are currently in the pool.
+ */
+export function getContextPoolSize(): number {
+  let count = 0;
+  for (const key of managed.keys()) {
+    if (key !== DEFAULT_KEY) count++;
+  }
+  return count;
+}
+
+/**
+ * Forcefully mark a context's lastUsedAt for testing idle cleanup.
+ */
+export function __test_setContextLastUsed(key: string, timestamp: number): void {
+  const s = managed.get(key);
+  if (s) {
+    s.lastUsedAt = timestamp;
+  }
+}
+
+/**
+ * Inject a fake context into the pool for testing reapIdle logic.
+ */
+export function __test_addMockContext(key: string): void {
+  if (managed.has(key)) return;
+  managed.set(key, {
+    key,
+    ctx: null as unknown as BrowserContext,
+    page: null as unknown as Page,
+    lock: Promise.resolve(),
+    cached: null,
+    cachedAt: 0,
+    lastUsedAt: Date.now(),
+  });
+}
+
+/**
+ * Trigger idle cleanup directly (used by tests to avoid waiting for the real timeout).
+ */
+export function __test_triggerIdleCleanup(): Promise<void> {
+  return reapIdle();
+}
+
+/**
+ * Returns all non-default context keys currently in the pool.
+ */
+export function __test_getNonDefaultKeys(): string[] {
+  const keys: string[] = [];
+  for (const key of managed.keys()) {
+    if (key !== DEFAULT_KEY) keys.push(key);
+  }
+  return keys;
+}
+
+/**
+ * Clear all mock contexts from the pool (for test cleanup).
+ */
+export function __test_clearPool(): void {
+  for (const key of __test_getNonDefaultKeys()) {
+    managed.delete(key);
+  }
 }

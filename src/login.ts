@@ -8,7 +8,7 @@
  * Modified By: Pedro Farias
  */
 
-import { initPlaywright, closePlaywright, activePage, loginToQwen } from './services/playwright.ts';
+import { initPlaywright, closePlaywright, getActivePage, loginToQwen } from './services/playwright.ts';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -33,8 +33,9 @@ async function main() {
 
   console.log('Opening Qwen to allow manual login...');
   await initPlaywright(false); // false = not headless
-  if (activePage) {
-    await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
+  const page = await getActivePage();
+  if (page) {
+    await page.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
   } else {
     console.error('Failed to get active page');
     process.exit(1);

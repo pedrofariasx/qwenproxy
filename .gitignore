@@ -1,6 +1,8 @@
 node_modules/
 dist/
 qwen_profile/
+.analyze/
+*.tsbuildinfo
 .env
 .env.local
 *.log

@@ -8,11 +8,27 @@ import { v4 as uuidv4 } from 'uuid';
 import { robustParseJSON } from '../utils/json.ts';
 import type { ParsedToolCall } from './types.ts';
 
+type ParsedToolPayload = {
+  name?: string;
+  arguments?: Record<string, unknown> | string;
+} & Record<string, unknown>;
+
+export interface InvalidToolCall {
+  raw: string;
+  reason: 'parse_failed' | 'invalid_payload';
+}
+
+export interface StreamingToolParserOptions {
+  fallbackInvalidToolCallsToText?: boolean;
+}
+
 export interface ParserResult {
   /** Text content that is NOT part of a tool call */
   text: string;
   /** Fully parsed tool calls */
   toolCalls: ParsedToolCall[];
+  /** Tool calls detected but not safe to emit */
+  invalidToolCalls: InvalidToolCall[];
 }
 
 export class StreamingToolParser {
@@ -21,6 +37,70 @@ export class StreamingToolParser {
   private TOOL_START = '<tool_call>';
   private TOOL_END = '</tool_call>';
   private emittedToolCallCount = 0;
+  private readonly fallbackInvalidToolCallsToText: boolean;
+
+  constructor(options: StreamingToolParserOptions = {}) {
+    this.fallbackInvalidToolCallsToText = options.fallbackInvalidToolCallsToText ?? true;
+  }
+
+  private createFallbackText(rawToolJson: string): string {
+    return `${this.TOOL_START}${rawToolJson}${this.TOOL_END}`;
+  }
+
+  private registerInvalidToolCall(
+    result: ParserResult,
+    rawToolJson: string,
+    reason: InvalidToolCall['reason'],
+  ): void {
+    result.invalidToolCalls.push({ raw: rawToolJson, reason });
+
+    if (this.fallbackInvalidToolCallsToText) {
+      result.text += this.createFallbackText(rawToolJson);
+    }
+  }
+
+  private extractToolCall(rawToolJson: string): ParsedToolCall | null {
+    // Limpeza defensiva: remove tags XML/HTML residuais que o Qwen pode emitir
+    const cleaned = rawToolJson
+      .replace(/<\/?[\w-]+(?:\s+[\w-]+="[^"]*")*\s*\/?>/g, '') // Remove tags XML como <arg_value>, </arg_key>, etc.
+      .replace(/&[a-z]+;|&#\d+;|&#x[a-f0-9]+;/gi, '') // Remove entities HTML (&lt;, &amp;, etc.)
+      .trim();
+      
+    const parsed = robustParseJSON(cleaned);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+
+    const toolCallObj = parsed as ParsedToolPayload;
+    const toolId = 'call_' + uuidv4();
+    const toolName = typeof toolCallObj.name === 'string' ? toolCallObj.name : '';
+    if (!toolName.trim()) {
+      return null;
+    }
+
+    let toolArgs: Record<string, unknown> = {};
+
+    if (toolCallObj.arguments !== undefined) {
+      const parsedArguments = typeof toolCallObj.arguments === 'string'
+        ? robustParseJSON(toolCallObj.arguments)
+        : toolCallObj.arguments;
+
+      if (!parsedArguments || typeof parsedArguments !== 'object' || Array.isArray(parsedArguments)) {
+        return null;
+      }
+
+      toolArgs = parsedArguments as Record<string, unknown>;
+    } else {
+      const { name: _name, arguments: _arguments, ...rest } = toolCallObj;
+      toolArgs = rest;
+    }
+
+    return {
+      id: toolId,
+      name: toolName,
+      arguments: toolArgs,
+    };
+  }
 
   /**
    * Feeds a chunk of text into the parser and returns any extracted text and tool calls.
@@ -30,6 +110,7 @@ export class StreamingToolParser {
     const result: ParserResult = {
       text: '',
       toolCalls: [],
+      invalidToolCalls: [],
     };
 
     while (this.buffer.length > 0) {
@@ -66,33 +147,16 @@ export class StreamingToolParser {
         if (endIdx !== -1) {
           const toolJsonStr = this.buffer.substring(0, endIdx).trim();
           try {
-            const toolCallObj = robustParseJSON(toolJsonStr);
-            if (toolCallObj) {
-              const toolId = 'call_' + uuidv4();
-              let toolName = toolCallObj.name || '';
-              let toolArgs: Record<string, unknown> = {};
-
-              if (toolCallObj.arguments) {
-                toolArgs = typeof toolCallObj.arguments === 'string'
-                  ? JSON.parse(toolCallObj.arguments)
-                  : toolCallObj.arguments;
-              } else {
-                const { name, ...rest } = toolCallObj;
-                toolArgs = rest;
-              }
-
-              result.toolCalls.push({
-                id: toolId,
-                name: toolName,
-                arguments: toolArgs,
-              });
+            const toolCall = this.extractToolCall(toolJsonStr);
+            if (toolCall) {
+              result.toolCalls.push(toolCall);
               this.emittedToolCallCount++;
+            } else {
+              this.registerInvalidToolCall(result, toolJsonStr, 'invalid_payload');
             }
           } catch (e) {
             console.warn(`[StreamingToolParser] Parsing failed for: ${toolJsonStr}`, e);
-            // If it fails, we treat it as text if no tools were emitted yet, 
-            // but this is tricky in a streaming context. 
-            // For now, we just log and move on.
+            this.registerInvalidToolCall(result, toolJsonStr, 'parse_failed');
           }
           
           this.insideTool = false;
@@ -114,34 +178,22 @@ export class StreamingToolParser {
     const result: ParserResult = {
       text: '',
       toolCalls: [],
+      invalidToolCalls: [],
     };
 
     if (this.buffer.length > 0) {
       if (this.insideTool) {
         // Try to parse partial tool call
         try {
-          const toolCallObj = robustParseJSON(this.buffer);
-          if (toolCallObj) {
-            const toolId = 'call_' + uuidv4();
-            let toolName = toolCallObj.name || '';
-            let toolArgs = toolCallObj.arguments || {};
-            if (typeof toolArgs === 'string') toolArgs = JSON.parse(toolArgs);
-            else if (!toolCallObj.arguments) {
-               const { name, ...rest } = toolCallObj;
-               toolArgs = rest;
-            }
-
-            result.toolCalls.push({
-              id: toolId,
-              name: toolName,
-              arguments: toolArgs,
-            });
+          const toolCall = this.extractToolCall(this.buffer);
+          if (toolCall) {
+            result.toolCalls.push(toolCall);
             this.emittedToolCallCount++;
+          } else {
+            this.registerInvalidToolCall(result, this.buffer, 'invalid_payload');
           }
-        } catch (e) {
-          if (this.emittedToolCallCount === 0) {
-            result.text = this.TOOL_START + this.buffer;
-          }
+        } catch {
+          this.registerInvalidToolCall(result, this.buffer, 'parse_failed');
         }
       } else if (this.emittedToolCallCount === 0) {
         result.text = this.buffer;
