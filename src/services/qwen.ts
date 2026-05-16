@@ -98,10 +98,9 @@ export async function disableNativeTools(): Promise<void> {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    console.error(`[Qwen] Failed to disable native tools: ${response.status} - ${text}`);
+    console.error(`[Qwen] Failed to disable native tools (${response.status})`);
   } else {
-    console.log('[Qwen] Native tools disabled successfully.');
+    console.log('[Qwen] Native tools disabled.');
   }
 }
 

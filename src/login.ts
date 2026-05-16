@@ -34,7 +34,7 @@ async function main() {
   console.log('Opening Qwen to allow manual login...');
   await initPlaywright(false); // false = not headless
   if (activePage) {
-    await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
+    await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded', timeout: 60000 });
   } else {
     console.error('Failed to get active page');
     process.exit(1);
