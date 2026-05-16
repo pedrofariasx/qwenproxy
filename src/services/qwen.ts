@@ -15,6 +15,20 @@ function isDebugEnabled(): boolean {
 const HYBRID_SESSION_TTL_MS = 30 * 60 * 1000;
 const HYBRID_CHAT_COOLDOWN_MS = 1000;
 
+/**
+ * Erro retryable para quando o Qwen retorna "chat in progress".
+ * O retryAfterMs sugere quanto tempo aguardar antes de tentar novamente.
+ */
+export class RetryableQwenStreamError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(message: string, retryAfterMs: number) {
+    super(message);
+    this.name = 'RetryableQwenStreamError';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 interface HybridConversationState {
   key: string;
   modelId: string;
@@ -449,6 +463,22 @@ export async function createQwenStream(
 
     if (isDebugEnabled()) {
       console.log('[Qwen][Debug] JSON response body:', responseText);
+    }
+
+    // Detecta erro temporário "chat in progress" e lança erro retryable
+    try {
+      const errorJson = JSON.parse(responseText);
+      if (errorJson?.data?.details?.includes('The chat is in progress!')) {
+        // Retry após 2-4 segundos (jitter simples)
+        const retryAfterMs = 2000 + Math.floor(Math.random() * 2000);
+        throw new RetryableQwenStreamError(`Qwen: ${errorJson.data.details}`, retryAfterMs);
+      }
+    } catch (parseOrRetryError) {
+      // Se for erro de retry, propaga para o handler de stream
+      if (parseOrRetryError instanceof RetryableQwenStreamError) {
+        throw parseOrRetryError;
+      }
+      // Se não conseguir parsear o JSON, segue com erro genérico
     }
 
     throw new Error(`Qwen returned JSON instead of stream: ${responseText}`);

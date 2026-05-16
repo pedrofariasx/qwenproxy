@@ -60,7 +60,13 @@ export class StreamingToolParser {
   }
 
   private extractToolCall(rawToolJson: string): ParsedToolCall | null {
-    const parsed = robustParseJSON(rawToolJson);
+    // Limpeza defensiva: remove tags XML/HTML residuais que o Qwen pode emitir
+    const cleaned = rawToolJson
+      .replace(/<\/?[\w-]+(?:\s+[\w-]+="[^"]*")*\s*\/?>/g, '') // Remove tags XML como <arg_value>, </arg_key>, etc.
+      .replace(/&[a-z]+;|&#\d+;|&#x[a-f0-9]+;/gi, '') // Remove entities HTML (&lt;, &amp;, etc.)
+      .trim();
+      
+    const parsed = robustParseJSON(cleaned);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return null;
     }

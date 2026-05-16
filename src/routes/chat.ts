@@ -17,6 +17,7 @@ import {
   finalizeHybridConversation,
   markHybridRequestCooldown,
   prepareHybridConversation,
+  RetryableQwenStreamError,
 } from '../services/qwen.ts';
 import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
 import { registry } from '../tools/registry.ts';
@@ -104,16 +105,6 @@ function getOpencodeChatKey(c: Context): string | null {
 
   const normalizedChatKey = chatKey.trim();
   return normalizedChatKey.length > 0 ? normalizedChatKey : null;
-}
-
-class RetryableQwenStreamError extends Error {
-  readonly retryAfterMs: number;
-
-  constructor(message: string, retryAfterMs: number) {
-    super(message);
-    this.name = 'RetryableQwenStreamError';
-    this.retryAfterMs = retryAfterMs;
-  }
 }
 
 class RetryableToolCallRepairError extends Error {
@@ -219,13 +210,27 @@ export async function chatCompletions(c: Context) {
       pageKey: opencodeChatKey,
     };
 
-    let initialStreamResult: Awaited<ReturnType<typeof createQwenStream>>;
-    try {
-      initialStreamResult = await createQwenStream(finalPrompt, isThinkingModel, body.model, streamOptions);
-    } catch (error) {
-      markHybridRequestCooldown(conversationPlan.key, conversationPlan.reusedSession);
-      releaseHybridWindow();
-      throw error;
+    let initialStreamResult!: Awaited<ReturnType<typeof createQwenStream>>;
+    let fetchAttempt = 1;
+    const maxFetchAttempts = 4;
+
+    // Retry loop para a chamada INICIAL também (evita falha imediata em "chat in progress")
+    while (fetchAttempt <= maxFetchAttempts) {
+      try {
+        initialStreamResult = await createQwenStream(finalPrompt, isThinkingModel, body.model, streamOptions);
+        break; // Sucesso: sai do loop
+      } catch (error) {
+        if (error instanceof RetryableQwenStreamError && fetchAttempt < maxFetchAttempts) {
+          console.warn(`[QwenProxy] Retry ${fetchAttempt}/${maxFetchAttempts} para chamada inicial: ${error.message}`);
+          await new Promise((resolve) => setTimeout(resolve, error.retryAfterMs));
+          fetchAttempt += 1;
+          continue;
+        }
+        // Não é retryable ou esgotou tentativas: propaga o erro
+        markHybridRequestCooldown(conversationPlan.key, conversationPlan.reusedSession);
+        releaseHybridWindow();
+        throw error;
+      }
     }
 
     c.header('Content-Type', 'text/event-stream');
@@ -279,6 +284,10 @@ export async function chatCompletions(c: Context) {
       let currentStream = initialStreamResult.stream;
       activeChatSessionId = initialStreamResult.chatSessionId;
 
+      // Renomeado para evitar conflito com o retry da chamada inicial
+      let streamFetchAttempt = 1;
+      const maxStreamFetchAttempts = 4;
+
       const emitAssistantText = async (text: string): Promise<void> => {
         if (!text) {
           return;
@@ -295,7 +304,7 @@ export async function chatCompletions(c: Context) {
       };
 
       try {
-        while (fetchAttempt <= maxFetchAttempts) {
+        while (streamFetchAttempt <= maxStreamFetchAttempts) {
           try {
             const reader = currentStream.getReader();
             const decoder = new TextDecoder();
@@ -458,10 +467,10 @@ export async function chatCompletions(c: Context) {
 
             break;
           } catch (error) {
-            if (error instanceof RetryableQwenStreamError && fetchAttempt < maxFetchAttempts) {
+            if (error instanceof RetryableQwenStreamError && streamFetchAttempt < maxStreamFetchAttempts) {
               await new Promise((resolve) => setTimeout(resolve, error.retryAfterMs));
               buffer = '';
-              fetchAttempt += 1;
+              streamFetchAttempt += 1;
               const retryResult = await createQwenStream(finalPrompt, isThinkingModel, body.model, streamOptions);
               currentStream = retryResult.stream;
               activeChatSessionId = retryResult.chatSessionId;
@@ -584,6 +593,60 @@ export async function chatCompletions(c: Context) {
     });
   } catch (err: any) {
     console.error('Error in chatCompletions:', err);
-    return c.json({ error: { message: err.message } }, 500);
+    
+    type StructuredError = {
+      message: string;
+      code: 'CHAT_IN_PROGRESS' | 'RATE_LIMITED' | 'INVALID_TOOL_CALL' | 'STREAM_ERROR' | 'UNKNOWN';
+      retry_hint?: {
+        should_retry: boolean;
+        wait_seconds?: number;
+        action?: 'wait_and_retry' | 'regenerate_prompt' | 'check_conversation_state';
+      };
+      debug_info?: Record<string, unknown>;
+    };
+    
+    const structured: StructuredError = {
+      message: err.message,
+      code: 'UNKNOWN',
+    };
+    
+    if (err instanceof RetryableQwenStreamError) {
+      structured.code = 'CHAT_IN_PROGRESS';
+      structured.retry_hint = {
+        should_retry: true,
+        wait_seconds: Math.ceil(err.retryAfterMs / 1000),
+        action: 'wait_and_retry'
+      };
+    } else if (err.message?.includes('rate limit') || err.message?.includes('Request rate increased')) {
+      structured.code = 'RATE_LIMITED';
+      structured.retry_hint = {
+        should_retry: true,
+        wait_seconds: 30,
+        action: 'wait_and_retry'
+      };
+    } else if (err.message?.includes('invalid tool') || err.message?.includes('RetryableToolCallRepairError')) {
+      structured.code = 'INVALID_TOOL_CALL';
+      structured.retry_hint = {
+        should_retry: true,
+        action: 'regenerate_prompt'
+      };
+    } else if (err.message?.includes('stream') || err.message?.includes('Failed to fetch')) {
+      structured.code = 'STREAM_ERROR';
+      structured.retry_hint = {
+        should_retry: true,
+        wait_seconds: 5,
+        action: 'wait_and_retry'
+      };
+    }
+    
+    // Em debug mode, inclui info extra para diagnóstico
+    if (isDebugEnabled()) {
+      structured.debug_info = {
+        stack: err.stack,
+        timestamp: new Date().toISOString()
+      };
+    }
+    
+    return c.json({ error: structured }, 500);
   }
 }

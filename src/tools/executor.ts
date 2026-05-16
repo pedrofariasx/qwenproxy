@@ -68,17 +68,32 @@ export function parseToolCallsFromContent(content: string): {
 
     try {
       const parsed = robustParseJSON(jsonStr);
-      if (!parsed) throw new Error('Failed to parse JSON');
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Failed to parse JSON');
+      
+      const parsedObj = parsed as Record<string, unknown>;
+      const toolName = typeof parsedObj.name === 'string' ? parsedObj.name : '';
+      
+      let toolArgs: Record<string, unknown> = {};
+      if (parsedObj.arguments !== undefined) {
+        if (typeof parsedObj.arguments === 'string') {
+          try {
+            toolArgs = JSON.parse(parsedObj.arguments) as Record<string, unknown>;
+          } catch {
+            toolArgs = { raw: parsedObj.arguments };
+          }
+        } else if (typeof parsedObj.arguments === 'object' && parsedObj.arguments !== null && !Array.isArray(parsedObj.arguments)) {
+          toolArgs = parsedObj.arguments as Record<string, unknown>;
+        }
+      } else {
+        // Fallback: treat all other fields as arguments
+        const { name: _name, ...rest } = parsedObj;
+        toolArgs = rest;
+      }
       
       toolCalls.push({
         id: 'call_' + uuidv4(),
-        name: parsed.name || '',
-        arguments: parsed.arguments 
-          ? (typeof parsed.arguments === 'string' ? JSON.parse(parsed.arguments) : parsed.arguments)
-          : (() => {
-              const { name, ...rest } = parsed;
-              return rest;
-            })(),
+        name: toolName,
+        arguments: toolArgs,
       });
     } catch (e) {
       textContent += TOOL_START_TAG + jsonStr + TOOL_END_TAG;
