@@ -1,34 +1,38 @@
 {
-  "name": "qwenproxy",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "start": "npx tsx src/index.ts",
-    "start:firefox": "npx tsx src/index.ts --browser=firefox",
-    "start:chrome": "npx tsx src/index.ts --browser=chrome",
-    "start:edge": "npx tsx src/index.ts --browser=edge",
-    "login": "npx tsx src/login.ts",
-    "login:firefox": "npx tsx src/login.ts --browser=firefox",
-    "login:chrome": "npx tsx src/login.ts --browser=chrome",
-    "login:edge": "npx tsx src/login.ts --browser=edge",
-    "test": "tsx --test src/**/*.test.ts"
-  },
-  "keywords": [],
-  "author": "Pedro Farias",
-  "license": "ISC",
-  "dependencies": {
-    "@hono/node-server": "^2.0.2",
-    "dotenv": "^17.4.2",
-    "hono": "^4.12.18",
-    "playwright": "^1.60.0",
-    "uuid": "^14.0.0"
-  },
-  "devDependencies": {
-    "@types/node": "^25.8.0",
-    "@types/uuid": "^10.0.0",
-    "tsx": "^4.22.0",
-    "typescript": "^6.0.3"
-  },
-  "type": "module"
+	"name": "qwenproxy",
+	"version": "1.0.0",
+	"description": "",
+	"main": "index.js",
+	"scripts": {
+		"start": "npx tsx src/index.ts",
+		"start:firefox": "npx tsx src/index.ts --browser=firefox",
+		"start:chrome": "npx tsx src/index.ts --browser=chrome",
+		"start:edge": "npx tsx src/index.ts --browser=edge",
+		"login": "npx tsx src/login.ts",
+		"login:firefox": "npx tsx src/login.ts --browser=firefox",
+		"login:chrome": "npx tsx src/login.ts --browser=chrome",
+		"login:edge": "npx tsx src/login.ts --browser=edge",
+		"test": "tsx --test src/**/*.test.ts",
+		"lint": "npx @biomejs/biome check",
+		"lint:fix": "npx @biomejs/biome check --write",
+		"lint:fix:unsafe": "npx @biomejs/biome check --write --unsafe"
+	},
+	"keywords": [],
+	"author": "Pedro Farias",
+	"license": "ISC",
+	"dependencies": {
+		"@hono/node-server": "^2.0.2",
+		"dotenv": "^17.4.2",
+		"hono": "^4.12.19",
+		"playwright": "^1.60.0",
+		"uuid": "^14.0.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.4.15",
+		"@types/node": "^25.8.0",
+		"@types/uuid": "^10.0.0",
+		"tsx": "^4.22.0",
+		"typescript": "^6.0.3"
+	},
+	"type": "module"
 }
