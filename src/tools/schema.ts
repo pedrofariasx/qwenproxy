@@ -167,8 +167,9 @@ function validateArray(
 	}
 
 	if (schema.items) {
+		const itemsSchema = schema.items;
 		return value.map((item, i) =>
-			validateAgainstSchema(item, schema.items, `${path}[${i}]`),
+			validateAgainstSchema(item, itemsSchema, `${path}[${i}]`),
 		);
 	}
 

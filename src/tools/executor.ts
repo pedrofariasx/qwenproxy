@@ -70,18 +70,19 @@ export function parseToolCallsFromContent(content: string): {
 			.trim();
 
 		try {
-			const parsed = robustParseJSON(jsonStr);
-			if (!parsed) throw new Error("Failed to parse JSON");
+			const parsedRaw = robustParseJSON(jsonStr);
+			if (!parsedRaw) throw new Error("Failed to parse JSON");
+			const parsed = parsedRaw as Record<string, unknown>;
 
 			toolCalls.push({
 				id: `call_${uuidv4()}`,
-				name: parsed.name || "",
+				name: (parsed.name as string) || "",
 				arguments: parsed.arguments
 					? typeof parsed.arguments === "string"
 						? JSON.parse(parsed.arguments)
 						: parsed.arguments
 					: (() => {
-							const { name, ...rest } = parsed;
+							const { name: _name, ...rest } = parsed;
 							return rest;
 						})(),
 			});

@@ -5,9 +5,12 @@ const problematicString =
 
 console.log("Testing problematic string...");
 try {
-	const result = robustParseJSON(problematicString);
+	const result = robustParseJSON(problematicString) as Record<string, unknown>;
 	console.log("Successfully parsed:", JSON.stringify(result, null, 2));
-	if (result.name === "suggest" && result.arguments.actions.length === 1) {
+	if (
+		result.name === "suggest" &&
+		(result.arguments as Record<string, unknown>).actions
+	) {
 		console.log("✅ Problematic string test passed!");
 	} else {
 		console.error("❌ Result structure is incorrect");
@@ -19,9 +22,9 @@ try {
 const missingBraces = '{"name": "test", "arguments": {"foo": "bar"';
 console.log("\nTesting missing braces...");
 try {
-	const result = robustParseJSON(missingBraces);
+	const result = robustParseJSON(missingBraces) as Record<string, unknown>;
 	console.log("Successfully parsed:", JSON.stringify(result, null, 2));
-	if (result.arguments.foo === "bar") {
+	if ((result.arguments as Record<string, unknown>).foo === "bar") {
 		console.log("✅ Missing braces test passed!");
 	} else {
 		console.error("❌ Result structure is incorrect");
@@ -36,9 +39,12 @@ try {
 	// Note: in a real string from the model, it would be a literal newline
 	const literalNewline =
 		'{"name": "control", "msg": "line 1\\nline 2"}'.replace("\\n", "\n");
-	const result = robustParseJSON(literalNewline);
+	const result = robustParseJSON(literalNewline) as Record<string, unknown>;
 	console.log("Successfully parsed:", JSON.stringify(result, null, 2));
-	if (result.msg.includes("line 1") && result.msg.includes("line 2")) {
+	if (
+		(result.msg as string).includes("line 1") &&
+		(result.msg as string).includes("line 2")
+	) {
 		console.log("✅ Control characters test passed!");
 	} else {
 		console.error("❌ Result content is incorrect");

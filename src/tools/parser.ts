@@ -68,20 +68,21 @@ export class StreamingToolParser {
 				if (endIdx !== -1) {
 					const toolJsonStr = this.buffer.substring(0, endIdx).trim();
 					try {
-						const toolCallObj = robustParseJSON(toolJsonStr);
-						if (toolCallObj) {
+						const toolCallObjRaw = robustParseJSON(toolJsonStr);
+						if (toolCallObjRaw) {
+							const toolCallObj = toolCallObjRaw as Record<string, unknown>;
 							const toolId = `call_${uuidv4()}`;
-							const toolName = toolCallObj.name || "";
+							const toolName = (toolCallObj.name as string) || "";
 							let toolArgs: Record<string, unknown> = {};
 
 							if (toolCallObj.arguments) {
 								toolArgs =
 									typeof toolCallObj.arguments === "string"
 										? JSON.parse(toolCallObj.arguments)
-										: toolCallObj.arguments;
+										: (toolCallObj.arguments as Record<string, unknown>);
 							} else {
-								const { name, ...rest } = toolCallObj;
-								toolArgs = rest;
+								const { name: _name, ...rest } = toolCallObj;
+								toolArgs = rest as Record<string, unknown>;
 							}
 
 							result.toolCalls.push({
@@ -120,15 +121,17 @@ export class StreamingToolParser {
 			if (this.insideTool) {
 				// Try to parse partial tool call
 				try {
-					const toolCallObj = robustParseJSON(this.buffer);
-					if (toolCallObj) {
+					const toolCallObjRaw = robustParseJSON(this.buffer);
+					if (toolCallObjRaw) {
+						const toolCallObj = toolCallObjRaw as Record<string, unknown>;
 						const toolId = `call_${uuidv4()}`;
-						const toolName = toolCallObj.name || "";
-						let toolArgs = toolCallObj.arguments || {};
+						const toolName = (toolCallObj.name as string) || "";
+						let toolArgs: Record<string, unknown> = (toolCallObj.arguments ||
+							{}) as Record<string, unknown>;
 						if (typeof toolArgs === "string") toolArgs = JSON.parse(toolArgs);
 						else if (!toolCallObj.arguments) {
-							const { name, ...rest } = toolCallObj;
-							toolArgs = rest;
+							const { name: _name, ...rest } = toolCallObj;
+							toolArgs = rest as Record<string, unknown>;
 						}
 
 						result.toolCalls.push({

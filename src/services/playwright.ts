@@ -15,6 +15,8 @@ import {
 	chromium,
 	firefox,
 	type Page,
+	type Request,
+	type Route,
 	webkit,
 } from "playwright";
 
@@ -425,16 +427,7 @@ async function _fetchQwenHeaders(forceNew = false): Promise<{
 			reject(new Error("Timeout waiting for Qwen headers"));
 		}, 60000);
 
-		const routeHandler = async (
-			route: {
-				abort: (reason: string) => Promise<void>;
-				unroute: (pattern: string, handler: unknown) => Promise<void>;
-			},
-			request: {
-				headers: () => Record<string, string>;
-				postData: () => string | null;
-			},
-		) => {
+		const routeHandler = async (route: Route, request: Request) => {
 			clearTimeout(timeout);
 
 			const reqHeaders = request.headers();

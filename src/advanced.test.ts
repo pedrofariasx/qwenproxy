@@ -290,8 +290,12 @@ test("session-parent-tracking: appends messages using response message_id as par
 			"qwen-1001",
 			"Turn 2 should use response_id from Turn 1 as parent",
 		);
+		const payload2 = capturedPayloads[1] as Record<string, unknown>;
+		const payload2Messages = payload2.messages as Array<
+			Record<string, unknown>
+		>;
 		assert.strictEqual(
-			capturedPayloads[1].messages[0].content,
+			payload2Messages[0].content as string,
 			"User: Turn 2\n\n",
 			"Should only send the last message",
 		);
