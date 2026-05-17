@@ -93,21 +93,25 @@ test("multiturn-thinking-tools: maintains reasoning_content history", async () =
 		const res = await app.fetch(req);
 		assert.strictEqual(res.status, 200);
 
-		// Validate that only the last message is sent (as requested by user)
-		// In this case, the last message is the tool response
+		// Validate that the full conversation history is serialized, including
+		// previous assistant reasoning/tool-call context and the tool response.
+		assert.ok(
+			capturedPrompt.includes("User: hello"),
+			"Must include previous user message",
+		);
+		assert.ok(
+			capturedPrompt.includes("<think>\nthinking about hello\n</think>"),
+			"Must include previous thinking",
+		);
+		assert.ok(
+			capturedPrompt.includes(
+				'<tool_call>{"name": "test", "arguments": {}}</tool_call>',
+			),
+			"Must include previous tool call",
+		);
 		assert.ok(
 			capturedPrompt.includes("Tool Response (test): success"),
 			"Must include tool response signature",
-		);
-		assert.ok(
-			!capturedPrompt.includes("<think>\nthinking about hello\n</think>"),
-			"Should not include previous thinking",
-		);
-		assert.ok(
-			!capturedPrompt.includes(
-				'<tool_call>{"name": "test", "arguments": {}}</tool_call>',
-			),
-			"Should not include previous tool call",
 		);
 	} finally {
 		restore();
@@ -321,8 +325,8 @@ test("session-parent-tracking: appends messages using response message_id as par
 		>;
 		assert.strictEqual(
 			payload2Messages[0].content as string,
-			"User: Turn 2\n\n",
-			"Should only send the last message",
+			"User: Turn 1\n\nAssistant: Response 1\n\nUser: Turn 2\n\n",
+			"Should send the full OpenAI message history",
 		);
 	} finally {
 		restore();

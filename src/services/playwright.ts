@@ -251,10 +251,9 @@ export async function loginToQwenViaApi(
 
 	if (result.ok && result.data?.success) {
 		await activePage.goto("https://chat.qwen.ai/", {
-			waitUntil: "domcontentloaded",
+			waitUntil: "networkidle",
 			timeout: 60000,
 		});
-		await activePage.waitForTimeout(2000);
 
 		if (
 			!activePage.url().includes("auth") &&
@@ -330,17 +329,13 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{
 		throw new Error("Playwright not initialized");
 	}
 
-	// Clear cache and retry if needed
+	// Retry on timeout or transient failures
 	let retries = 2;
 	while (retries >= 0) {
 		try {
 			return await _fetchQwenHeaders(forceNew);
 		} catch (err) {
-			if (
-				err instanceof Error &&
-				err.message === "RETRY_HEADER_FETCH" &&
-				retries > 0
-			) {
+			if (err instanceof Error && retries > 0) {
 				console.log("[Playwright] Retrying header fetch...");
 				retries--;
 				cachedQwenHeaders = null;
@@ -454,11 +449,10 @@ async function _fetchQwenHeaders(forceNew = false): Promise<{
 			};
 
 			if (!extractedHeaders.cookie || !extractedHeaders["bx-ua"]) {
-				console.log("[Playwright] Missing critical headers, retrying...");
-				cachedQwenHeaders = null;
-				lastHeadersTime = 0;
-				await route.abort("aborted");
-				reject(new Error("RETRY_HEADER_FETCH"));
+				console.log(
+					"[Playwright] Intercepted request missing critical headers, skipping...",
+				);
+				await route.continue();
 				return;
 			}
 
@@ -486,14 +480,32 @@ async function _fetchQwenHeaders(forceNew = false): Promise<{
 				await activePage?.type(INPUT_SELECTOR, "a", { delay: 100 });
 				await activePage?.waitForTimeout(2000);
 
+				let clicked = false;
 				for (const selector of SEND_SELECTORS) {
-					const btn = await activePage?.$(selector);
-					if (btn && (await btn.isVisible())) {
-						await btn.click({ force: true }).catch(() => {});
-						return;
+					try {
+						const btn = await activePage?.$(selector);
+						if (btn && (await btn.isVisible())) {
+							// Try DOM click first
+							await activePage?.evaluate((sel) => {
+								const element = document.querySelector(sel) as HTMLElement;
+								if (element) {
+									element.focus();
+									element.click();
+								}
+							}, selector);
+							// Also try real mouse click
+							await btn.click({ force: true, delay: 50 }).catch(() => {});
+							clicked = true;
+							break;
+						}
+					} catch (_e) {
+						// Try next selector
 					}
 				}
-				await activePage?.keyboard.press("Enter");
+
+				if (!clicked) {
+					await activePage?.keyboard.press("Enter");
+				}
 			});
 	});
 }
