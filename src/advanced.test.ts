@@ -5,6 +5,19 @@ process.env.TEST_MOCK_PLAYWRIGHT = "true";
 
 import { app } from "./index.ts";
 
+// Helper to temporarily clear API_KEY for tests that need unauthenticated access
+function clearApiKey(): () => void {
+	const orig = process.env.API_KEY;
+	delete process.env.API_KEY;
+	return () => {
+		if (orig === undefined) {
+			delete process.env.API_KEY;
+		} else {
+			process.env.API_KEY = orig;
+		}
+	};
+}
+
 // Helper to mock the fetch global for testing empty response retry and caching logic
 function setupFetchMock(
 	handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
@@ -49,6 +62,8 @@ test("multiturn-thinking-tools: maintains reasoning_content history", async () =
 		});
 		return new Response(stream, { status: 200 });
 	});
+
+	const restoreApiKey = clearApiKey();
 
 	try {
 		const req = new Request("http://localhost/v1/chat/completions", {
@@ -96,6 +111,7 @@ test("multiturn-thinking-tools: maintains reasoning_content history", async () =
 		);
 	} finally {
 		restore();
+		restoreApiKey();
 	}
 });
 
@@ -124,6 +140,8 @@ test("streaming-whitespace: preserves exact whitespace", async () => {
 		});
 		return new Response(stream, { status: 200 });
 	});
+
+	const restoreApiKey = clearApiKey();
 
 	try {
 		const req = new Request("http://localhost/v1/chat/completions", {
@@ -161,6 +179,7 @@ test("streaming-whitespace: preserves exact whitespace", async () => {
 		assert.strictEqual(full, "     hello  \n\n  ");
 	} finally {
 		restore();
+		restoreApiKey();
 	}
 });
 
@@ -179,6 +198,8 @@ test("caching-streaming and cache-control: returns prompt_tokens_details", async
 		});
 		return new Response(stream, { status: 200 });
 	});
+
+	const restoreApiKey = clearApiKey();
 
 	try {
 		const req = new Request("http://localhost/v1/chat/completions", {
@@ -218,6 +239,7 @@ test("caching-streaming and cache-control: returns prompt_tokens_details", async
 		assert.strictEqual(usageBlock.prompt_tokens_details.cached_tokens, 0); // Tests caching-streaming shape!
 	} finally {
 		restore();
+		restoreApiKey();
 	}
 });
 
@@ -245,6 +267,9 @@ test("session-parent-tracking: appends messages using response message_id as par
 		});
 		return new Response(stream, { status: 200 });
 	});
+
+	const restoreApiKey = clearApiKey();
+	const _origTestSessionId = process.env.TEST_SESSION_ID;
 
 	try {
 		process.env.TEST_SESSION_ID = "test-session-parent-tracking";
@@ -301,5 +326,11 @@ test("session-parent-tracking: appends messages using response message_id as par
 		);
 	} finally {
 		restore();
+		restoreApiKey();
+		if (_origTestSessionId === undefined) {
+			delete process.env.TEST_SESSION_ID;
+		} else {
+			process.env.TEST_SESSION_ID = _origTestSessionId;
+		}
 	}
 });

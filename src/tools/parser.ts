@@ -93,7 +93,7 @@ export class StreamingToolParser {
 							this.emittedToolCallCount++;
 						}
 					} catch (_e) {
-						// Skip malformed tool calls silently
+						console.warn(`[StreamingToolParser] Parsing failed: ${toolJsonStr}`);
 					}
 
 					this.insideTool = false;

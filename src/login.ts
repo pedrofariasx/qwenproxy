@@ -15,6 +15,7 @@ import {
 	closePlaywright,
 	initPlaywright,
 	loginToQwen,
+	loginToQwenViaApi,
 } from "./services/playwright.ts";
 
 dotenv.config();
@@ -37,17 +38,23 @@ async function main() {
 			`[Login] Credentials found in .env. Attempting automated API login using ${browserType}...`,
 		);
 		await initPlaywright(true, browserType); // Can be headless
-		const success = await loginToQwen(email, password);
+		let success = await loginToQwenViaApi(email, password);
 		if (success) {
-			console.log("[Login] Automated login successful! Session saved.");
+			console.log("[Login] API login successful! Session saved.");
 			await closePlaywright();
 			process.exit(0);
-		} else {
-			console.error(
-				"[Login] Automated login failed. Falling back to manual login...",
-			);
-			await closePlaywright();
 		}
+		console.log("[Login] API login failed, trying UI fallback...");
+		success = await loginToQwen(email, password);
+		if (success) {
+			console.log("[Login] UI login successful! Session saved.");
+			await closePlaywright();
+			process.exit(0);
+		}
+		console.error(
+			"[Login] Automated login failed. Falling back to manual login...",
+		);
+		await closePlaywright();
 	}
 
 	console.log(`Opening ${browserType} to allow manual login...`);

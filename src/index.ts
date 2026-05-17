@@ -110,7 +110,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 				});
 			}
 
-			const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+			const portStr = process.env.PORT;
+			const parsedPort = portStr ? parseInt(portStr, 10) : NaN;
+			const port =
+				Number.isFinite(parsedPort) &&
+				parsedPort > 0 &&
+				Number.isInteger(parsedPort)
+					? parsedPort
+					: 3000;
+			if (portStr && port === 3000 && parsedPort !== 3000) {
+				console.warn(`[WARN] Invalid PORT="${portStr}", falling back to 3000`);
+			}
 
 			const networkIP = getNetworkAddress();
 
