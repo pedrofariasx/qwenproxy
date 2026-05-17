@@ -62,3 +62,26 @@ test('StreamingToolParser: robust parsing in stream', () => {
   assert.strictEqual(result.toolCalls[0].name, 'broken');
   assert.deepStrictEqual(result.toolCalls[0].arguments, { a: 1 });
 });
+
+test('StreamingToolParser: parses Qwen-safe Bengali tool delimiters', () => {
+  const parser = new StreamingToolParser();
+  const result = parser.feed('তত\n{"name":"session_search","arguments":{"query":"usagi OR brettchalupa"}}✨');
+
+  assert.strictEqual(result.text, '');
+  assert.strictEqual(result.toolCalls.length, 1);
+  assert.strictEqual(result.toolCalls[0].name, 'session_search');
+  assert.deepStrictEqual(result.toolCalls[0].arguments, { query: 'usagi OR brettchalupa' });
+});
+
+test('StreamingToolParser: buffers partial Bengali delimiter without leaking raw tool text', () => {
+  const parser = new StreamingToolParser();
+
+  const res1 = parser.feed('ত');
+  assert.strictEqual(res1.text, '');
+  assert.strictEqual(res1.toolCalls.length, 0);
+
+  const res2 = parser.feed('ত\n{"name":"session_search","arguments":{"query":"usagi"}}✨');
+  assert.strictEqual(res2.text, '');
+  assert.strictEqual(res2.toolCalls.length, 1);
+  assert.strictEqual(res2.toolCalls[0].name, 'session_search');
+});
