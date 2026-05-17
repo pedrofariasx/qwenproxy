@@ -94,10 +94,13 @@ export function robustParseJSON(str: string): any {
   try {
     return JSON.parse(tempJson);
   } catch (e) {
-    // Still fails, try one more aggressive approach: remove trailing comma before closing
+    // Try one more aggressive approach
     let aggressive = fixedJson.trim();
     if (aggressive.endsWith(',')) aggressive = aggressive.slice(0, -1);
-    
+
+    // Remove any content that looks like HTML/XML tags (from LLM hallucination)
+    aggressive = aggressive.replace(/<[^>]*>/g, '');
+
     // Recount for the aggressive version
     let ob = 0, bk = 0, is = false, esc = false;
     let aggFixed = '';
@@ -106,7 +109,7 @@ export function robustParseJSON(str: string): any {
       if (esc) { aggFixed += char; esc = false; continue; }
       if (char === '\\') { aggFixed += char; esc = true; continue; }
       if (char === '"') { is = !is; aggFixed += char; continue; }
-      
+
       if (is) {
         if (char === '\n') aggFixed += '\\n';
         else if (char === '\r') aggFixed += '\\r';
@@ -120,14 +123,14 @@ export function robustParseJSON(str: string): any {
         if (char === ']') bk--;
       }
     }
-    
+
     if (bk > 0) aggFixed += ']'.repeat(bk);
     if (ob > 0) aggFixed += '}'.repeat(ob);
-    
+
     try {
       return JSON.parse(aggFixed);
     } catch (e2) {
-      throw e; // Throw original error if all fixes fail
+      return null;
     }
   }
 }

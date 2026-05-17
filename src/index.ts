@@ -15,7 +15,7 @@ import { bearerAuth } from 'hono/bearer-auth';
 import { chatCompletions } from './routes/chat.ts';
 import { fetchQwenModels } from './services/qwen.ts';
 import * as dotenv from 'dotenv';
-import { initPlaywright, BrowserType } from './services/playwright.ts';
+import { initPlaywright, activePage, BrowserType } from './services/playwright.ts';
 import { networkInterfaces } from 'os';
 
 dotenv.config();
@@ -77,8 +77,26 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     browserType = process.env.BROWSER as BrowserType;
   }
 
-  initPlaywright(true, browserType).then(() => {
+  initPlaywright(true, browserType).then(async () => {
     console.log(`Playwright initialized (${browserType}).`);
+
+    const email = process.env.QWEN_EMAIL;
+    const password = process.env.QWEN_PASSWORD;
+    if (email && password) {
+      const { loginToQwenViaApi, loginToQwen } = await import('./services/playwright.ts');
+      let success = await loginToQwenViaApi(email, password);
+      if (!success) {
+        console.log('[Init] API failed, trying UI...');
+        success = await loginToQwen(email, password);
+      }
+      if (!success) {
+        console.log('[Init] Login failed, exiting...');
+        process.exit(1);
+      }
+    } else if (activePage) {
+      await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    }
+
     const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
     
     const networkIP = getNetworkAddress();

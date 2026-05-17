@@ -88,13 +88,10 @@ export class StreamingToolParser {
               });
               this.emittedToolCallCount++;
             }
-          } catch (e) {
-            console.warn(`[StreamingToolParser] Parsing failed for: ${toolJsonStr}`, e);
-            // If it fails, we treat it as text if no tools were emitted yet, 
-            // but this is tricky in a streaming context. 
-            // For now, we just log and move on.
+} catch (e) {
+            // Skip malformed tool calls silently
           }
-          
+
           this.insideTool = false;
           this.buffer = this.buffer.substring(endIdx + this.TOOL_END.length);
         } else {

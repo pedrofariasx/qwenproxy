@@ -52,5 +52,5 @@ try {
     console.log('Successfully parsed (at least some of it):', JSON.stringify(result, null, 2));
     console.log('✅ Crazy case handled without crashing!');
 } catch (e) {
-    console.log('⚠️ Crazy case failed (too malformed), but error was:', e.message);
+    console.log('⚠️ Crazy case failed (too malformed), but error was:', (e as Error).message);
 }

@@ -63,7 +63,7 @@ let lastModelsFetch = 0;
 
 export async function disableNativeTools(): Promise<void> {
   const { headers } = await getQwenHeaders();
-  
+
   const payload = {
     tools_enabled: {
       web_extractor: false,
