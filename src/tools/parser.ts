@@ -15,9 +15,8 @@ function logParseError(toolJsonStr: string): void {
 		.update(toolJsonStr)
 		.digest("hex")
 		.slice(0, 8);
-	const preview = toolJsonStr.slice(0, 100).replace(/\s+/g, " ");
 	console.warn(
-		`[StreamingToolParser] Parsing failed: length=${toolJsonStr.length} hash=${hash} preview='${preview}'`,
+		`[StreamingToolParser] Parsing failed: length=${toolJsonStr.length} hash=${hash}`,
 	);
 }
 
@@ -82,28 +81,56 @@ export class StreamingToolParser {
 					const toolJsonStr = this.buffer.substring(0, endIdx).trim();
 					try {
 						const toolCallObjRaw = robustParseJSON(toolJsonStr);
-						if (toolCallObjRaw) {
+						if (
+							toolCallObjRaw &&
+							typeof toolCallObjRaw === "object" &&
+							!Array.isArray(toolCallObjRaw)
+						) {
 							const toolCallObj = toolCallObjRaw as Record<string, unknown>;
-							const toolId = `call_${uuidv4()}`;
-							const toolName = (toolCallObj.name as string) || "";
-							let toolArgs: Record<string, unknown> = {};
-
-							if (toolCallObj.arguments) {
-								toolArgs =
-									typeof toolCallObj.arguments === "string"
-										? JSON.parse(toolCallObj.arguments)
-										: (toolCallObj.arguments as Record<string, unknown>);
+							const rawName = toolCallObj.name;
+							if (typeof rawName !== "string" || rawName.trim() === "") {
+								logParseError(toolJsonStr);
 							} else {
-								const { name: _name, ...rest } = toolCallObj;
-								toolArgs = rest as Record<string, unknown>;
-							}
+								const toolId = `call_${uuidv4()}`;
+								let toolArgs: Record<string, unknown> = {};
 
-							result.toolCalls.push({
-								id: toolId,
-								name: toolName,
-								arguments: toolArgs,
-							});
-							this.emittedToolCallCount++;
+								if (toolCallObj.arguments) {
+									if (typeof toolCallObj.arguments === "string") {
+										toolArgs = JSON.parse(toolCallObj.arguments);
+									} else if (
+										typeof toolCallObj.arguments === "object" &&
+										!Array.isArray(toolCallObj.arguments)
+									) {
+										toolArgs = toolCallObj.arguments as Record<string, unknown>;
+									}
+								} else {
+									const { name: _name, ...rest } = toolCallObj;
+									if (
+										typeof rest === "object" &&
+										rest !== null &&
+										!Array.isArray(rest)
+									) {
+										toolArgs = rest as Record<string, unknown>;
+									}
+								}
+
+								if (
+									typeof toolArgs === "object" &&
+									toolArgs !== null &&
+									!Array.isArray(toolArgs)
+								) {
+									result.toolCalls.push({
+										id: toolId,
+										name: rawName,
+										arguments: toolArgs,
+									});
+									this.emittedToolCallCount++;
+								} else {
+									logParseError(toolJsonStr);
+								}
+							}
+						} else {
+							logParseError(toolJsonStr);
 						}
 					} catch (_e) {
 						logParseError(toolJsonStr);
@@ -135,24 +162,48 @@ export class StreamingToolParser {
 				// Try to parse partial tool call
 				try {
 					const toolCallObjRaw = robustParseJSON(this.buffer);
-					if (toolCallObjRaw) {
+					if (
+						toolCallObjRaw &&
+						typeof toolCallObjRaw === "object" &&
+						!Array.isArray(toolCallObjRaw)
+					) {
 						const toolCallObj = toolCallObjRaw as Record<string, unknown>;
-						const toolId = `call_${uuidv4()}`;
-						const toolName = (toolCallObj.name as string) || "";
-						let toolArgs: Record<string, unknown> = (toolCallObj.arguments ||
-							{}) as Record<string, unknown>;
-						if (typeof toolArgs === "string") toolArgs = JSON.parse(toolArgs);
-						else if (!toolCallObj.arguments) {
-							const { name: _name, ...rest } = toolCallObj;
-							toolArgs = rest as Record<string, unknown>;
+						const rawName = toolCallObj.name;
+						if (typeof rawName === "string" && rawName.trim() !== "") {
+							const toolId = `call_${uuidv4()}`;
+							let toolArgs: Record<string, unknown> = {};
+							if (toolCallObj.arguments) {
+								if (typeof toolCallObj.arguments === "string") {
+									toolArgs = JSON.parse(toolCallObj.arguments);
+								} else if (
+									typeof toolCallObj.arguments === "object" &&
+									!Array.isArray(toolCallObj.arguments)
+								) {
+									toolArgs = toolCallObj.arguments as Record<string, unknown>;
+								}
+							} else {
+								const { name: _name, ...rest } = toolCallObj;
+								if (
+									typeof rest === "object" &&
+									rest !== null &&
+									!Array.isArray(rest)
+								) {
+									toolArgs = rest as Record<string, unknown>;
+								}
+							}
+							if (
+								typeof toolArgs === "object" &&
+								toolArgs !== null &&
+								!Array.isArray(toolArgs)
+							) {
+								result.toolCalls.push({
+									id: toolId,
+									name: rawName,
+									arguments: toolArgs,
+								});
+								this.emittedToolCallCount++;
+							}
 						}
-
-						result.toolCalls.push({
-							id: toolId,
-							name: toolName,
-							arguments: toolArgs,
-						});
-						this.emittedToolCallCount++;
 					}
 				} catch (_e) {
 					if (this.emittedToolCallCount === 0) {

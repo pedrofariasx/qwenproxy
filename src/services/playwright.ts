@@ -251,9 +251,10 @@ export async function loginToQwenViaApi(
 
 	if (result.ok && result.data?.success) {
 		await activePage.goto("https://chat.qwen.ai/", {
-			waitUntil: "networkidle",
+			waitUntil: "domcontentloaded",
 			timeout: 60000,
 		});
+		await activePage.waitForTimeout(2000);
 
 		if (
 			!activePage.url().includes("auth") &&
