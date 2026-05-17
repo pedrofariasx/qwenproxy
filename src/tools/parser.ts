@@ -4,9 +4,22 @@
  * Streaming parser for <tool_call> tags
  */
 
+import crypto from "node:crypto";
 import { v4 as uuidv4 } from "uuid";
 import { robustParseJSON } from "../utils/json.ts";
 import type { ParsedToolCall } from "./types.ts";
+
+function logParseError(toolJsonStr: string): void {
+	const hash = crypto
+		.createHash("sha256")
+		.update(toolJsonStr)
+		.digest("hex")
+		.slice(0, 8);
+	const preview = toolJsonStr.slice(0, 100).replace(/\s+/g, " ");
+	console.warn(
+		`[StreamingToolParser] Parsing failed: length=${toolJsonStr.length} hash=${hash} preview='${preview}'`,
+	);
+}
 
 export interface ParserResult {
 	/** Text content that is NOT part of a tool call */
@@ -93,7 +106,7 @@ export class StreamingToolParser {
 							this.emittedToolCallCount++;
 						}
 					} catch (_e) {
-						console.warn(`[StreamingToolParser] Parsing failed: ${toolJsonStr}`);
+						logParseError(toolJsonStr);
 					}
 
 					this.insideTool = false;

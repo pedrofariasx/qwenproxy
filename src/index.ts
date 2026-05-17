@@ -111,15 +111,20 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			}
 
 			const portStr = process.env.PORT;
-			const parsedPort = portStr ? parseInt(portStr, 10) : NaN;
-			const port =
-				Number.isFinite(parsedPort) &&
-				parsedPort > 0 &&
-				Number.isInteger(parsedPort)
-					? parsedPort
-					: 3000;
-			if (portStr && port === 3000 && parsedPort !== 3000) {
-				console.warn(`[WARN] Invalid PORT="${portStr}", falling back to 3000`);
+			let port = 3000;
+			if (portStr && /^\d+$/.test(portStr)) {
+				const parsedPort = parseInt(portStr, 10);
+				if (parsedPort >= 1 && parsedPort <= 65535) {
+					port = parsedPort;
+				} else {
+					console.warn(
+						`[WARN] Invalid PORT="${portStr}" (out of TCP range), falling back to 3000`,
+					);
+				}
+			} else if (portStr) {
+				console.warn(
+					`[WARN] Invalid PORT="${portStr}" (not a positive integer), falling back to 3000`,
+				);
 			}
 
 			const networkIP = getNetworkAddress();
