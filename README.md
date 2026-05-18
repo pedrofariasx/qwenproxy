@@ -1,16 +1,15 @@
 # QwenProxy
 
-Un proxy local que conecta tus apps con los modelos de **Qwen (chat.qwen.ai)** usando Playwright. Compatible con la API de OpenAI, herramientas locales y modo de razonamiento.
+A local API proxy that routes requests to **Qwen (chat.qwen.ai)** models via Playwright browser automation. OpenAI-compatible interface with tool execution, reasoning support, and session persistence.
 
 ---
 
-## Requisitos
+## Requirements
 
 - Node.js 20+
 - npm 9+
-- Playwright (se instala solo con `npm install`)
 
-## Instalación
+## Quick Start
 
 ```bash
 git clone https://github.com/pedrofariasx/qwenproxy.git
@@ -19,35 +18,43 @@ npm install
 npm start
 ```
 
-## Configuración
+## Configuration
 
-Crea un archivo `.env`:
+Create a `.env` file in the project root:
 
 ```env
 PORT=3000
-API_KEY=tu-clave-secreta
-QWEN_EMAIL=tu@email.com
-QWEN_PASSWORD=tu-contraseña
+API_KEY=your-secret-key
+QWEN_EMAIL=your@email.com
+QWEN_PASSWORD=your-password
 BROWSER=chromium
 ```
 
-## Uso
+## Commands
 
-```bash
-npm start           # Iniciar servidor (Chromium por defecto)
-npm run start:firefox  # Usar Firefox
-npm run login        # Login manual si no usas credenciales
+| Command | Description |
+|---------|-------------|
+| `npm start` | Start server (Chromium) |
+| `npm run start:firefox` | Start with Firefox |
+| `npm run login` | Manual login |
+
+## API
+
+### Chat Completions
+
+```http
+POST /v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer your-key
 ```
 
-## Endpoints
+### Models
 
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| POST | `/v1/chat/completions` | Chat con el modelo |
-| GET | `/v1/models` | Lista de modelos disponibles |
-| GET | `/health` | Estado del servidor |
+```http
+GET /v1/models
+```
 
-## Ejemplo con OpenAI SDK
+### Example (OpenAI SDK)
 
 ```typescript
 const client = new OpenAI({
@@ -55,23 +62,34 @@ const client = new OpenAI({
   apiKey: 'sk-test'
 });
 
-const response = await client.chat.completions.create({
+const completion = await client.chat.completions.create({
   model: 'qwen-plus',
-  messages: [{ role: 'user', content: 'Hola' }]
+  messages: [{ role: 'user', content: 'Hello!' }]
 });
 ```
 
-## Estructura
+## Supported Models
+
+- `qwen-plus` (default, with reasoning)
+- `qwen-plus-no-thinking` (without reasoning block)
+- `qwen-max`, `qwen-turbo`, etc. (depends on account)
+
+## Project Structure
 
 ```
 src/
-├── index.ts        # Servidor principal
-├── routes/chat.ts  # Endpoint de chat
-├── services/       # Integración con Qwen y Playwright
-├── tools/          # Sistema de herramientas
-└── login.ts        # Autenticación
+├── index.ts         # Server entry point
+├── routes/chat.ts   # Chat completion handler
+├── services/
+│   ├── qwen.ts      # Qwen API integration
+│   └── playwright.ts # Browser automation
+├── tools/
+│   ├── parser.ts    # Tool call parsing
+│   ├── executor.ts  # Tool execution
+│   └── registry.ts  # Tool registry
+└── login.ts         # Authentication script
 ```
 
-## Disclaimer
+## License
 
-Este proyecto es solo para fines educativos. El uso es bajo tu responsabilidad.
+ISC
