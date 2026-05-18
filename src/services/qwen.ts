@@ -60,48 +60,62 @@ export interface QwenPayload {
 
 let cachedModels: any[] | null = null;
 let lastModelsFetch = 0;
+let nativeToolsDisabled = false;
+let disablingNativeToolsInProgress = false;
 
 export async function disableNativeTools(): Promise<void> {
-  const { headers } = await getQwenHeaders();
-  
-  const payload = {
-    tools_enabled: {
-      web_extractor: false,
-      web_search_image: false,
-      web_search: false,
-      image_gen_tool: false,
-      code_interpreter: false,
-      history_retriever: false,
-      image_edit_tool: false,
-      bio: false,
-      image_zoom_in_tool: false
+  if (nativeToolsDisabled || disablingNativeToolsInProgress) {
+    return;
+  }
+  disablingNativeToolsInProgress = true;
+
+  try {
+    const { headers } = await getQwenHeaders();
+    
+    const payload = {
+      tools_enabled: {
+        web_extractor: false,
+        web_search_image: false,
+        web_search: false,
+        image_gen_tool: false,
+        code_interpreter: false,
+        history_retriever: false,
+        image_edit_tool: false,
+        bio: false,
+        image_zoom_in_tool: false
+      }
+    };
+
+    console.log('[Qwen] Disabling native tools...');
+    const response = await fetch('https://chat.qwen.ai/api/v2/users/user/settings/update', {
+      method: 'POST',
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'pt-BR,pt;q=0.9',
+        'content-type': 'application/json',
+        'cookie': headers['cookie'],
+        'origin': 'https://chat.qwen.ai',
+        'referer': 'https://chat.qwen.ai/',
+        'user-agent': headers['user-agent'],
+        'x-request-id': uuidv4(),
+        'bx-ua': headers['bx-ua'],
+        'bx-umidtoken': headers['bx-umidtoken'],
+        'bx-v': headers['bx-v']
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`[Qwen] Failed to disable native tools: ${response.status} - ${text}`);
+    } else {
+      console.log('[Qwen] Native tools disabled successfully.');
+      nativeToolsDisabled = true;
     }
-  };
-
-  console.log('[Qwen] Disabling native tools...');
-  const response = await fetch('https://chat.qwen.ai/api/v2/users/user/settings/update', {
-    method: 'POST',
-    headers: {
-      'accept': 'application/json, text/plain, */*',
-      'accept-language': 'pt-BR,pt;q=0.9',
-      'content-type': 'application/json',
-      'cookie': headers['cookie'],
-      'origin': 'https://chat.qwen.ai',
-      'referer': 'https://chat.qwen.ai/',
-      'user-agent': headers['user-agent'],
-      'x-request-id': uuidv4(),
-      'bx-ua': headers['bx-ua'],
-      'bx-umidtoken': headers['bx-umidtoken'],
-      'bx-v': headers['bx-v']
-    },
-    body: JSON.stringify(payload)
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    console.error(`[Qwen] Failed to disable native tools: ${response.status} - ${text}`);
-  } else {
-    console.log('[Qwen] Native tools disabled successfully.');
+  } catch (err: any) {
+    console.error(`[Qwen] Error disabling native tools: ${err.message}`);
+  } finally {
+    disablingNativeToolsInProgress = false;
   }
 }
 

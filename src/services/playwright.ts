@@ -21,21 +21,42 @@ let cachedQwenHeaders: { headers: Record<string, string>, chatSessionId: string,
 let lastHeadersTime = 0;
 const HEADERS_TTL = 10 * 60 * 1000; // 10 minutes
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+class Mutex {
+  private queue: (() => void)[] = [];
+  private locked = false;
+
+  async acquire(): Promise<() => void> {
+    if (!this.locked) {
+      this.locked = true;
+      return () => this.release();
+    }
+    return new Promise<() => void>(resolve => {
+      this.queue.push(() => {
+        resolve(() => this.release());
+      });
+    });
+  }
+
+  private release(): void {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.locked = false;
+    }
+  }
+}
+
 // Lock to prevent concurrent UI interactions
-let uiLock: Promise<void> = Promise.resolve();
+const uiMutex = new Mutex();
 
 export async function getCookies(): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
   if (!activePage) return '';
   const cookies = await activePage.context().cookies();
   return cookies.map(c => `${c.name}=${c.value}`).join('; ');
-}
-
-async function hasAuthTokenCookie(): Promise<boolean> {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) return true;
-  if (!activePage) return false;
-  const cookies = await activePage.context().cookies('https://chat.qwen.ai/');
-  return cookies.some(c => c.name === 'token' && c.value);
 }
 
 export async function getBasicHeaders(): Promise<{ cookie: string, userAgent: string, bxV: string }> {
@@ -153,11 +174,7 @@ export async function loginToQwen(email: string, password: string): Promise<bool
  */
 export async function getQwenHeaders(forceNew = false): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
   // Use a lock to ensure only one request uses the UI at a time
-  const release = await new Promise<() => void>(resolve => {
-    uiLock = uiLock.then(() => new Promise<void>(innerResolve => {
-      resolve(innerResolve);
-    }));
-  });
+  const release = await uiMutex.acquire();
 
   try {
     return await _getQwenHeadersInternal(forceNew);
@@ -202,17 +219,14 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
     await activePage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
   }
 
-  // Check if we are logged in. Qwen can show a usable /c/guest chat page with
-  // no login page, but guest sessions hit a much lower usage limit. Treat a
-  // missing token cookie as unauthenticated and use the configured credentials.
-  const isLoginPage = activePage.url().includes('login') || activePage.url().includes('auth') || (await activePage.$('input[type="email"], input[placeholder*="Email"]'));
-  const hasAuthToken = await hasAuthTokenCookie();
-  if (isLoginPage || !hasAuthToken) {
+  // Check if we are on a login page and perform automated login if credentials provided
+  const isLoginPage = activePage.url().includes('login') || (await activePage.$('input[type="email"], input[placeholder*="Email"]'));
+  if (isLoginPage) {
     const email = process.env.QWEN_EMAIL;
     const password = process.env.QWEN_PASSWORD;
-
+    
     if (email && password) {
-      console.log(`[Playwright] ${isLoginPage ? 'Detected login page' : 'Missing Qwen auth token; guest session detected'}. Attempting automated login...`);
+      console.log('[Playwright] Detected login page. Attempting automated login...');
       try {
         const loggedIn = await loginToQwen(email, password);
         if (!loggedIn) {
@@ -223,7 +237,7 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
         console.error('[Playwright] Automated login failed:', err.message);
       }
     } else {
-      console.warn('[Playwright] Qwen session appears unauthenticated but QWEN_EMAIL/PASSWORD not provided in .env');
+      console.warn('[Playwright] Detected login page but QWEN_EMAIL/PASSWORD not provided in .env');
     }
   }
 
@@ -306,7 +320,7 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
       await activePage!.fill(inputSelector, ''); // clear first
       await activePage!.type(inputSelector, 'a', { delay: 100 });
       console.log('[Playwright] Typed char, waiting for UI to update...');
-      await activePage!.waitForTimeout(2000); // Wait more for Send button to enable
+      await sleep(2000); // Wait more for Send button to enable
       
       // Improved Send Button detection & aggressive clicking
       const selectors = [

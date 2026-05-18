@@ -18,13 +18,54 @@ import type { FunctionToolDefinition } from '../tools/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 
-function getIncrementalDelta(oldStr: string, newStr: string): string {
-  if (!oldStr) return newStr;
-  if (newStr === oldStr) return '';
-  if (newStr.startsWith(oldStr)) return newStr.substring(oldStr.length);
-  // If it doesn't start with oldStr, assume it's a delta
-  return newStr;
+interface DeltaResult {
+  delta: string;
+  isCumulative: boolean;
+  matchedContent: string;
 }
+
+function getIncrementalDelta(oldStr: string, newStr: string): DeltaResult {
+  if (!oldStr) {
+    return { delta: newStr, isCumulative: true, matchedContent: newStr };
+  }
+  if (newStr === oldStr) {
+    return { delta: '', isCumulative: true, matchedContent: oldStr };
+  }
+
+  // Fast path: newStr starts with oldStr
+  if (newStr.startsWith(oldStr)) {
+    return {
+      delta: newStr.substring(oldStr.length),
+      isCumulative: true,
+      matchedContent: newStr
+    };
+  }
+
+  // Only consider sliding overlap search if oldStr is sufficiently long
+  // and newStr is at least as long as oldStr.
+  if (oldStr.length >= 15 && newStr.length >= oldStr.length) {
+    // Sliding overlap search scanning backwards from the end of oldStr (up to 15 characters)
+    const maxSearch = Math.min(oldStr.length, 15);
+    for (let i = 1; i <= maxSearch; i++) {
+      const candidatePrefix = oldStr.substring(0, oldStr.length - i);
+      if (newStr.startsWith(candidatePrefix)) {
+        return {
+          delta: newStr.substring(candidatePrefix.length),
+          isCumulative: true,
+          matchedContent: newStr
+        };
+      }
+    }
+  }
+
+  // Fallback to treating as a pure delta chunk
+  return {
+    delta: newStr,
+    isCumulative: false,
+    matchedContent: oldStr + newStr
+  };
+}
+
 
 function parseQwenErrorPayload(raw: string): { message: string; status: number } | null {
   const text = raw.trim();
@@ -43,12 +84,11 @@ function parseQwenErrorPayload(raw: string): { message: string; status: number }
       const msg = typeof payload.error === 'string' ? payload.error : (payload.error.message || JSON.stringify(payload.error));
       return { message: `Qwen upstream error: ${msg}`, status: 502 };
     }
-  } catch {
+  } catch (e) {
     // Non-SSE, non-JSON upstream body. Keep this as an explicit bad gateway
     // instead of silently returning an empty assistant message.
     return { message: `Qwen upstream returned non-SSE response: ${text.slice(0, 300)}`, status: 502 };
   }
-
   return null;
 }
 
@@ -130,7 +170,7 @@ export async function chatCompletions(c: Context) {
     const isNewSession = !messages.some(m => m.role === 'assistant');
 
     // Empty response retry logic
-    let stream: ReadableStream;
+    let stream!: ReadableStream;
     let uiSessionId = '';
     let retries = 3;
     while (retries > 0) {
@@ -153,15 +193,19 @@ export async function chatCompletions(c: Context) {
     if (!isStream) {
       const reader = stream!.getReader();
       const decoder = new TextDecoder();
-
+      
       let currentThoughtIndex = 0;
       let reasoningBuffer = '';
       let lastFullContent = '';
       const toolParser = new StreamingToolParser();
-      const toolCallsOut: any[] = [];
+
       let buffer = '';
       let completionTokens = 0;
       let promptTokens = Math.ceil(finalPrompt.length / 3.5);
+
+      let finalContent = '';
+      const finalToolCalls: any[] = [];
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -173,7 +217,7 @@ export async function chatCompletions(c: Context) {
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
+          
           const dataStr = trimmed.slice(6);
           if (dataStr === '[DONE]') continue;
 
@@ -197,7 +241,7 @@ export async function chatCompletions(c: Context) {
 
             if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
               const delta = chunk.choices[0].delta;
-
+              
               if (delta.phase === 'thinking_summary') {
                 isThinkingChunk = true;
                 if (delta.extra && delta.extra.summary_thought && delta.extra.summary_thought.content) {
@@ -212,10 +256,14 @@ export async function chatCompletions(c: Context) {
                 isThinkingChunk = false;
                 if (delta.content !== undefined) {
                   const newContent = delta.content || '';
-                  vStr = getIncrementalDelta(lastFullContent, newContent);
-                  if (vStr) {
-                    lastFullContent += vStr;
-                    foundStr = true;
+                  const result = getIncrementalDelta(lastFullContent, newContent);
+                  vStr = result.delta;
+                  
+                  if (vStr || result.isCumulative) {
+                    lastFullContent = result.matchedContent;
+                    if (vStr) {
+                      foundStr = true;
+                    }
                   }
                 }
               }
@@ -223,13 +271,16 @@ export async function chatCompletions(c: Context) {
 
             if (foundStr && vStr !== '') {
               if (vStr === 'FINISHED') continue;
+
               if (isThinkingChunk) {
                 reasoningBuffer += vStr;
               } else {
                 const { text, toolCalls } = toolParser.feed(vStr);
-                if (text) lastFullContent += '';
+                if (text) {
+                  finalContent += text;
+                }
                 for (const tc of toolCalls) {
-                  toolCallsOut.push({
+                  finalToolCalls.push({
                     id: tc.id,
                     type: 'function',
                     function: {
@@ -241,7 +292,7 @@ export async function chatCompletions(c: Context) {
               }
             }
           } catch (e) {
-            // parse error, ignore partial chunk
+            // ignore partial chunk
           }
         }
       }
@@ -251,12 +302,13 @@ export async function chatCompletions(c: Context) {
         return c.json({ error: { message: upstreamError.message } }, upstreamError.status as any);
       }
 
+      // Flush tool parser
       const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
       if (remainingText) {
-        // remainingText has already been preserved in lastFullContent by getIncrementalDelta/feed path when present.
+        finalContent += remainingText;
       }
       for (const tc of remainingToolCalls) {
-        toolCallsOut.push({
+        finalToolCalls.push({
           id: tc.id,
           type: 'function',
           function: {
@@ -266,30 +318,35 @@ export async function chatCompletions(c: Context) {
         });
       }
 
+      const finalFinishReason = finalToolCalls.length > 0 ? 'tool_calls' : 'stop';
+
       const usage = {
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
         total_tokens: promptTokens + completionTokens,
         prompt_tokens_details: { cached_tokens: 0 }
       };
-      const message: any = { role: 'assistant', content: toolCallsOut.length ? null : lastFullContent };
-      if (reasoningBuffer) message.reasoning_content = reasoningBuffer;
-      if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
-      if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
-      return c.json({
+      const responseBody = {
         id: completionId,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: body.model,
         choices: [{
           index: 0,
-          message,
+          message: {
+            role: 'assistant',
+            content: finalContent || null,
+            ...(reasoningBuffer ? { reasoning_content: reasoningBuffer } : {}),
+            ...(finalToolCalls.length > 0 ? { tool_calls: finalToolCalls } : {})
+          },
           logprobs: null,
-          finish_reason: toolCallsOut.length ? 'tool_calls' : 'stop'
+          finish_reason: finalFinishReason
         }],
-        usage
-      });
+        usage: usage
+      };
+
+      return c.json(responseBody);
     }
 
     c.header('Content-Type', 'text/event-stream');
@@ -387,11 +444,14 @@ export async function chatCompletions(c: Context) {
                 isThinkingChunk = false;
                 if (delta.content !== undefined) {
                   const newContent = delta.content || '';
-                  vStr = getIncrementalDelta(lastFullContent, newContent);
+                  const result = getIncrementalDelta(lastFullContent, newContent);
+                  vStr = result.delta;
                   
-                  if (vStr) {
-                    lastFullContent += vStr;
-                    foundStr = true;
+                  if (vStr || result.isCumulative) {
+                    lastFullContent = result.matchedContent;
+                    if (vStr) {
+                      foundStr = true;
+                    }
                   }
                 }
               }
@@ -458,17 +518,15 @@ export async function chatCompletions(c: Context) {
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
           model: body.model,
-          choices: [makeChoice({ content: upstreamError.message })]
+          choices: [makeChoice({ content: '\n\n[QwenProxy Error: ' + upstreamError.message + ']' })]
         });
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
           model: body.model,
-          choices: [makeChoice({}, 'stop')]
+          choices: [makeChoice({}, 'error')]
         });
-        await streamWriter.write('data: [DONE]\n\n');
-        return;
       }
 
       // Flush tool parser
