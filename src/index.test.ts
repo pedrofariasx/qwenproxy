@@ -83,8 +83,8 @@ test("Chat Completions endpoint with qwen3.6-plus (thinking enabled)", async () 
 		return originalFetch(input);
 	};
 
-	// Initialize playwright for this test
-	await initPlaywright(false);
+	// Initialize playwright for this test (headless)
+	await initPlaywright();
 
 	try {
 		const payload = {
@@ -181,7 +181,7 @@ test("Chat Completions returns explicit error for non-SSE upstream JSON errors",
 		return originalFetch(input);
 	};
 
-	await initPlaywright(false);
+	await initPlaywright();
 
 	try {
 		const req = new Request("http://localhost/v1/chat/completions", {
@@ -227,7 +227,7 @@ test("Chat Completions returns a JSON chat.completion object for non-streaming r
 		return originalFetch(input);
 	};
 
-	await initPlaywright(false);
+	await initPlaywright();
 
 	try {
 		const req = new Request("http://localhost/v1/chat/completions", {

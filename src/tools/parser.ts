@@ -1,24 +1,12 @@
-/*
+﻿/*
  * File: parser.ts
  * Project: qwenproxy
  * Streaming parser for <tool_call> tags
  */
 
-import crypto from "node:crypto";
 import { v4 as uuidv4 } from "uuid";
 import { robustParseJSON } from "../utils/json.ts";
 import type { ParsedToolCall } from "./types.ts";
-
-function logParseError(toolJsonStr: string): void {
-	const hash = crypto
-		.createHash("sha256")
-		.update(toolJsonStr)
-		.digest("hex")
-		.slice(0, 8);
-	console.warn(
-		`[StreamingToolParser] Parsing failed: length=${toolJsonStr.length} hash=${hash}`,
-	);
-}
 
 export interface ParserResult {
 	/** Text content that is NOT part of a tool call */
@@ -30,9 +18,59 @@ export interface ParserResult {
 export class StreamingToolParser {
 	private buffer = "";
 	private insideTool = false;
-	private TOOL_START = "<tool_call>";
-	private TOOL_END = "</tool_call>";
+	private activeToolStart = "";
+	private activeToolEnd = "";
 	private emittedToolCallCount = 0;
+
+	private static readonly XML_TAG_RE =
+		/<\/?[\w-]+(?:\s+[\w-]+="[^"]*")*\s*\/?>/g;
+	private static readonly HTML_ENTITY_RE = /&[a-z]+;|&#\d+;|&#x[a-f0-9]+;/gi;
+
+	private static cleanToolJson(raw: string): string {
+		return raw
+			.replace(StreamingToolParser.XML_TAG_RE, "")
+			.replace(StreamingToolParser.HTML_ENTITY_RE, "")
+			.trim();
+	}
+
+	private static readonly TOOL_SYNTAXES = [
+		{ start: "\u003Ctool_call\u003E", end: "\u003C/tool_call\u003E" },
+		{ start: "\u09A4\u09A4", end: "\u2728" },
+	] as const;
+
+	private findNextStart(): {
+		index: number;
+		start: string;
+		end: string;
+	} | null {
+		let bestIndex = -1;
+		let bestStart = "";
+		let bestEnd = "";
+
+		for (const syntax of StreamingToolParser.TOOL_SYNTAXES) {
+			const idx = this.buffer.indexOf(syntax.start);
+			if (idx !== -1 && (bestIndex === -1 || idx < bestIndex)) {
+				bestIndex = idx;
+				bestStart = syntax.start;
+				bestEnd = syntax.end;
+			}
+		}
+
+		return bestIndex !== -1
+			? { index: bestIndex, start: bestStart, end: bestEnd }
+			: null;
+	}
+
+	private partialStartLengthAtBufferEnd(): number {
+		for (const syntax of StreamingToolParser.TOOL_SYNTAXES) {
+			for (let i = 1; i <= syntax.start.length; i++) {
+				if (this.buffer.endsWith(syntax.start.substring(0, i))) {
+					return i;
+				}
+			}
+		}
+		return 0;
+	}
 
 	/**
 	 * Feeds a chunk of text into the parser and returns any extracted text and tool calls.
@@ -46,98 +84,101 @@ export class StreamingToolParser {
 
 		while (this.buffer.length > 0) {
 			if (!this.insideTool) {
-				const startIdx = this.buffer.indexOf(this.TOOL_START);
-				if (startIdx !== -1) {
-					// Found tool start. Everything before it is text (if no tools emitted yet)
-					const textToEmit = this.buffer.substring(0, startIdx);
+				const startMatch = this.findNextStart();
+				if (startMatch) {
+					const textToEmit = this.buffer.substring(0, startMatch.index);
 					if (textToEmit && this.emittedToolCallCount === 0) {
 						result.text += textToEmit;
 					}
 					this.insideTool = true;
+					this.activeToolStart = startMatch.start;
+					this.activeToolEnd = startMatch.end;
 					this.buffer = this.buffer.substring(
-						startIdx + this.TOOL_START.length,
+						startMatch.index + startMatch.start.length,
 					);
 				} else {
-					// No full start tag. Check for partial match at the end to avoid emitting half a tag
-					let flushIndex = this.buffer.length;
-					for (let i = 1; i <= this.TOOL_START.length; i++) {
-						if (this.buffer.endsWith(this.TOOL_START.substring(0, i))) {
-							flushIndex = this.buffer.length - i;
-							break;
-						}
-					}
+					const partialLen = this.partialStartLengthAtBufferEnd();
+					const flushIndex = this.buffer.length - partialLen;
 
 					const textToEmit = this.buffer.substring(0, flushIndex);
 					if (textToEmit && this.emittedToolCallCount === 0) {
 						result.text += textToEmit;
 					}
 					this.buffer = this.buffer.substring(flushIndex);
-					break; // Wait for more data
+					break;
 				}
 			} else {
-				// Inside tool
-				const endIdx = this.buffer.indexOf(this.TOOL_END);
+				const endIdx = this.buffer.indexOf(this.activeToolEnd);
 				if (endIdx !== -1) {
-					const toolJsonStr = this.buffer.substring(0, endIdx).trim();
+					const rawToolJson = this.buffer.substring(0, endIdx).trim();
+					const toolJsonStr = StreamingToolParser.cleanToolJson(rawToolJson);
 					try {
-						const toolCallObjRaw = robustParseJSON(toolJsonStr);
+						const toolCallObj = robustParseJSON(toolJsonStr) as Record<
+							string,
+							unknown
+						> | null;
 						if (
-							toolCallObjRaw &&
-							typeof toolCallObjRaw === "object" &&
-							!Array.isArray(toolCallObjRaw)
+							toolCallObj &&
+							typeof toolCallObj === "object" &&
+							!Array.isArray(toolCallObj)
 						) {
-							const toolCallObj = toolCallObjRaw as Record<string, unknown>;
-							const rawName = toolCallObj.name;
-							if (typeof rawName !== "string" || rawName.trim() === "") {
-								logParseError(toolJsonStr);
-							} else {
-								const toolId = `call_${uuidv4()}`;
-								let toolArgs: Record<string, unknown> = {};
+							const toolId = `call_${uuidv4()}`;
+							const toolName = toolCallObj.name || "";
+							let toolArgs: Record<string, unknown> | null = null;
 
-								if (toolCallObj.arguments) {
-									if (typeof toolCallObj.arguments === "string") {
-										toolArgs = JSON.parse(toolCallObj.arguments);
-									} else if (
-										typeof toolCallObj.arguments === "object" &&
-										!Array.isArray(toolCallObj.arguments)
-									) {
-										toolArgs = toolCallObj.arguments as Record<string, unknown>;
+							if (toolCallObj.arguments !== undefined) {
+								if (typeof toolCallObj.arguments === "string") {
+									try {
+										const parsed = JSON.parse(toolCallObj.arguments);
+										if (
+											typeof parsed === "object" &&
+											parsed !== null &&
+											!Array.isArray(parsed)
+										) {
+											toolArgs = parsed as Record<string, unknown>;
+										}
+									} catch {
+										toolArgs = {};
 									}
-								} else {
-									const { name: _name, ...rest } = toolCallObj;
-									if (
-										typeof rest === "object" &&
-										rest !== null &&
-										!Array.isArray(rest)
-									) {
-										toolArgs = rest as Record<string, unknown>;
-									}
-								}
-
-								if (
-									typeof toolArgs === "object" &&
-									toolArgs !== null &&
-									!Array.isArray(toolArgs)
+								} else if (
+									typeof toolCallObj.arguments === "object" &&
+									toolCallObj.arguments !== null &&
+									!Array.isArray(toolCallObj.arguments)
 								) {
-									result.toolCalls.push({
-										id: toolId,
-										name: rawName,
-										arguments: toolArgs,
-									});
-									this.emittedToolCallCount++;
-								} else {
-									logParseError(toolJsonStr);
+									toolArgs = toolCallObj.arguments as Record<string, unknown>;
+								}
+							} else {
+								const { name, ...rest } = toolCallObj;
+								if (typeof rest === "object" && rest !== null) {
+									toolArgs = rest as Record<string, unknown>;
 								}
 							}
-						} else {
-							logParseError(toolJsonStr);
+
+							if (
+								typeof toolName === "string" &&
+								toolName.trim() !== "" &&
+								toolArgs !== null
+							) {
+								result.toolCalls.push({
+									id: toolId,
+									name: toolName,
+									arguments: toolArgs,
+								});
+								this.emittedToolCallCount++;
+							}
 						}
 					} catch (_e) {
-						logParseError(toolJsonStr);
+						console.warn(
+							`[StreamingToolParser] Parse failed: ${toolJsonStr.slice(0, 200)}`,
+						);
 					}
 
 					this.insideTool = false;
-					this.buffer = this.buffer.substring(endIdx + this.TOOL_END.length);
+					this.activeToolStart = "";
+					this.activeToolEnd = "";
+					this.buffer = this.buffer.substring(
+						endIdx + this.activeToolEnd.length,
+					);
 				} else {
 					// Waiting for TOOL_END, buffer the content
 					break;
@@ -159,55 +200,64 @@ export class StreamingToolParser {
 
 		if (this.buffer.length > 0) {
 			if (this.insideTool) {
-				// Try to parse partial tool call
+				const cleanedBuffer = StreamingToolParser.cleanToolJson(this.buffer);
 				try {
-					const toolCallObjRaw = robustParseJSON(this.buffer);
+					const toolCallObj = robustParseJSON(cleanedBuffer) as Record<
+						string,
+						unknown
+					> | null;
 					if (
-						toolCallObjRaw &&
-						typeof toolCallObjRaw === "object" &&
-						!Array.isArray(toolCallObjRaw)
+						toolCallObj &&
+						typeof toolCallObj === "object" &&
+						!Array.isArray(toolCallObj)
 					) {
-						const toolCallObj = toolCallObjRaw as Record<string, unknown>;
-						const rawName = toolCallObj.name;
-						if (typeof rawName === "string" && rawName.trim() !== "") {
-							const toolId = `call_${uuidv4()}`;
-							let toolArgs: Record<string, unknown> = {};
-							if (toolCallObj.arguments) {
-								if (typeof toolCallObj.arguments === "string") {
-									toolArgs = JSON.parse(toolCallObj.arguments);
-								} else if (
-									typeof toolCallObj.arguments === "object" &&
-									!Array.isArray(toolCallObj.arguments)
-								) {
-									toolArgs = toolCallObj.arguments as Record<string, unknown>;
+						const toolId = `call_${uuidv4()}`;
+						const toolName = toolCallObj.name || "";
+						let toolArgs: Record<string, unknown> | null = null;
+						if (toolCallObj.arguments !== undefined) {
+							if (typeof toolCallObj.arguments === "string") {
+								try {
+									const parsed = JSON.parse(toolCallObj.arguments);
+									if (
+										typeof parsed === "object" &&
+										parsed !== null &&
+										!Array.isArray(parsed)
+									) {
+										toolArgs = parsed as Record<string, unknown>;
+									}
+								} catch {
+									toolArgs = {};
 								}
-							} else {
-								const { name: _name, ...rest } = toolCallObj;
-								if (
-									typeof rest === "object" &&
-									rest !== null &&
-									!Array.isArray(rest)
-								) {
-									toolArgs = rest as Record<string, unknown>;
-								}
-							}
-							if (
-								typeof toolArgs === "object" &&
-								toolArgs !== null &&
-								!Array.isArray(toolArgs)
+							} else if (
+								typeof toolCallObj.arguments === "object" &&
+								toolCallObj.arguments !== null &&
+								!Array.isArray(toolCallObj.arguments)
 							) {
-								result.toolCalls.push({
-									id: toolId,
-									name: rawName,
-									arguments: toolArgs,
-								});
-								this.emittedToolCallCount++;
+								toolArgs = toolCallObj.arguments as Record<string, unknown>;
 							}
+						} else {
+							const { name: _name, ...rest } = toolCallObj;
+							if (typeof rest === "object" && rest !== null) {
+								toolArgs = rest as Record<string, unknown>;
+							}
+						}
+
+						if (
+							typeof toolName === "string" &&
+							toolName.trim() !== "" &&
+							toolArgs !== null
+						) {
+							result.toolCalls.push({
+								id: toolId,
+								name: toolName,
+								arguments: toolArgs,
+							});
+							this.emittedToolCallCount++;
 						}
 					}
 				} catch (_e) {
 					if (this.emittedToolCallCount === 0) {
-						result.text = this.TOOL_START + this.buffer;
+						result.text = this.activeToolStart + this.buffer;
 					}
 				}
 			} else if (this.emittedToolCallCount === 0) {

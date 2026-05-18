@@ -8,6 +8,28 @@
 import { v4 as uuidv4 } from "uuid";
 import { getBasicHeaders, getQwenHeaders } from "./playwright.ts";
 
+export class RetryableQwenStreamError extends Error {
+	readonly retryAfterMs: number;
+
+	constructor(message: string, retryAfterMs: number) {
+		super(message);
+		this.name = "RetryableQwenStreamError";
+		this.retryAfterMs = retryAfterMs;
+	}
+}
+
+export class QwenUpstreamError extends Error {
+	readonly upstreamCode: string;
+	readonly upstreamStatus: number;
+
+	constructor(message: string, upstreamCode: string, upstreamStatus: number) {
+		super(message);
+		this.name = "QwenUpstreamError";
+		this.upstreamCode = upstreamCode;
+		this.upstreamStatus = upstreamStatus;
+	}
+}
+
 interface GlobalWithSession {
 	_sessionStates?: Record<string, string | null>;
 }
@@ -68,53 +90,69 @@ export interface QwenPayload {
 
 let cachedModels: Array<Record<string, unknown>> | null = null;
 let lastModelsFetch = 0;
+let nativeToolsDisabled = false;
+let disablingNativeToolsInProgress = false;
 
 export async function disableNativeTools(): Promise<void> {
-	const { headers } = await getQwenHeaders();
+	if (nativeToolsDisabled || disablingNativeToolsInProgress) {
+		return;
+	}
+	disablingNativeToolsInProgress = true;
 
-	const payload = {
-		tools_enabled: {
-			web_extractor: false,
-			web_search_image: false,
-			web_search: false,
-			image_gen_tool: false,
-			code_interpreter: false,
-			history_retriever: false,
-			image_edit_tool: false,
-			bio: false,
-			image_zoom_in_tool: false,
-		},
-	};
+	try {
+		const { headers } = await getQwenHeaders();
 
-	console.log("[Qwen] Disabling native tools...");
-	const response = await fetch(
-		"https://chat.qwen.ai/api/v2/users/user/settings/update",
-		{
-			method: "POST",
-			headers: {
-				accept: "application/json, text/plain, */*",
-				"accept-language": "pt-BR,pt;q=0.9",
-				"content-type": "application/json",
-				cookie: headers.cookie,
-				origin: "https://chat.qwen.ai",
-				referer: "https://chat.qwen.ai/",
-				"user-agent": headers["user-agent"],
-				"x-request-id": uuidv4(),
-				"bx-ua": headers["bx-ua"],
-				"bx-umidtoken": headers["bx-umidtoken"],
-				"bx-v": headers["bx-v"],
+		const payload = {
+			tools_enabled: {
+				web_extractor: false,
+				web_search_image: false,
+				web_search: false,
+				image_gen_tool: false,
+				code_interpreter: false,
+				history_retriever: false,
+				image_edit_tool: false,
+				bio: false,
+				image_zoom_in_tool: false,
 			},
-			body: JSON.stringify(payload),
-		},
-	);
+		};
 
-	if (!response.ok) {
-		const text = await response.text();
-		console.error(
-			`[Qwen] Failed to disable native tools: ${response.status} - ${text}`,
+		console.log("[Qwen] Disabling native tools...");
+		const response = await fetch(
+			"https://chat.qwen.ai/api/v2/users/user/settings/update",
+			{
+				method: "POST",
+				headers: {
+					accept: "application/json, text/plain, */*",
+					"accept-language": "pt-BR,pt;q=0.9",
+					"content-type": "application/json",
+					cookie: headers.cookie,
+					origin: "https://chat.qwen.ai",
+					referer: "https://chat.qwen.ai/",
+					"user-agent": headers["user-agent"],
+					"x-request-id": uuidv4(),
+					"bx-ua": headers["bx-ua"],
+					"bx-umidtoken": headers["bx-umidtoken"],
+					"bx-v": headers["bx-v"],
+				},
+				body: JSON.stringify(payload),
+			},
 		);
-	} else {
-		console.log("[Qwen] Native tools disabled successfully.");
+
+		if (!response.ok) {
+			const text = await response.text();
+			console.error(
+				`[Qwen] Failed to disable native tools: ${response.status} - ${text}`,
+			);
+		} else {
+			console.log("[Qwen] Native tools disabled successfully.");
+			nativeToolsDisabled = true;
+		}
+	} catch (err: unknown) {
+		console.error(
+			`[Qwen] Error disabling native tools: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	} finally {
+		disablingNativeToolsInProgress = false;
 	}
 }
 
@@ -262,7 +300,7 @@ export async function createQwenStream(
 			"sec-fetch-dest": "empty",
 			"sec-fetch-mode": "cors",
 			"sec-fetch-site": "same-origin",
-			timezone: new Date().toString().split(" (")[0], // Match closer to browser format
+			timezone: new Date().toString().split(" (")[0],
 			"user-agent": headers["user-agent"],
 			"x-accel-buffering": "no",
 			"x-request-id": uuidv4(),
@@ -272,6 +310,54 @@ export async function createQwenStream(
 		},
 		body: JSON.stringify(payload),
 	});
+
+	const responseContentType = response.headers.get("content-type") || "";
+
+	if (responseContentType.includes("application/json")) {
+		const responseText = await response.text();
+
+		try {
+			const errorJson = JSON.parse(responseText);
+			if (
+				errorJson?.data?.details?.includes("chat is in progress") ||
+				errorJson?.data?.details?.includes("The chat is in progress")
+			) {
+				const retryAfterMs = 2000 + Math.floor(Math.random() * 2000);
+				throw new RetryableQwenStreamError(
+					`Qwen: ${errorJson.data.details}`,
+					retryAfterMs,
+				);
+			}
+			if (errorJson?.success === false) {
+				const code = errorJson.data?.code || errorJson.code || "UpstreamError";
+				const details =
+					errorJson.data?.details ||
+					errorJson.message ||
+					"Qwen returned an error";
+				const wait =
+					errorJson.data?.num !== undefined
+						? ` Wait about ${errorJson.data.num} hour(s) before trying again.`
+						: "";
+				const status = code === "RateLimited" ? 429 : 502;
+				throw new QwenUpstreamError(
+					`Qwen upstream error: ${code}: ${details}.${wait}`,
+					code,
+					status,
+				);
+			}
+		} catch (parseOrRetryError) {
+			if (
+				parseOrRetryError instanceof RetryableQwenStreamError ||
+				parseOrRetryError instanceof QwenUpstreamError
+			) {
+				throw parseOrRetryError;
+			}
+		}
+
+		throw new Error(
+			`Qwen returned JSON instead of stream: ${responseText.slice(0, 300)}`,
+		);
+	}
 
 	if (!response.ok || !response.body) {
 		const errText = await response.text().catch(() => "");

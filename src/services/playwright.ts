@@ -33,7 +33,35 @@ let cachedQwenHeaders: {
 let lastHeadersTime = 0;
 const HEADERS_TTL = 10 * 60 * 1000; // 10 minutes
 
-let uiLock: Promise<void> = Promise.resolve();
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+class Mutex {
+	private queue: (() => void)[] = [];
+	private locked = false;
+
+	async acquire(): Promise<() => void> {
+		if (!this.locked) {
+			this.locked = true;
+			return () => this.release();
+		}
+		return new Promise<() => void>((resolve) => {
+			this.queue.push(() => {
+				resolve(() => this.release());
+			});
+		});
+	}
+
+	private release(): void {
+		const next = this.queue.shift();
+		if (next) {
+			next();
+		} else {
+			this.locked = false;
+		}
+	}
+}
+
+const uiMutex = new Mutex();
 
 const INPUT_SELECTOR = 'textarea:visible, [contenteditable="true"]:visible';
 const SEND_SELECTORS = [
@@ -151,7 +179,7 @@ export async function loginToQwen(
 		waitUntil: "domcontentloaded",
 		timeout: 60000,
 	});
-	await activePage.waitForTimeout(2000);
+	await sleep(2000);
 
 	if (!activePage.url().includes("/auth")) {
 		console.log("[UI] Already logged in");
@@ -177,7 +205,7 @@ export async function loginToQwen(
 		email,
 	);
 	await activePage.keyboard.press("Enter");
-	await activePage.waitForTimeout(1000);
+	await sleep(1000);
 
 	await activePage.waitForSelector('input[type="password"]', {
 		timeout: 10000,
@@ -185,7 +213,7 @@ export async function loginToQwen(
 	await activePage.fill('input[type="password"]', password);
 	await activePage.keyboard.press("Enter");
 
-	await activePage.waitForTimeout(2000);
+	await sleep(2000);
 
 	const errorSelector =
 		'[class*="error"], [class*="Error"], [role="alert"], .ant-form-item-explain-error';
@@ -254,7 +282,7 @@ export async function loginToQwenViaApi(
 			waitUntil: "domcontentloaded",
 			timeout: 60000,
 		});
-		await activePage.waitForTimeout(2000);
+		await sleep(2000);
 
 		if (
 			!activePage.url().includes("auth") &&
@@ -283,14 +311,7 @@ export async function getQwenHeaders(forceNew = false): Promise<{
 	parentMessageId: string | null;
 }> {
 	// Use a lock to ensure only one request uses the UI at a time
-	const release = await new Promise<() => void>((resolve) => {
-		uiLock = uiLock.then(
-			() =>
-				new Promise<void>((innerResolve) => {
-					resolve(innerResolve);
-				}),
-		);
-	});
+	const release = await uiMutex.acquire();
 
 	try {
 		return await _getQwenHeadersInternal(forceNew);
@@ -479,7 +500,7 @@ async function _fetchQwenHeaders(forceNew = false): Promise<{
 				await activePage?.focus(INPUT_SELECTOR);
 				await activePage?.fill(INPUT_SELECTOR, "");
 				await activePage?.type(INPUT_SELECTOR, "a", { delay: 100 });
-				await activePage?.waitForTimeout(2000);
+				await sleep(2000);
 
 				let clicked = false;
 				for (const selector of SEND_SELECTORS) {

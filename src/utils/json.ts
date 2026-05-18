@@ -4,6 +4,49 @@
  * Robust JSON parsing utilities
  */
 
+/**
+ * Fixes unescaped backslashes inside JSON strings (common with Windows paths
+ * from LLMs: c:\Users\... should be c:\\Users\...)
+ */
+function fixUnescapedBackslashes(json: string): string {
+	let result = "";
+	let inString = false;
+	let escaped = false;
+
+	for (let i = 0; i < json.length; i++) {
+		const char = json[i];
+
+		if (escaped) {
+			result += char;
+			escaped = false;
+			continue;
+		}
+
+		if (char === "\\") {
+			const next = json[i + 1];
+			// Valid JSON escapes: ", \, /, b, f, n, r, t, u
+			if (next && !'"\\/bfnrtu'.includes(next)) {
+				// Invalid escape inside string — double the backslash
+				if (inString) {
+					result += "\\\\";
+					continue;
+				}
+			}
+			result += char;
+			escaped = true;
+			continue;
+		}
+
+		if (char === '"') {
+			inString = !inString;
+		}
+
+		result += char;
+	}
+
+	return result;
+}
+
 export function robustParseJSON(str: string): unknown {
 	let sanitized = str.trim();
 
@@ -24,6 +67,14 @@ export function robustParseJSON(str: string): unknown {
 		return JSON.parse(jsonPart);
 	} catch (_e) {
 		// If it fails, let's try to fix common issues
+	}
+
+	// Try fixing unescaped backslashes (Windows paths)
+	try {
+		const fixed = fixUnescapedBackslashes(jsonPart);
+		return JSON.parse(fixed);
+	} catch (_e) {
+		// Continue to other fixes
 	}
 
 	// 1. Clean trailing noise from the end of the string

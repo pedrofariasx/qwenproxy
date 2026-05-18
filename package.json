@@ -21,7 +21,7 @@
 	"author": "Pedro Farias",
 	"license": "ISC",
 	"dependencies": {
-		"@hono/node-server": "^2.0.2",
+		"@hono/node-server": "^2.0.3",
 		"dotenv": "^17.4.2",
 		"hono": "^4.12.19",
 		"playwright": "^1.60.0",
@@ -29,9 +29,9 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.4.15",
-		"@types/node": "^25.8.0",
+		"@types/node": "^25.9.0",
 		"@types/uuid": "^10.0.0",
-		"tsx": "^4.22.0",
+		"tsx": "^4.22.2",
 		"typescript": "^6.0.3"
 	},
 	"type": "module"

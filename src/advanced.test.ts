@@ -105,7 +105,7 @@ test("multiturn-thinking-tools: maintains reasoning_content history", async () =
 		);
 		assert.ok(
 			capturedPrompt.includes(
-				'<tool_call>{"name": "test", "arguments": {}}</tool_call>',
+				'<tool_call>{"name":"test","arguments":{}}</tool_call>',
 			),
 			"Must include previous tool call",
 		);

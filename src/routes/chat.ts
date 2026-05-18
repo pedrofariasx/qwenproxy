@@ -11,16 +11,56 @@
 import type { Context } from "hono";
 import { stream as honoStream } from "hono/streaming";
 import { v4 as uuidv4 } from "uuid";
-import { createQwenStream, updateSessionParent } from "../services/qwen.ts";
+import {
+	createQwenStream,
+	QwenUpstreamError,
+	RetryableQwenStreamError,
+	updateSessionParent,
+} from "../services/qwen.ts";
 import { StreamingToolParser } from "../tools/parser.ts";
 import type { Message, OpenAIRequest } from "../utils/types.ts";
 
-function getIncrementalDelta(oldStr: string, newStr: string): string {
-	if (!oldStr) return newStr;
-	if (newStr === oldStr) return "";
-	if (newStr.startsWith(oldStr)) return newStr.substring(oldStr.length);
-	// If it doesn't start with oldStr, assume it's a delta
-	return newStr;
+interface DeltaResult {
+	delta: string;
+	isCumulative: boolean;
+	matchedContent: string;
+}
+
+function getIncrementalDelta(oldStr: string, newStr: string): DeltaResult {
+	if (!oldStr) {
+		return { delta: newStr, isCumulative: true, matchedContent: newStr };
+	}
+	if (newStr === oldStr) {
+		return { delta: "", isCumulative: true, matchedContent: oldStr };
+	}
+
+	if (newStr.startsWith(oldStr)) {
+		return {
+			delta: newStr.substring(oldStr.length),
+			isCumulative: true,
+			matchedContent: newStr,
+		};
+	}
+
+	if (oldStr.length >= 15 && newStr.length >= oldStr.length) {
+		const maxSearch = Math.min(oldStr.length, 15);
+		for (let i = 1; i <= maxSearch; i++) {
+			const candidatePrefix = oldStr.substring(0, oldStr.length - i);
+			if (newStr.startsWith(candidatePrefix)) {
+				return {
+					delta: newStr.substring(candidatePrefix.length),
+					isCumulative: true,
+					matchedContent: newStr,
+				};
+			}
+		}
+	}
+
+	return {
+		delta: newStr,
+		isCumulative: false,
+		matchedContent: oldStr + newStr,
+	};
 }
 
 function parseQwenErrorPayload(
@@ -65,8 +105,13 @@ function parseQwenErrorPayload(
 }
 
 export async function chatCompletions(c: Context) {
+	let body: OpenAIRequest;
 	try {
-		const body: OpenAIRequest = await c.req.json();
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: { message: "Invalid JSON in request body" } }, 400);
+	}
+	try {
 		const isStream = body.stream ?? false;
 
 		// Extract the prompt
@@ -106,7 +151,14 @@ export async function chatCompletions(c: Context) {
 					for (const tc of msg.tool_calls) {
 						let args = tc.function?.arguments || "{}";
 						if (typeof args !== "string") args = JSON.stringify(args);
-						assistantContent += `\n<tool_call>{"name": "${tc.function?.name}", "arguments": ${args}}</tool_call>`;
+						const toolCallObj = {
+							name: tc.function?.name,
+							arguments:
+								typeof tc.function?.arguments === "string"
+									? JSON.parse(tc.function.arguments)
+									: tc.function?.arguments || {},
+						};
+						assistantContent += `\n<tool_call>${JSON.stringify(toolCallObj)}</tool_call>`;
 					}
 				}
 				prompt += `Assistant: ${assistantContent.trim()}\n\n`;
@@ -141,7 +193,7 @@ export async function chatCompletions(c: Context) {
 			);
 			const toolsJson = JSON.stringify(formattedTools, null, 2);
 
-			systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
+			systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags (preferred format):\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nALTERNATIVE FORMAT (also accepted):\nতত{"name": "tool_name", "arguments": {"param_name": "value"}}✨\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
 
 			if (
 				bodyWithTools.tool_choice &&
@@ -180,9 +232,14 @@ export async function chatCompletions(c: Context) {
 				uiSessionId = result.uiSessionId;
 				break; // Success
 			} catch (err) {
+				if (err instanceof RetryableQwenStreamError && retries > 1) {
+					console.warn(`[QwenProxy] Retrying (${retries}): ${err.message}`);
+					await new Promise((r) => setTimeout(r, err.retryAfterMs));
+					retries--;
+					continue;
+				}
 				retries--;
 				if (retries === 0) throw err;
-				// Wait a bit before retrying
 				await new Promise((r) => setTimeout(r, 1000));
 			}
 		}
@@ -198,10 +255,12 @@ export async function chatCompletions(c: Context) {
 			let reasoningBuffer = "";
 			let lastFullContent = "";
 			const toolParser = new StreamingToolParser();
-			const toolCallsOut: Array<Record<string, unknown>> = [];
 			let buffer = "";
 			let completionTokens = 0;
 			let promptTokens = Math.ceil(finalPrompt.length / 3.5);
+
+			let finalContent = "";
+			const finalToolCalls: Array<Record<string, unknown>> = [];
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
@@ -257,10 +316,17 @@ export async function chatCompletions(c: Context) {
 								isThinkingChunk = false;
 								if (delta.content !== undefined) {
 									const newContent = delta.content || "";
-									vStr = getIncrementalDelta(lastFullContent, newContent);
-									if (vStr) {
-										lastFullContent += vStr;
-										foundStr = true;
+									const result = getIncrementalDelta(
+										lastFullContent,
+										newContent,
+									);
+									vStr = result.delta;
+
+									if (vStr || result.isCumulative) {
+										lastFullContent = result.matchedContent;
+										if (vStr) {
+											foundStr = true;
+										}
 									}
 								}
 							}
@@ -272,9 +338,11 @@ export async function chatCompletions(c: Context) {
 								reasoningBuffer += vStr;
 							} else {
 								const { text, toolCalls } = toolParser.feed(vStr);
-								if (text) lastFullContent += "";
+								if (text) {
+									finalContent += text;
+								}
 								for (const tc of toolCalls) {
-									toolCallsOut.push({
+									finalToolCalls.push({
 										id: tc.id,
 										type: "function",
 										function: {
@@ -286,7 +354,7 @@ export async function chatCompletions(c: Context) {
 							}
 						}
 					} catch (_e) {
-						// parse error, ignore partial chunk
+						// ignore partial chunk
 					}
 				}
 			}
@@ -299,13 +367,14 @@ export async function chatCompletions(c: Context) {
 				);
 			}
 
+			// Flush tool parser
 			const { text: remainingText, toolCalls: remainingToolCalls } =
 				toolParser.flush();
 			if (remainingText) {
-				// remainingText has already been preserved in lastFullContent by getIncrementalDelta/feed path when present.
+				finalContent += remainingText;
 			}
 			for (const tc of remainingToolCalls) {
-				toolCallsOut.push({
+				finalToolCalls.push({
 					id: tc.id,
 					type: "function",
 					function: {
@@ -315,23 +384,15 @@ export async function chatCompletions(c: Context) {
 				});
 			}
 
+			const finalFinishReason =
+				finalToolCalls.length > 0 ? "tool_calls" : "stop";
+
 			const usage = {
 				prompt_tokens: promptTokens,
 				completion_tokens: completionTokens,
 				total_tokens: promptTokens + completionTokens,
 				prompt_tokens_details: { cached_tokens: 0 },
 			};
-			const message: Record<string, unknown> = {
-				role: "assistant",
-				content: toolCallsOut.length ? null : lastFullContent,
-			};
-			if (reasoningBuffer) message.reasoning_content = reasoningBuffer;
-			if (toolCallsOut.length) {
-				for (let idx = 0; idx < toolCallsOut.length; idx++) {
-					toolCallsOut[idx].index = idx;
-				}
-			}
-			if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
 			return c.json({
 				id: completionId,
@@ -341,9 +402,18 @@ export async function chatCompletions(c: Context) {
 				choices: [
 					{
 						index: 0,
-						message,
+						message: {
+							role: "assistant",
+							content: finalContent || null,
+							...(reasoningBuffer
+								? { reasoning_content: reasoningBuffer }
+								: {}),
+							...(finalToolCalls.length > 0
+								? { tool_calls: finalToolCalls }
+								: {}),
+						},
 						logprobs: null,
-						finish_reason: toolCallsOut.length ? "tool_calls" : "stop",
+						finish_reason: finalFinishReason,
 					},
 				],
 				usage,
@@ -454,11 +524,17 @@ export async function chatCompletions(c: Context) {
 								isThinkingChunk = false;
 								if (delta.content !== undefined) {
 									const newContent = delta.content || "";
-									vStr = getIncrementalDelta(lastFullContent, newContent);
+									const result = getIncrementalDelta(
+										lastFullContent,
+										newContent,
+									);
+									vStr = result.delta;
 
-									if (vStr) {
-										lastFullContent += vStr;
-										foundStr = true;
+									if (vStr || result.isCumulative) {
+										lastFullContent = result.matchedContent;
+										if (vStr) {
+											foundStr = true;
+										}
 									}
 								}
 							}
@@ -532,17 +608,19 @@ export async function chatCompletions(c: Context) {
 					object: "chat.completion.chunk",
 					created: Math.floor(Date.now() / 1000),
 					model: body.model,
-					choices: [makeChoice({ content: upstreamError.message })],
+					choices: [
+						makeChoice({
+							content: `\n\n[QwenProxy Error: ${upstreamError.message}]`,
+						}),
+					],
 				});
 				await writeEvent({
 					id: completionId,
 					object: "chat.completion.chunk",
 					created: Math.floor(Date.now() / 1000),
 					model: body.model,
-					choices: [makeChoice({}, "stop")],
+					choices: [makeChoice({}, "error")],
 				});
-				await streamWriter.write("data: [DONE]\n\n");
-				return;
 			}
 
 			// Flush tool parser
@@ -608,6 +686,9 @@ export async function chatCompletions(c: Context) {
 	} catch (err) {
 		console.error("Error in chatCompletions:", err);
 		const message = err instanceof Error ? err.message : String(err);
+		if (err instanceof QwenUpstreamError) {
+			return c.json({ error: { message } }, err.upstreamStatus as 429 | 502);
+		}
 		return c.json({ error: { message } }, 500);
 	}
 }
