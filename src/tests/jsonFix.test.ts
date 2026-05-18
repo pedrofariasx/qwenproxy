@@ -1,4 +1,4 @@
-import { robustParseJSON } from './utils/json.ts';
+import { robustParseJSON } from '../utils/json.ts';
 
 const problematicString = '{"name": "suggest", "arguments": {"suggest": "Landing page para escritório de advocacia criada em src/pages/Index.tsx", "actions": [{"label": "Revisar alterações", "description": "Executar review local das mudanças não commitadas", "prompt": "/local-review-uncommitted"}]})';
 

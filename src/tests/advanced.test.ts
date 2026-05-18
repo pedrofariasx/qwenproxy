@@ -3,7 +3,7 @@ import assert from 'node:assert';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 
-import { app } from './index.ts';
+import { app } from '../index.ts';
 
 // Helper to mock the fetch global for testing empty response retry and caching logic
 function setupFetchMock(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
