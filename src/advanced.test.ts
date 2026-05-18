@@ -164,6 +164,79 @@ test('caching-streaming and cache-control: returns prompt_tokens_details', async
   }
 });
 
+test('tool-calls: non-streaming converts Bengali delimiters to OpenAI tool_calls', async () => {
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"তত\\n{\\"name\\":\\"session_search\\",\\"arguments\\":{\\"query\\":\\"usagi OR brettchalupa\\"}}✨","phase":"answer"}}]}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        stream: false,
+        messages: [{ role: 'user', content: 'search history' }],
+        tools: [{ type: 'function', function: { name: 'session_search', parameters: { type: 'object' } } }]
+      })
+    });
+
+    const res = await app.fetch(req);
+    const body = await res.json() as any;
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(body.choices[0].message.content, null);
+    assert.strictEqual(body.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(body.choices[0].message.tool_calls[0].function.name, 'session_search');
+    assert.deepStrictEqual(JSON.parse(body.choices[0].message.tool_calls[0].function.arguments), { query: 'usagi OR brettchalupa' });
+  } finally {
+    restore();
+  }
+});
+
+test('tool-calls: streaming converts Bengali delimiters without leaking marker text', async () => {
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"ত","phase":"answer"}}]}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"ত\\n{\\"name\\":\\"session_search\\",\\"arguments\\":{\\"query\\":\\"usagi\\"}}✨","phase":"answer"}}]}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        stream: true,
+        messages: [{ role: 'user', content: 'search history' }],
+        tools: [{ type: 'function', function: { name: 'session_search', parameters: { type: 'object' } } }]
+      })
+    });
+
+    const res = await app.fetch(req);
+    const text = await res.text();
+    assert.strictEqual(res.status, 200);
+    assert.ok(!text.includes('তত'));
+    assert.ok(!text.includes('✨'));
+    assert.ok(text.includes('"tool_calls"'));
+    assert.ok(text.includes('"finish_reason":"tool_calls"'));
+  } finally {
+    restore();
+  }
+});
+
 test('session-parent-tracking: appends messages using response message_id as parent', async () => {
   let capturedPayloads: any[] = [];
 
