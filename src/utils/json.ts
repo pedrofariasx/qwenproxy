@@ -41,13 +41,17 @@ export function robustParseJSON(str: string): any {
     const char = cleaned[i];
     
     if (escaped) {
-      fixedJson += char;
+      const validEscapes = ['n', 'r', 't', 'u', '"', '\\', '/', 'b', 'f'];
+      if (validEscapes.includes(char)) {
+        fixedJson += '\\' + char;
+      } else {
+        fixedJson += '\\\\' + char;
+      }
       escaped = false;
       continue;
     }
-    
+
     if (char === '\\') {
-      fixedJson += char;
       escaped = true;
       continue;
     }
@@ -103,8 +107,17 @@ export function robustParseJSON(str: string): any {
     let aggFixed = '';
     for (let i = 0; i < aggressive.length; i++) {
       const char = aggressive[i];
-      if (esc) { aggFixed += char; esc = false; continue; }
-      if (char === '\\') { aggFixed += char; esc = true; continue; }
+      if (esc) {
+        const validEscapes = ['n', 'r', 't', 'u', '"', '\\', '/', 'b', 'f'];
+        if (validEscapes.includes(char)) {
+          aggFixed += '\\' + char;
+        } else {
+          aggFixed += '\\\\' + char;
+        }
+        esc = false;
+        continue;
+      }
+      if (char === '\\') { esc = true; continue; }
       if (char === '"') { is = !is; aggFixed += char; continue; }
       
       if (is) {
