@@ -47,6 +47,12 @@ export function updateSessionParent(
 	}
 }
 
+export function clearSessionState(sessionId: string) {
+	if (sessionId && sessionStates[sessionId] !== undefined) {
+		delete sessionStates[sessionId];
+	}
+}
+
 export interface QwenMessage {
 	fid: string;
 	parentId: string | null;
@@ -326,6 +332,16 @@ export async function createQwenStream(
 				throw new RetryableQwenStreamError(
 					`Qwen: ${errorJson.data.details}`,
 					retryAfterMs,
+				);
+			}
+			if (
+				errorJson?.data?.details?.includes("is not exist") ||
+				errorJson?.data?.details?.includes("not exist") ||
+				errorJson?.data?.details?.includes("does not exist")
+			) {
+				throw new RetryableQwenStreamError(
+					`Qwen: ${errorJson.data.details}`,
+					0,
 				);
 			}
 			if (errorJson?.success === false) {

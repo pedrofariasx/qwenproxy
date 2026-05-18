@@ -62,14 +62,17 @@ export class StreamingToolParser {
 	}
 
 	private partialStartLengthAtBufferEnd(): number {
+		let longestMatch = 0;
 		for (const syntax of StreamingToolParser.TOOL_SYNTAXES) {
-			for (let i = 1; i <= syntax.start.length; i++) {
+			for (let i = syntax.start.length; i >= 1; i--) {
 				if (this.buffer.endsWith(syntax.start.substring(0, i))) {
-					return i;
+					if (i > longestMatch) {
+						longestMatch = i;
+					}
 				}
 			}
 		}
-		return 0;
+		return longestMatch;
 	}
 
 	/**

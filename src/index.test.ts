@@ -302,64 +302,81 @@ test("API Key protection", async () => {
 	}
 });
 
-test('Chat Completions endpoint - Non-streaming (stream: false)', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input: any) => {
-    const url = typeof input === 'string' ? input : input.url;
-    if (url.includes('/api/models')) {
-      return new Response(JSON.stringify({ data: [{ id: 'qwen3.6-plus', owned_by: 'qwen' }] }), { status: 200 });
-    }
-    if (url.includes('/api/v2/chat/completions')) {
-      const stream = new ReadableStream({
-        start(c) {
-          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": {"content": ["Thinking non-stream..."]}}}}]}\n\n'));
-          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Hello non-stream"}}]}\n\n'));
-          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-          c.close();
-        }
-      });
-      return new Response(stream, { status: 200 });
-    }
-    return originalFetch(input);
-  };
+test("Chat Completions endpoint - Non-streaming (stream: false)", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async (input: string | Request | URL) => {
+		const url =
+			typeof input === "string"
+				? input
+				: (input as Request).url || input.toString();
+		if (url.includes("/api/models")) {
+			return new Response(
+				JSON.stringify({ data: [{ id: "qwen3.6-plus", owned_by: "qwen" }] }),
+				{ status: 200 },
+			);
+		}
+		if (url.includes("/api/v2/chat/completions")) {
+			const stream = new ReadableStream({
+				start(c) {
+					c.enqueue(
+						new TextEncoder().encode(
+							'data: {"choices": [{"delta": {"phase": "thinking_summary", "extra": {"summary_thought": {"content": ["Thinking non-stream..."]}}}}]}\n\n',
+						),
+					);
+					c.enqueue(
+						new TextEncoder().encode(
+							'data: {"choices": [{"delta": {"phase": "answer", "content": "Hello non-stream"}}]}\n\n',
+						),
+					);
+					c.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+					c.close();
+				},
+			});
+			return new Response(stream, { status: 200 });
+		}
+		return originalFetch(input);
+	};
 
-  // Initialize playwright for this test
-  await initPlaywright(false);
+	// Initialize playwright for this test
+	await initPlaywright(false);
 
-  try {
-    const payload = {
-      model: 'qwen3.6-plus',
-      messages: [{ role: 'user', content: 'Hello' }],
-      stream: false
-    };
+	try {
+		const payload = {
+			model: "qwen3.6-plus",
+			messages: [{ role: "user", content: "Hello" }],
+			stream: false,
+		};
 
-    const req = new Request('http://localhost/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+		const req = new Request("http://localhost/v1/chat/completions", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(payload),
+		});
 
-    const res = await app.fetch(req);
-    assert.strictEqual(res.status, 200);
-    assert.ok(res.headers.get('Content-Type')?.includes('application/json'));
+		const res = await app.fetch(req);
+		assert.strictEqual(res.status, 200);
+		assert.ok(res.headers.get("Content-Type")?.includes("application/json"));
 
-    const body = await res.json();
-    assert.strictEqual(body.object, 'chat.completion');
-    assert.strictEqual(body.model, 'qwen3.6-plus');
-    assert.ok(body.choices);
-    assert.strictEqual(body.choices.length, 1);
-    
-    const choice = body.choices[0];
-    assert.strictEqual(choice.message.role, 'assistant');
-    assert.strictEqual(choice.message.content, 'Hello non-stream');
-    assert.strictEqual(choice.message.reasoning_content, 'Thinking non-stream...');
-    assert.strictEqual(choice.finish_reason, 'stop');
-    
-    assert.ok(body.usage);
-    assert.ok(body.usage.prompt_tokens > 0);
-    assert.ok(body.usage.completion_tokens >= 0);
-  } finally {
-    globalThis.fetch = originalFetch;
-    await closePlaywright();
-  }
+		const body = await res.json();
+		assert.strictEqual(body.object, "chat.completion");
+		assert.strictEqual(body.model, "qwen3.6-plus");
+		assert.ok(body.choices);
+		assert.strictEqual(body.choices.length, 1);
+
+		const choice = body.choices[0];
+		assert.strictEqual(choice.message.role, "assistant");
+		assert.strictEqual(choice.message.content, "Hello non-stream");
+		assert.strictEqual(
+			choice.message.reasoning_content,
+			"Thinking non-stream...",
+		);
+		assert.strictEqual(choice.finish_reason, "stop");
+
+		assert.ok(body.usage);
+		assert.ok(body.usage.prompt_tokens > 0);
+		assert.ok(body.usage.completion_tokens >= 0);
+	} finally {
+		globalThis.fetch = originalFetch;
+		await closePlaywright();
+	}
 });

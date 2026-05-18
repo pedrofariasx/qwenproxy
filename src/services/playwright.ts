@@ -445,8 +445,6 @@ async function _fetchQwenHeaders(forceNew = false): Promise<{
 		}, 60000);
 
 		const routeHandler = async (route: Route, request: Request) => {
-			clearTimeout(timeout);
-
 			const reqHeaders = request.headers();
 			let uiSessionId = "";
 			let uiParentMessageId: string | null = null;
@@ -489,6 +487,7 @@ async function _fetchQwenHeaders(forceNew = false): Promise<{
 
 			import("./qwen.ts").then((m) => m.disableNativeTools().catch(() => {}));
 
+			clearTimeout(timeout);
 			await route.abort("aborted");
 			await activePage?.unroute("**/api/v2/chat/completions*", routeHandler);
 			resolve(cachedQwenHeaders);

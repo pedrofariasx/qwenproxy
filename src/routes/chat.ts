@@ -12,6 +12,7 @@ import type { Context } from "hono";
 import { stream as honoStream } from "hono/streaming";
 import { v4 as uuidv4 } from "uuid";
 import {
+	clearSessionState,
 	createQwenStream,
 	QwenUpstreamError,
 	RetryableQwenStreamError,
@@ -232,11 +233,34 @@ export async function chatCompletions(c: Context) {
 				uiSessionId = result.uiSessionId;
 				break; // Success
 			} catch (err) {
-				if (err instanceof RetryableQwenStreamError && retries > 1) {
-					console.warn(`[QwenProxy] Retrying (${retries}): ${err.message}`);
-					await new Promise((r) => setTimeout(r, err.retryAfterMs));
-					retries--;
-					continue;
+				if (err instanceof RetryableQwenStreamError) {
+					if (err.retryAfterMs === 0) {
+						console.warn(
+							`[QwenProxy] Chat session invalid, creating new session`,
+						);
+						const chatIdFromErr =
+							err.message.match(
+								/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+							)?.[0] || "";
+						if (chatIdFromErr) {
+							clearSessionState(chatIdFromErr);
+						}
+						const result = await createQwenStream(
+							finalPrompt,
+							isThinkingModel,
+							body.model,
+							null,
+						);
+						stream = result.stream;
+						uiSessionId = result.uiSessionId;
+						break;
+					}
+					if (retries > 1) {
+						console.warn(`[QwenProxy] Retrying (${retries}): ${err.message}`);
+						await new Promise((r) => setTimeout(r, err.retryAfterMs));
+						retries--;
+						continue;
+					}
 				}
 				retries--;
 				if (retries === 0) throw err;
