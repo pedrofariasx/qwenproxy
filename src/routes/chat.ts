@@ -113,7 +113,7 @@ export async function chatCompletions(c: Context) {
         contentStr = msg.content || '';
       }
 
-      } else if (msg.role === 'assistant') {
+      if (msg.role === 'assistant') {
         let assistantContent = contentStr;
 
         if ((msg as any).reasoning_content) {
@@ -127,36 +127,8 @@ export async function chatCompletions(c: Context) {
             if (typeof args !== 'string') args = JSON.stringify(args);
             assistantContent += `\nতত{"name": "${tc.function?.name}", "arguments": ${args}}✨`;
           }
-        }
+}
 
-        prompt += `Assistant: ${assistantContent.trim()}\n\n`;
-      } else if (i === messages.length - 1) {
-        if (msg.role === 'user') {
-          prompt += `User: ${contentStr}\n\n`;
-        } else if (msg.role === 'assistant') {
-          let assistantContent = contentStr;
-          if ((msg as any).reasoning_content) {
-            assistantContent = `<think>\n${(msg as any).reasoning_content}\n</think>\n${assistantContent}`;
-          }
-          if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-             for (const tc of msg.tool_calls) {
-               let args = tc.function?.arguments || '{}';
-               if (typeof args !== 'string') args = JSON.stringify(args);
-               assistantContent += `\nতত{"name": "${tc.function?.name}", "arguments": ${args}}✨`;
-             }
-          }
-          prompt += `Assistant: ${assistantContent.trim()}\n\n`;
-        } else if (msg.role === 'tool' || msg.role === 'function') {
-          prompt += `Tool Response (${msg.name || 'tool'}): ${contentStr}\n\n`;
->>>>>>> pr-12
-        }
-        if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-           for (const tc of msg.tool_calls) {
-             let args = tc.function?.arguments || '{}';
-             if (typeof args !== 'string') args = JSON.stringify(args);
-             assistantContent += `\n<tool_call>{"name": "${tc.function?.name}", "arguments": ${args}}</tool_call>`;
-           }
-        }
         prompt += `Assistant: ${assistantContent.trim()}\n\n`;
       } else if (msg.role === 'tool' || msg.role === 'function') {
         prompt += `Tool Response (${msg.name || 'tool'}): ${contentStr}\n\n`;
