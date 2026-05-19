@@ -21,49 +21,6 @@ import {
 import { StreamingToolParser } from "../tools/parser.ts";
 import type { Message, OpenAIRequest } from "../utils/types.ts";
 
-interface DeltaResult {
-	delta: string;
-	isCumulative: boolean;
-	matchedContent: string;
-}
-
-function getIncrementalDelta(oldStr: string, newStr: string): DeltaResult {
-	if (!oldStr) {
-		return { delta: newStr, isCumulative: true, matchedContent: newStr };
-	}
-	if (newStr === oldStr) {
-		return { delta: "", isCumulative: true, matchedContent: oldStr };
-	}
-
-	if (newStr.startsWith(oldStr)) {
-		return {
-			delta: newStr.substring(oldStr.length),
-			isCumulative: true,
-			matchedContent: newStr,
-		};
-	}
-
-	if (oldStr.length >= 15 && newStr.length >= oldStr.length) {
-		const maxSearch = Math.min(oldStr.length, 15);
-		for (let i = 1; i <= maxSearch; i++) {
-			const candidatePrefix = oldStr.substring(0, oldStr.length - i);
-			if (newStr.startsWith(candidatePrefix)) {
-				return {
-					delta: newStr.substring(candidatePrefix.length),
-					isCumulative: true,
-					matchedContent: newStr,
-				};
-			}
-		}
-	}
-
-	return {
-		delta: newStr,
-		isCumulative: false,
-		matchedContent: oldStr + newStr,
-	};
-}
-
 function parseQwenErrorPayload(
 	raw: string,
 ): { message: string; status: number } | null {
@@ -94,8 +51,6 @@ function parseQwenErrorPayload(
 			return { message: `Qwen upstream error: ${msg}`, status: 502 };
 		}
 	} catch {
-		// Non-SSE, non-JSON upstream body. Keep this as an explicit bad gateway
-		// instead of silently returning an empty assistant message.
 		return {
 			message: `Qwen upstream returned non-SSE response: ${text.slice(0, 300)}`,
 			status: 502,
@@ -277,7 +232,6 @@ export async function chatCompletions(c: Context) {
 
 			let currentThoughtIndex = 0;
 			let reasoningBuffer = "";
-			let lastFullContent = "";
 			const toolParser = new StreamingToolParser();
 			let buffer = "";
 			let completionTokens = 0;
@@ -339,18 +293,9 @@ export async function chatCompletions(c: Context) {
 							} else if (delta.phase === "answer") {
 								isThinkingChunk = false;
 								if (delta.content !== undefined) {
-									const newContent = delta.content || "";
-									const result = getIncrementalDelta(
-										lastFullContent,
-										newContent,
-									);
-									vStr = result.delta;
-
-									if (vStr || result.isCumulative) {
-										lastFullContent = result.matchedContent;
-										if (vStr) {
-											foundStr = true;
-										}
+									vStr = delta.content || "";
+									if (vStr) {
+										foundStr = true;
 									}
 								}
 							}
@@ -482,7 +427,6 @@ export async function chatCompletions(c: Context) {
 			const _currentAppendPath = "";
 
 			let _reasoningBuffer = "";
-			let lastFullContent = "";
 			const toolParser = new StreamingToolParser();
 
 			let buffer = "";
@@ -548,18 +492,9 @@ export async function chatCompletions(c: Context) {
 								} else if (delta.phase === "answer") {
 									isThinkingChunk = false;
 									if (delta.content !== undefined) {
-										const newContent = delta.content || "";
-										const result = getIncrementalDelta(
-											lastFullContent,
-											newContent,
-										);
-										vStr = result.delta;
-
-										if (vStr || result.isCumulative) {
-											lastFullContent = result.matchedContent;
-											if (vStr) {
-												foundStr = true;
-											}
+										vStr = delta.content || "";
+										if (vStr) {
+											foundStr = true;
 										}
 									}
 								}
@@ -644,7 +579,7 @@ export async function chatCompletions(c: Context) {
 						object: "chat.completion.chunk",
 						created: Math.floor(Date.now() / 1000),
 						model: body.model,
-						choices: [makeChoice({}, "error")],
+						choices: [makeChoice({}, "stop")],
 					});
 				}
 
