@@ -54,10 +54,23 @@ export interface OpenAIRequest {
 	model: string;
 	messages: Message[];
 	stream?: boolean;
-	/** List of tools available to the LLM */
 	tools?: FunctionToolDefinition[];
-	/** Control whether the LLM must/can call tools */
 	tool_choice?: ToolChoice;
+	stream_options?: {
+		include_usage?: boolean;
+	};
+	temperature?: number;
+	max_tokens?: number;
+	max_completion_tokens?: number;
+	top_p?: number;
+	n?: number;
+	stop?: string | string[];
+	frequency_penalty?: number;
+	presence_penalty?: number;
+	logprobs?: boolean;
+	top_logprobs?: number;
+	response_format?: Record<string, unknown>;
+	seed?: number;
 }
 
 // --- Response Types ---
