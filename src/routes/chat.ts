@@ -70,6 +70,28 @@ export async function chatCompletions(c: Context) {
 	try {
 		const isStream = body.stream ?? false;
 
+		const UNSUPPORTED_PARAMS = [
+			"temperature",
+			"max_tokens",
+			"max_completion_tokens",
+			"top_p",
+			"n",
+			"stop",
+			"frequency_penalty",
+			"presence_penalty",
+			"logprobs",
+			"top_logprobs",
+			"response_format",
+			"seed",
+		] as const;
+		for (const param of UNSUPPORTED_PARAMS) {
+			if (body[param] !== undefined) {
+				console.warn(
+					`[QwenProxy] Parameter "${param}" is not supported by Qwen and will be ignored`,
+				);
+			}
+		}
+
 		// Extract the prompt
 		let prompt = "";
 		const messages = body.messages || [];
@@ -119,16 +141,23 @@ export async function chatCompletions(c: Context) {
 				}
 				prompt += `Assistant: ${assistantContent.trim()}\n\n`;
 			} else if (msg.role === "tool" || msg.role === "function") {
-				prompt += `Tool Response (${msg.name || "tool"}): ${contentStr}\n\n`;
+				const toolId = msg.tool_call_id || "unknown";
+				prompt += `Tool Response (id: ${toolId}, name: ${msg.name || "tool"}): ${contentStr}\n\n`;
 			}
 		}
 
 		// Inject tools instructions
 		const bodyWithTools = body as OpenAIRequest & {
 			tools?: Array<Record<string, unknown>>;
-			tool_choice?: Record<string, unknown>;
+			tool_choice?: Record<string, unknown> | string;
 		};
+
+		const toolChoiceNone =
+			bodyWithTools.tool_choice === "none" ||
+			bodyWithTools.tool_choice === null;
+
 		if (
+			!toolChoiceNone &&
 			bodyWithTools.tools &&
 			Array.isArray(bodyWithTools.tools) &&
 			bodyWithTools.tools.length > 0
@@ -151,7 +180,9 @@ export async function chatCompletions(c: Context) {
 
 			systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
 
-			if (
+			if (bodyWithTools.tool_choice === "required") {
+				systemPrompt += `CRITICAL: You MUST call at least one tool in this response. Do NOT respond with plain text.\n\n`;
+			} else if (
 				bodyWithTools.tool_choice &&
 				typeof bodyWithTools.tool_choice === "object" &&
 				bodyWithTools.tool_choice.function
@@ -639,8 +670,20 @@ export async function chatCompletions(c: Context) {
 					created: Math.floor(Date.now() / 1000),
 					model: body.model,
 					choices: [makeChoice({}, finalFinishReason)],
-					usage: usage,
+					...(body.stream_options?.include_usage ? {} : { usage }),
 				});
+
+				if (body.stream_options?.include_usage) {
+					await writeEvent({
+						id: completionId,
+						object: "chat.completion.chunk",
+						created: Math.floor(Date.now() / 1000),
+						model: body.model,
+						choices: [],
+						usage,
+					});
+				}
+
 				await streamWriter.write("data: [DONE]\n\n");
 			} catch (streamErr) {
 				console.error("[QwenProxy] SSE stream error:", streamErr);
