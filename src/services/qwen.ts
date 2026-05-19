@@ -122,7 +122,6 @@ export async function disableNativeTools(): Promise<void> {
 			},
 		};
 
-		console.log("[Qwen] Disabling native tools...");
 		const response = await fetch(
 			"https://chat.qwen.ai/api/v2/users/user/settings/update",
 			{
@@ -150,7 +149,6 @@ export async function disableNativeTools(): Promise<void> {
 				`[Qwen] Failed to disable native tools: ${response.status} - ${text}`,
 			);
 		} else {
-			console.log("[Qwen] Native tools disabled successfully.");
 			nativeToolsDisabled = true;
 		}
 	} catch (err: unknown) {
@@ -354,7 +352,10 @@ export async function createQwenStream(
 					errorJson.data?.num !== undefined
 						? ` Wait about ${errorJson.data.num} hour(s) before trying again.`
 						: "";
-				const status = code === "RateLimited" ? 429 : 502;
+				let status: number;
+				if (code === "RateLimited") status = 429;
+				else if (code === "Not_Found") status = 404;
+				else status = 502;
 				throw new QwenUpstreamError(
 					`Qwen upstream error: ${code}: ${details}.${wait}`,
 					code,

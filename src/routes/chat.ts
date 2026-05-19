@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
 	clearSessionState,
 	createQwenStream,
+	fetchQwenModels,
 	QwenUpstreamError,
 	RetryableQwenStreamError,
 	updateSessionParent,
@@ -37,7 +38,10 @@ function parseQwenErrorPayload(
 				payload.data?.num !== undefined
 					? ` Wait about ${payload.data.num} hour(s) before trying again.`
 					: "";
-			const status = code === "RateLimited" ? 429 : 502;
+			let status: number;
+			if (code === "RateLimited") status = 429;
+			else if (code === "Not_Found") status = 404;
+			else status = 502;
 			return {
 				message: `Qwen upstream error: ${code}: ${details}.${wait}`,
 				status,
@@ -86,9 +90,7 @@ export async function chatCompletions(c: Context) {
 		] as const;
 		for (const param of UNSUPPORTED_PARAMS) {
 			if (body[param] !== undefined) {
-				console.warn(
-					`[QwenProxy] Parameter "${param}" is not supported by Qwen and will be ignored`,
-				);
+				delete body[param];
 			}
 		}
 
@@ -195,6 +197,19 @@ export async function chatCompletions(c: Context) {
 		}
 
 		const finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
+
+		const availableModels = await fetchQwenModels();
+		const modelIds = availableModels.map((m) => m.id as string);
+		if (!modelIds.includes(body.model)) {
+			return c.json(
+				{
+					error: {
+						message: `Model "${body.model}" not found. Available models: ${modelIds.join(", ")}`,
+					},
+				},
+				404,
+			);
+		}
 
 		const isThinkingModel = !body.model.includes("no-thinking");
 
@@ -711,10 +726,17 @@ export async function chatCompletions(c: Context) {
 			}
 		});
 	} catch (err) {
-		console.error("Error in chatCompletions:", err);
+		if (err instanceof QwenUpstreamError) {
+			console.warn(`[QwenProxy] ${err.message} (${err.upstreamStatus})`);
+		} else {
+			console.error("Error in chatCompletions:", err);
+		}
 		const message = err instanceof Error ? err.message : String(err);
 		if (err instanceof QwenUpstreamError) {
-			return c.json({ error: { message } }, err.upstreamStatus as 429 | 502);
+			return c.json(
+				{ error: { message } },
+				err.upstreamStatus as 429 | 404 | 502,
+			);
 		}
 		return c.json({ error: { message } }, 500);
 	}
