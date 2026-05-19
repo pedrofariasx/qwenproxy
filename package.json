@@ -22,12 +22,12 @@
     "dotenv": "^17.4.2",
     "hono": "^4.12.18",
     "playwright": "^1.59.1",
+    "tsx": "^4.21.0",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@types/node": "^25.6.2",
     "@types/uuid": "^10.0.0",
-    "tsx": "^4.21.0",
     "typescript": "^6.0.3"
   },
   "type": "module"
