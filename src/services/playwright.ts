@@ -23,7 +23,7 @@ const HEADERS_TTL = 10 * 60 * 1000; // 10 minutes
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-class Mutex {
+export class Mutex {
   private queue: (() => void)[] = [];
   private locked = false;
 

@@ -218,7 +218,7 @@ export async function createQwenStream(
           auto_thinking: false,
           thinking_mode: 'Thinking',
           thinking_format: 'summary',
-          auto_search: true
+          auto_search: false
         },
         extra: {
           meta: {
