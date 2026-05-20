@@ -18,9 +18,42 @@ export interface ParserResult {
 export class StreamingToolParser {
   private buffer = '';
   private insideTool = false;
-  private TOOL_START = '<tool_call>';
-  private TOOL_END = '</tool_call>';
+  private readonly TOOL_SYNTAXES = [
+    { start: '<tool_call>', end: '</tool_call>' },
+    // Qwen tends to reproduce XML-looking tags as user-visible prose. The
+    // prompt therefore uses rare Bengali/sparkle delimiters; parse them into
+    // structured OpenAI tool_calls instead of streaming them as content.
+    { start: 'তত', end: '✨' },
+    // Be tolerant when the model drops one repeated Bengali character.
+    { start: 'ত', end: '✨' },
+  ];
+  private activeToolStart = '<tool_call>';
+  private activeToolEnd = '</tool_call>';
   private emittedToolCallCount = 0;
+
+  private findNextStart(): { index: number; start: string; end: string } | null {
+    let best: { index: number; start: string; end: string } | null = null;
+    for (const syntax of this.TOOL_SYNTAXES) {
+      const index = this.buffer.indexOf(syntax.start);
+      if (index === -1) continue;
+      if (!best || index < best.index || (index === best.index && syntax.start.length > best.start.length)) {
+        best = { index, start: syntax.start, end: syntax.end };
+      }
+    }
+    return best;
+  }
+
+  private partialStartLengthAtBufferEnd(): number {
+    let longest = 0;
+    for (const syntax of this.TOOL_SYNTAXES) {
+      for (let i = 1; i < syntax.start.length; i++) {
+        if (this.buffer.endsWith(syntax.start.substring(0, i))) {
+          longest = Math.max(longest, i);
+        }
+      }
+    }
+    return longest;
+  }
 
   /**
    * Feeds a chunk of text into the parser and returns any extracted text and tool calls.
@@ -34,24 +67,21 @@ export class StreamingToolParser {
 
     while (this.buffer.length > 0) {
       if (!this.insideTool) {
-        const startIdx = this.buffer.indexOf(this.TOOL_START);
-        if (startIdx !== -1) {
+        const startMatch = this.findNextStart();
+        if (startMatch) {
           // Found tool start. Everything before it is text (if no tools emitted yet)
-          const textToEmit = this.buffer.substring(0, startIdx);
+          const textToEmit = this.buffer.substring(0, startMatch.index);
           if (textToEmit && this.emittedToolCallCount === 0) {
             result.text += textToEmit;
           }
           this.insideTool = true;
-          this.buffer = this.buffer.substring(startIdx + this.TOOL_START.length);
+          this.activeToolStart = startMatch.start;
+          this.activeToolEnd = startMatch.end;
+          this.buffer = this.buffer.substring(startMatch.index + startMatch.start.length);
         } else {
           // No full start tag. Check for partial match at the end to avoid emitting half a tag
-          let flushIndex = this.buffer.length;
-          for (let i = 1; i <= this.TOOL_START.length; i++) {
-            if (this.buffer.endsWith(this.TOOL_START.substring(0, i))) {
-              flushIndex = this.buffer.length - i;
-              break;
-            }
-          }
+          const partialLength = this.partialStartLengthAtBufferEnd();
+          const flushIndex = this.buffer.length - partialLength;
           
           const textToEmit = this.buffer.substring(0, flushIndex);
           if (textToEmit && this.emittedToolCallCount === 0) {
@@ -62,7 +92,7 @@ export class StreamingToolParser {
         }
       } else {
         // Inside tool
-        const endIdx = this.buffer.indexOf(this.TOOL_END);
+        const endIdx = this.buffer.indexOf(this.activeToolEnd);
         if (endIdx !== -1) {
           const toolJsonStr = this.buffer.substring(0, endIdx).trim();
           try {
@@ -96,7 +126,10 @@ export class StreamingToolParser {
           }
           
           this.insideTool = false;
-          this.buffer = this.buffer.substring(endIdx + this.TOOL_END.length);
+          const activeEndLength = this.activeToolEnd.length;
+          this.activeToolStart = '<tool_call>';
+          this.activeToolEnd = '</tool_call>';
+          this.buffer = this.buffer.substring(endIdx + activeEndLength);
         } else {
           // Waiting for TOOL_END, buffer the content
           break;
@@ -140,7 +173,7 @@ export class StreamingToolParser {
           }
         } catch (e) {
           if (this.emittedToolCallCount === 0) {
-            result.text = this.TOOL_START + this.buffer;
+            result.text = this.activeToolStart + this.buffer;
           }
         }
       } else if (this.emittedToolCallCount === 0) {
