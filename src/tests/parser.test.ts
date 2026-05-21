@@ -108,3 +108,19 @@ test('StreamingToolParser: special cases (markdown, flat JSON, noise)', () => {
   assert.strictEqual(parser.feed('   ').text, '   ');
   assert.strictEqual(parser.feed('').toolCalls.length, 0);
 });
+
+test('StreamingToolParser: handles multiple tool calls in array format', () => {
+  const parser = new StreamingToolParser();
+  
+  // Test the exact case from the error
+  const chunk = `<tool_call>[
+  {"name": "bash", "arguments": {"command": "gh api repos/johngbl/qwenproxy/contents/src/routes?ref=feature/upgrades --jq '.[].name'", "description": "List files in qwenproxy routes dir"}},
+  {"name": "bash", "arguments": {"command": "gh api repos/johngbl/qwenproxy/contents/src?ref=feature/upgrades --jq '.[].name'", "description": "List files in qwenproxy src dir"}}
+]</tool_call>`;
+  
+  const result = parser.feed(chunk);
+  assert.strictEqual(result.toolCalls.length, 2, 'Should extract both tool calls');
+  assert.strictEqual(result.toolCalls[0].name, 'bash');
+  assert.strictEqual(result.toolCalls[1].name, 'bash');
+  assert.strictEqual(result.toolCalls[0].arguments.command, "gh api repos/johngbl/qwenproxy/contents/src/routes?ref=feature/upgrades --jq '.[].name'");
+});

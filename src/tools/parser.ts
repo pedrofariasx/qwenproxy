@@ -8,6 +8,36 @@ import { v4 as uuidv4 } from 'uuid';
 import { robustParseJSON } from '../utils/json.ts';
 import type { ParsedToolCall } from './types.ts';
 
+function fixArrayJson(str: string): string | null {
+  // Try to extract individual tool calls from a malformed array
+  const results: string[] = [];
+  let depth = 0;
+  let current = '';
+  
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (c === '{') {
+      depth++;
+      if (depth === 1) current = '{';
+      else current += c;
+    } else if (c === '}') {
+      depth--;
+      current += c;
+      if (depth === 0 && current.trim()) {
+        results.push(current.trim());
+        current = '';
+      }
+    } else if (depth > 0) {
+      current += c;
+    }
+  }
+  
+  if (results.length > 0) {
+    return '[' + results.join(',') + ']';
+  }
+  return null;
+}
+
 export interface ParserResult {
   /** Text content that is NOT part of a tool call */
   text: string;
@@ -95,19 +125,41 @@ export class StreamingToolParser {
           const originalEnd = this.activeToolEnd;
           
           try {
-            const toolCallObj = robustParseJSON(toolJsonStr);
-            if (toolCallObj && typeof toolCallObj === 'object' && (toolCallObj.name || toolCallObj.function)) {
-              result.toolCalls.push({
-                id: `call_${uuidv4()}`,
-                name: toolCallObj.name || toolCallObj.function?.name || 'unknown',
-                arguments: typeof toolCallObj.arguments === 'string' 
-                  ? JSON.parse(toolCallObj.arguments)
-                  : (toolCallObj.arguments || toolCallObj.function?.arguments || {})
-              });
-              this.emittedToolCallCount++;
+            const content = toolJsonStr.trim();
+            let parsedCalls: any[] = [];
+
+            // Try parsing as array of tool calls first
+            if (content.startsWith('[')) {
+              try {
+                parsedCalls = JSON.parse(content);
+              } catch {
+                // Try to fix array issues
+                const fixed = fixArrayJson(content);
+                if (fixed) parsedCalls = JSON.parse(fixed);
+              }
             } else {
-              // Not a real tool call, just text that looked like one
-              result.text += originalStart + toolJsonStr + originalEnd;
+              // Try single tool call
+              const single = robustParseJSON(content);
+              if (single) parsedCalls = [single];
+            }
+
+            for (const parsed of parsedCalls) {
+              if (parsed && typeof parsed === 'object' && (parsed.name || parsed.function)) {
+                result.toolCalls.push({
+                  id: `call_${uuidv4()}`,
+                  name: parsed.name || parsed.function?.name || 'unknown',
+                  arguments: typeof parsed.arguments === 'string' 
+                    ? JSON.parse(parsed.arguments)
+                    : (parsed.arguments || parsed.function?.arguments || {})
+                });
+                this.emittedToolCallCount++;
+              } else {
+                result.text += originalStart + content + originalEnd;
+              }
+            }
+
+            if (parsedCalls.length === 0) {
+              result.text += originalStart + content + originalEnd;
             }
           } catch (e) {
             console.warn(`[StreamingToolParser] Parsing failed for: ${toolJsonStr}`, e);
