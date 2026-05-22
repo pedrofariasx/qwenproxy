@@ -13,11 +13,13 @@ export interface ParserResult {
   toolCalls: ParsedToolCall[];
 }
 
+import { TOOL_CALL_START, TOOL_CALL_END } from '../constants.ts';
+
 export class StreamingToolParser {
   private buffer = '';
   private insideTool = false;
-  private readonly TOOL_START = '<tool_call>';
-  private readonly TOOL_END = '</tool_call>';
+  private readonly TOOL_START = TOOL_CALL_START;
+  private readonly TOOL_END = TOOL_CALL_END;
   private emittedToolCallCount = 0;
 
   feed(chunk: string): ParserResult {
@@ -28,7 +30,10 @@ export class StreamingToolParser {
       if (!this.insideTool) {
         const startIdx = this.buffer.indexOf(this.TOOL_START);
         if (startIdx !== -1) {
-          result.text += this.buffer.substring(0, startIdx);
+          const textBefore = this.buffer.substring(0, startIdx);
+          if (textBefore.trim()) {
+            result.text += textBefore;
+          }
           this.buffer = this.buffer.substring(startIdx + this.TOOL_START.length);
           this.insideTool = true;
         } else {
@@ -40,17 +45,21 @@ export class StreamingToolParser {
           }
           break;
         }
-      } else {
-        const endIdx = this.buffer.indexOf(this.TOOL_END);
-        if (endIdx !== -1) {
-          const content = this.buffer.substring(0, endIdx);
-          this.buffer = this.buffer.substring(endIdx + this.TOOL_END.length);
-          this.processToolContent(content, result);
-          this.insideTool = false;
-        } else {
-          break;
+} else {
+          const endIdx = this.buffer.indexOf(this.TOOL_END);
+          if (endIdx !== -1) {
+            const content = this.buffer.substring(0, endIdx);
+            this.buffer = this.buffer.substring(endIdx + this.TOOL_END.length);
+            this.processToolContent(content, result);
+            this.insideTool = false;
+          } else {
+            const partialLen = this.getPartialEndTagLength();
+            if (partialLen > 0) {
+              break;
+            }
+            break;
+          }
         }
-      }
     }
 
     return result;
@@ -121,10 +130,10 @@ export class StreamingToolParser {
 
   private parseToolCall(parsed: any): ParsedToolCall | null {
     if (!parsed || typeof parsed !== 'object') return null;
-    
+
     const name = parsed.name || parsed.function?.name;
     if (!name || typeof name !== 'string') return null;
-    
+
     let args = parsed.arguments || parsed.function?.arguments || {};
     if (typeof args === 'string') {
       try { args = JSON.parse(args); }
@@ -140,11 +149,29 @@ export class StreamingToolParser {
   }
 
   private getPartialTagLength(): number {
-    for (let i = 1; i < this.TOOL_START.length; i++) {
-      if (this.buffer.endsWith(this.TOOL_START.substring(0, i))) {
-        return i;
+    const tag = this.TOOL_START;
+    let maxMatch = 0;
+    for (let i = 1; i <= tag.length; i++) {
+      if (this.buffer.endsWith(tag.substring(0, i))) {
+        maxMatch = i;
       }
     }
-    return 0;
+    return maxMatch;
+  }
+
+  private getPartialEndTagLength(): number {
+    const endTag = this.TOOL_END;
+    let maxMatch = 0;
+    for (let i = 1; i <= endTag.length; i++) {
+      if (this.buffer.endsWith(endTag.substring(0, i))) {
+        maxMatch = i;
+      }
+    }
+    return maxMatch;
+  }
+
+  isEndTagFragment(): boolean {
+    if (this.buffer.includes(this.TOOL_END)) return false;
+    return this.getPartialEndTagLength() > 0;
   }
 }

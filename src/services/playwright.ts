@@ -121,8 +121,9 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
     });
   });
 
-  // Keep an active page to fetch PoW headers on demand
-  activePage = await context.newPage();
+  // Reuse the initial page (about:blank) instead of creating a new tab
+  const pages = context.pages();
+  activePage = pages.length > 0 ? pages[0] : await context.newPage();
 
   const hasCredentials = !!(process.env.QWEN_EMAIL && process.env.QWEN_PASSWORD);
   const hasValidSession = await checkValidSession();
@@ -352,32 +353,16 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      console.error('[Playwright] Timeout waiting for Qwen headers. Current URL:', activePage!.url());
       reject(new Error('Timeout waiting for Qwen headers'));
     }, 60000);
 
-    console.log('[Playwright] Setting up route interception...');
     const routeHandler = async (route: any, request: any) => {
       clearTimeout(timeout);
-      
-      const reqHeaders = request.headers();
-      let uiSessionId = '';
-      let uiParentMessageId: string | null = null;
 
+      const reqHeaders = request.headers();
       const postData = request.postData();
-      if (postData) {
-        try {
-          const payload = JSON.parse(postData);
-          if (payload.chat_id) {
-            uiSessionId = payload.chat_id;
-          }
-          if (payload.parent_id !== undefined) {
-            uiParentMessageId = payload.parent_id;
-          }
-        } catch (e) {
-          // ignore parsing error
-        }
-      }
+
+      const { chatId, parentId } = parseSessionIds(postData);
 
       const extractedHeaders = {
         'cookie': reqHeaders['cookie'] || '',
@@ -388,80 +373,80 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
         'user-agent': reqHeaders['user-agent'] || ''
       };
 
-      // Ensure we have at least cookies and bx-ua (which are critical)
       if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-        console.log('[Playwright] Intercepted request missing critical headers, skipping...');
         await route.continue();
         return;
       }
 
-      console.log('[Playwright] Successfully intercepted headers.');
       currentHeaders = extractedHeaders;
-      cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };
+      cachedQwenHeaders = {
+        headers: extractedHeaders,
+        chatSessionId: chatId,
+        parentMessageId: parentId
+      };
       lastHeadersTime = Date.now();
 
-      // Trigger native tools disabling on first header interception
       import('./qwen.ts').then(m => m.disableNativeTools().catch(() => {}));
 
-      // Abort to prevent polluting chat history
       await route.abort('aborted');
-      
-      // Cleanup route
       await activePage!.unroute('**/api/v2/chat/completions*', routeHandler);
 
       resolve(cachedQwenHeaders);
     };
 
     activePage!.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
-      console.log('[Playwright] Triggering request...');
-      const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
-      
-      // We use type instead of fill to trigger all events
-      await activePage!.focus(inputSelector);
-      await activePage!.fill(inputSelector, ''); // clear first
-      await activePage!.type(inputSelector, 'a', { delay: 100 });
-      console.log('[Playwright] Typed char, waiting for UI to update...');
-      await sleep(2000); // Wait more for Send button to enable
-      
-      // Improved Send Button detection & aggressive clicking
-      const selectors = [
-        '.message-input-right-button-send .send-button',
-        '.chat-prompt-send-button',
-        'button.send-button'
-      ];
-      
-      let clicked = false;
-      for (const selector of selectors) {
-        try {
-          const btn = await activePage!.$(selector);
-          if (btn && await btn.isVisible()) {
-            console.log(`[Playwright] Attempting click on: ${selector}`);
-            
-            // Try both DOM click and Playwright click
-            await activePage!.evaluate((sel) => {
-              const element = document.querySelector(sel) as HTMLElement;
-              if (element) {
-                element.focus();
-                element.click();
-              }
-            }, selector);
-            
-            // Also try a real mouse click just in case
-            await btn.click({ force: true, delay: 50 }).catch(() => {});
-            
-            clicked = true;
-            break;
-          }
-        } catch (e) {
-          console.error(`[Playwright] Error clicking ${selector}:`, e);
-        }
-      }
-
-      if (!clicked) {
-        console.log('[Playwright] No send button found/clicked, fallback to Enter...');
-        await activePage!.focus(inputSelector);
-        await activePage!.keyboard.press('Enter');
-      }
+      await sendChatMessage(activePage!, inputSelector);
     });
   });
+}
+
+async function sendChatMessage(page: Page, selector: string): Promise<void> {
+  await page.focus(selector);
+  await page.fill(selector, '');
+  await page.type(selector, 'a', { delay: 100 });
+  await sleep(2000); // Wait for Send button to enable
+
+  const clicked = await tryClickSendButton(page);
+  if (!clicked) {
+    await page.keyboard.press('Enter');
+  }
+}
+
+async function tryClickSendButton(page: Page): Promise<boolean> {
+  const selectors = [
+    '.message-input-right-button-send .send-button',
+    '.chat-prompt-send-button',
+    'button.send-button'
+  ];
+
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn && await btn.isVisible()) {
+        await page.evaluate((s: string) => {
+          const el = document.querySelector(s) as HTMLElement;
+          el?.click();
+        }, sel);
+        await btn.click({ force: true, delay: 50 }).catch(() => {});
+        return true;
+      }
+    } catch { /* ignore */ }
+  }
+
+  return false;
+}
+
+function parseSessionIds(postData: string | null): { chatId: string; parentId: string | null } {
+  let chatId = '';
+  let parentId: string | null = null;
+
+  if (!postData) return { chatId, parentId };
+
+  try {
+    const payload = JSON.parse(postData);
+    if (payload.chat_id) chatId = payload.chat_id;
+    if (payload.parent_id !== undefined) parentId = payload.parent_id;
+  } catch { /* ignore */ }
+
+  return { chatId, parentId };
 }

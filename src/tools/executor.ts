@@ -1,8 +1,7 @@
 /*
  * File: executor.ts
  * Project: qwenproxy
- * Execution loop for tool calling - agentic loop that handles
- * send -> tool calls -> execute -> re-send until completion
+ * Tool execution helpers - parseToolCallsFromContent and executeToolCalls
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -10,34 +9,10 @@ import type { ParsedToolCall, ToolCallResult, ToolContext } from './types.ts';
 import { SchemaValidationError } from './schema.ts';
 import { registry } from './registry.ts';
 import { robustParseJSON } from '../utils/json.ts';
+import { TOOL_CALL_START, TOOL_CALL_END } from '../constants.ts';
 
-export interface ExecutionLoopConfig {
-  maxTurns?: number;
-  debug?: boolean;
-}
-
-export interface LoopTurnResult {
-  toolCalls: ParsedToolCall[];
-  toolResults: ToolCallResult[];
-  content: string | null;
-  finishReason: string | null;
-  turn: number;
-}
-
-export type LLMSendFunction = (
-  messages: unknown[],
-  tools: unknown[] | undefined,
-  model: string
-) => Promise<LLMResponse>;
-
-export interface LLMResponse {
-  content: string | null;
-  toolCalls: ParsedToolCall[];
-  finishReason: string;
-}
-
-const TOOL_START_TAG = '<' + 'tool_call>';
-const TOOL_END_TAG = '</' + 'tool_call>';
+const TOOL_START_TAG = TOOL_CALL_START;
+const TOOL_END_TAG = TOOL_CALL_END;
 
 export function parseToolCallsFromContent(content: string): {
   textContent: string;
@@ -69,11 +44,11 @@ export function parseToolCallsFromContent(content: string): {
     try {
       const parsed = robustParseJSON(jsonStr);
       if (!parsed) throw new Error('Failed to parse JSON');
-      
+
       toolCalls.push({
         id: 'call_' + uuidv4(),
         name: parsed.name || '',
-        arguments: parsed.arguments 
+        arguments: parsed.arguments
           ? (typeof parsed.arguments === 'string' ? JSON.parse(parsed.arguments) : parsed.arguments)
           : (() => {
               const { name, ...rest } = parsed;
@@ -128,109 +103,5 @@ export async function executeToolCalls(
         };
       }
     })
-  );
-}
-
-function buildToolMessage(result: ToolCallResult): Record<string, unknown> {
-  return {
-    role: 'tool',
-    tool_call_id: result.toolCallId,
-    content: result.result,
-  };
-}
-
-function buildAssistantToolCallMessage(
-  content: string | null,
-  toolCalls: ParsedToolCall[]
-): Record<string, unknown> {
-  return {
-    role: 'assistant',
-    content: content || null,
-    tool_calls: toolCalls.map((tc) => ({
-      id: tc.id,
-      type: 'function',
-      function: {
-        name: tc.name,
-        arguments: typeof tc.arguments === 'string'
-          ? tc.arguments
-          : JSON.stringify(tc.arguments),
-      },
-    })),
-  };
-}
-
-export async function runExecutionLoop(
-  sendToLLM: LLMSendFunction,
-  messages: unknown[],
-  model: string,
-  config: ExecutionLoopConfig = {}
-): Promise<string> {
-  const maxTurns = config.maxTurns ?? 10;
-  const debug = config.debug ?? false;
-
-  const tools = registry.listNames().length > 0
-    ? registry.toOpenAITools()
-    : undefined;
-
-  for (let turn = 0; turn < maxTurns; turn++) {
-    if (debug) {
-      console.log(`[executor] Turn ${turn + 1}/${maxTurns}, messages: ${messages.length}`);
-    }
-
-    const response = await sendToLLM(messages, tools, model);
-
-    const hasStructuredToolCalls = response.toolCalls && response.toolCalls.length > 0;
-    let parsedFromContent: { textContent: string; toolCalls: ParsedToolCall[] } | null = null;
-
-    if (!hasStructuredToolCalls && response.content) {
-      parsedFromContent = parseToolCallsFromContent(response.content);
-    }
-
-    const effectiveToolCalls = hasStructuredToolCalls
-      ? response.toolCalls
-      : parsedFromContent?.toolCalls || [];
-
-    const effectiveContent = parsedFromContent
-      ? parsedFromContent.textContent
-      : response.content;
-
-    if (effectiveToolCalls.length === 0) {
-      if (debug) {
-        console.log('[executor] No tool calls, loop complete');
-      }
-      return effectiveContent || '';
-    }
-
-    const context: ToolContext = {
-      messages,
-      turn,
-      model,
-    };
-
-    if (debug) {
-      console.log(
-        `[executor] Executing ${effectiveToolCalls.length} tool calls:`,
-        effectiveToolCalls.map((tc) => tc.name)
-      );
-    }
-
-    const toolResults = await executeToolCalls(effectiveToolCalls, context);
-
-    messages.push(buildAssistantToolCallMessage(effectiveContent, effectiveToolCalls));
-
-    for (const result of toolResults) {
-      messages.push(buildToolMessage(result));
-    }
-
-    if (debug) {
-      console.log(
-        `[executor] Tool results:`,
-        toolResults.map((r) => ({ name: r.name, isError: r.isError }))
-      );
-    }
-  }
-
-  throw new Error(
-    `Execution loop exceeded maximum turns (${maxTurns}). The agent may be stuck in a cycle.`
   );
 }

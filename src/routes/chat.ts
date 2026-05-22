@@ -12,13 +12,46 @@ import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
 import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
-import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
-import { registry } from '../tools/registry.ts';
-import type { FunctionToolDefinition } from '../tools/types.ts';
-import { robustParseJSON } from '../utils/json.ts';
+import type { OpenAIRequest } from '../utils/types.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 import { RetryableQwenStreamError } from '../services/qwen.ts';
 import { Mutex } from '../services/playwright.ts';
+import { TOOL_CALL_INSTRUCTION } from '../constants.ts';
+import fs from 'fs';
+
+const DEBUG_LOGS = process.env.DEBUG_LOGS === 'true';
+
+let debugRawLog = '';
+let debugProxyLog = '';
+let debugPromptLog = '';
+
+function appendRawLog(chunk: string) {
+  if (DEBUG_LOGS) debugRawLog += chunk;
+}
+
+function appendProxyLog(data: string) {
+  if (DEBUG_LOGS) debugProxyLog += data + '\n';
+}
+
+function appendPromptLog(prompt: string) {
+  if (DEBUG_LOGS) debugPromptLog += '=== PROMPT ENVIADO AO QWEN ===\n' + prompt + '\n=== FIM DO PROMPT ===\n\n';
+}
+
+function flushDebugLogs() {
+  if (!DEBUG_LOGS) return;
+  const ts = Date.now().toString(36);
+  try {
+    fs.writeFileSync(`debug_raw_${ts}.txt`, debugRawLog);
+    fs.writeFileSync(`debug_proxy_${ts}.txt`, debugProxyLog);
+    fs.writeFileSync(`debug_prompt_${ts}.txt`, debugPromptLog);
+    console.log(`[DEBUG] Logs salvos: debug_raw_${ts}.txt, debug_proxy_${ts}.txt, debug_prompt_${ts}.txt`);
+  } catch (e) {
+    console.error('[DEBUG] Falha ao salvar logs:', e);
+  }
+  debugRawLog = '';
+  debugProxyLog = '';
+  debugPromptLog = '';
+}
 
 // Global mutex that serializes ALL Qwen chat completions requests.
 // The Qwen web backend is stateful: it only allows one generation at a time
@@ -51,15 +84,76 @@ export function getIncrementalDelta(oldStr: string, newStr: string): DeltaResult
 
   const threshold = Math.min(oldStr.length, 4);
   if (commonPrefixLen >= threshold) {
+    // Check if we're cutting in the middle of a <tool_call> or </tool_call> tag
+    const partialTag = newStr.substring(0, commonPrefixLen);
+    const isPartialOpeningTag = partialTag === '<tool_call' && !newStr.includes('<tool_call>');
+    const isPartialClosingTag = partialTag === '</tool_call' && !newStr.includes('</tool_call>');
+
+    if (isPartialOpeningTag || isPartialClosingTag) {
+      return {
+        delta: '',
+        matchedContent: oldStr
+      };
+    }
+
+    // CRITICAL FIX: If newStr is entirely a prefix of oldStr (newStr <= oldStr and fully matches),
+    // but newStr is NOT identical to oldStr (handled above), this is likely an incremental chunk
+    // that happens to match the start of oldStr. Treat as incremental, not cumulative.
+    if (commonPrefixLen === newStr.length && newStr.length < oldStr.length) {
+      return {
+        delta: newStr,
+        matchedContent: oldStr + newStr
+      };
+    }
+
     return {
       delta: newStr.substring(commonPrefixLen),
       matchedContent: newStr
     };
   }
 
+  // Special case: if oldStr ends with </tool_call> and newStr starts with <tool_call>,
+  // we must concatenate to avoid breaking the tag structure
+  const trimmedOld = oldStr.trimEnd();
+  const trimmedNew = newStr.trimStart();
+  const endsWithClosingTag = trimmedOld.endsWith('</tool_call>');
+  const startsWithOpeningTag = trimmedNew.startsWith('<tool_call>');
+
+  if (endsWithClosingTag && startsWithOpeningTag) {
+    return {
+      delta: newStr,
+      matchedContent: oldStr + newStr
+    };
+  }
+
+  const oldEndsWithClosingTagPlusSpace = trimmedOld.endsWith('</tool_call>') && oldStr.endsWith(' ');
+  const newStartsWithOpenTag = trimmedNew.startsWith('<tool_call>');
+  if (oldEndsWithClosingTagPlusSpace && newStartsWithOpenTag) {
+    return {
+      delta: newStr,
+      matchedContent: oldStr + newStr
+    };
+  }
+
   // If the prefix check fails, we treat it as strictly incremental (or pure delta).
   // We avoid fallback search/sliding overlap checks which cause disastrous false-positive
   // corruptions on incremental streams with repetitive code/words (like "import {", "const", etc.).
+
+  // NEW: Detect if this looks like a new tool_call block that should NOT be concatenated
+  // If oldStr ends with an incomplete JSON object and newStr starts with content that
+  // clearly indicates a new block (like 'name":' without the opening '{'), reset instead of concatenate
+  const oldEndsWithOpenBrace = oldStr.endsWith('{') || oldStr.endsWith('<tool_call>\n');
+  const newStartsWithContinuation = newStr.startsWith('"') || newStr.startsWith(',') || newStr.startsWith(' ');
+
+  if (oldEndsWithOpenBrace && !newStartsWithContinuation && newStr.includes('name":')) {
+    // This looks like a new tool call block starting with "name": without the opening '{'
+    // Return newStr as-is, don't concatenate with oldStr
+    return {
+      delta: newStr,
+      matchedContent: newStr
+    };
+  }
+
   return {
     delta: newStr,
     matchedContent: oldStr + newStr
@@ -96,6 +190,33 @@ export async function chatCompletions(c: Context) {
   try {
     const body: OpenAIRequest = await c.req.json();
     const isStream = body.stream ?? false;
+    const toolCount = body.tools?.length || 0;
+    const msgCount = body.messages?.length || 0;
+    
+    
+    // Format tools schema from request to include in prompt for Qwen
+    let toolsInfo = '';
+    if (body.tools && body.tools.length > 0) {
+      const toolSchemas = body.tools.map((tool: any) => {
+        const func = tool.function || {};
+        const name = func.name || 'unknown';
+        const params = func.parameters || {};
+        const required = params.required || [];
+        const properties = params.properties || {};
+        
+        let paramsStr = '';
+        if (Object.keys(properties).length > 0) {
+          const paramDetails = Object.entries(properties).map(([k, v]: [string, any]) => {
+            return `${k}: ${v.type || 'string'}`;
+          }).join(', ');
+          paramsStr = ` (${paramDetails})`;
+        }
+        
+        return `- ${name}${paramsStr}${required.length ? ` [required: ${required.join(', ')}]` : ''}`;
+      }).join('\n');
+      
+      toolsInfo = `\n\nAVAILABLE TOOLS:\n${toolSchemas}\n\nIMPORTANT: Use only the tool names listed above. Do NOT use invented names.\n`;
+    }
     
     // Extract the prompt
     let prompt = '';
@@ -132,9 +253,9 @@ export async function chatCompletions(c: Context) {
              } else if (args && typeof args === 'object') {
                parsedArgs = args;
              }
-             const payload = { name: tc.function?.name, arguments: parsedArgs };
-             const toolCallStr = `\n<tool_call>\n${JSON.stringify(payload)}\n</tool_call>`;
-             assistantContent = assistantContent ? assistantContent + toolCallStr : toolCallStr.trim();
+const payload = { name: tc.function?.name, arguments: parsedArgs };
+              const toolCallStr = `\n<tool_call>\n${JSON.stringify(payload)}\n</tool_call>`;
+              assistantContent = (assistantContent ? assistantContent + toolCallStr : '\n' + toolCallStr.trim());
            }
         }
         prompt += `Assistant: ${assistantContent.trim()}\n\n`;
@@ -157,32 +278,13 @@ export async function chatCompletions(c: Context) {
       }
     }
 
-    // Inject tools instructions
-    const bodyAny = body as any;
-    if (bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0) {
-      // Better formatting for tools
-      const formattedTools = bodyAny.tools.map((t: any) => {
-        if (t.type === 'function') {
-          return {
-            name: t.function.name,
-            description: t.function.description || '',
-            parameters: t.function.parameters
-          };
-        }
-        return t;
-      });
-      const toolsJson = JSON.stringify(formattedTools, null, 2);
-      
-      systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
-      
-      if (bodyAny.tool_choice && typeof bodyAny.tool_choice === 'object' && bodyAny.tool_choice.function) {
-        const forcedTool = bodyAny.tool_choice.function.name;
-        systemPrompt += `CRITICAL: You MUST call the tool "${forcedTool}" in this response.\n\n`;
-      }
-    }
-
-    const finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
-
+    const finalPrompt = toolsInfo
+      ? `${TOOL_CALL_INSTRUCTION}${toolsInfo}\n\n${systemPrompt}\n${prompt}`
+      : systemPrompt
+        ? `${systemPrompt}\n\n${prompt}`
+        : `${prompt}`;
+    
+    appendPromptLog(finalPrompt);
     const isThinkingModel = !body.model.includes('no-thinking');
     
     // A session is new if it doesn't have any assistant messages yet.
@@ -260,6 +362,7 @@ export async function chatCompletions(c: Context) {
 
           try {
             const chunk = JSON.parse(dataStr);
+            appendRawLog(JSON.stringify(chunk) + '\n');
 
             if (chunk['response.created'] && chunk['response.created'].response_id) {
               if (!targetResponseId) {
@@ -313,8 +416,10 @@ export async function chatCompletions(c: Context) {
               if (isThinkingChunk) {
                 reasoningBuffer += vStr;
               } else {
-                const { toolCalls } = toolParser.feed(vStr);
+                const { text, toolCalls } = toolParser.feed(vStr);
+                if (text) appendProxyLog('CONTENT: ' + text);
                 for (const tc of toolCalls) {
+                  appendProxyLog('TOOL_CALL: ' + tc.name + ' | ' + JSON.stringify(tc.arguments));
                   toolCallsOut.push({
                     id: tc.id,
                     type: 'function',
@@ -363,6 +468,10 @@ export async function chatCompletions(c: Context) {
       if (reasoningBuffer) message.reasoning_content = reasoningBuffer;
       if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
       if (toolCallsOut.length) message.tool_calls = toolCallsOut;
+
+      appendProxyLog('FINAL message.content: ' + (message.content || '(null)'));
+      appendProxyLog('FINAL message.tool_calls: ' + JSON.stringify(message.tool_calls || []));
+      flushDebugLogs();
 
       releaseChatLock();
       return c.json({
@@ -422,10 +531,7 @@ export async function chatCompletions(c: Context) {
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       
-      let inThinkingState = false;
-      let thinkingFragments: Record<string, boolean> = {};
       let currentThoughtIndex = 0;
-      let currentAppendPath = '';
       
       let reasoningBuffer = '';
       let lastFullContent = '';
@@ -456,6 +562,7 @@ export async function chatCompletions(c: Context) {
 
           try {
             const chunk = JSON.parse(dataStr);
+            appendRawLog(JSON.stringify(chunk) + '\n');
 
             // Extract response_id for session tracking and target filtering
             if (chunk['response.created'] && chunk['response.created'].response_id) {
@@ -509,7 +616,6 @@ export async function chatCompletions(c: Context) {
               if (vStr === 'FINISHED') continue;
 
               if (isThinkingChunk) {
-                inThinkingState = true;
                 reasoningBuffer += vStr;
                 await writeEvent({
                   id: completionId,
@@ -519,21 +625,22 @@ export async function chatCompletions(c: Context) {
                   choices: [makeChoice({ reasoning_content: vStr })]
                 });
               } else {
-                inThinkingState = false;
                 const { text, toolCalls } = toolParser.feed(vStr);
 
                 if (text) {
-                  await writeEvent({
+                  const eventData = {
                     id: completionId,
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
                     model: body.model,
                     choices: [makeChoice({ content: text })]
-                  });
+                  };
+                  appendProxyLog('CONTENT: ' + text);
+                  await writeEvent(eventData);
                 }
 
                 for (const tc of toolCalls) {
-                  await writeEvent({
+                  const eventData = {
                     id: completionId,
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
@@ -549,7 +656,9 @@ export async function chatCompletions(c: Context) {
                         }
                       }]
                     })]
-                  });
+                  };
+                  appendProxyLog('TOOL_CALL: ' + tc.name + ' | ' + JSON.stringify(tc.arguments));
+                  await writeEvent(eventData);
                 }
               }
             }
@@ -644,6 +753,7 @@ export async function chatCompletions(c: Context) {
       } finally {
         clearInterval(heartbeatInterval);
         releaseChatLock();
+        flushDebugLogs();
       }
     });
   } catch (err: any) {
