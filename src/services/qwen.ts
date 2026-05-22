@@ -109,6 +109,8 @@ export async function disableNativeTools(): Promise<void> {
     };
 
     console.log('[Qwen] Disabling native tools...');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
     const response = await fetch('https://chat.qwen.ai/api/v2/users/user/settings/update', {
       method: 'POST',
       headers: {
@@ -124,8 +126,10 @@ export async function disableNativeTools(): Promise<void> {
         'bx-umidtoken': headers['bx-umidtoken'],
         'bx-v': headers['bx-v']
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const text = await response.text();
@@ -258,6 +262,8 @@ export async function createQwenStream(
     ? `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatSessionId}`
     : 'https://chat.qwen.ai/api/v2/chat/completions';
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -278,8 +284,10 @@ export async function createQwenStream(
       'bx-umidtoken': headers['bx-umidtoken'],
       'bx-v': headers['bx-v']
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: controller.signal
   });
+  clearTimeout(timeoutId);
 
   if (!response.ok || !response.body) {
     const errText = await response.text().catch(() => '');

@@ -76,13 +76,15 @@ export function getIncrementalDelta(oldStr: string, newStr: string): DeltaResult
 
   // Heuristic to detect if newStr is cumulative or incremental:
   // If newStr is cumulative, it should share a common prefix with oldStr.
+  // Limit scan window to avoid O(n) on very long cumulative content
+  const scanWindow = Math.min(2000, oldStr.length);
   let commonPrefixLen = 0;
-  const maxLen = Math.min(oldStr.length, newStr.length);
+  const maxLen = Math.min(scanWindow, newStr.length);
   while (commonPrefixLen < maxLen && oldStr[commonPrefixLen] === newStr[commonPrefixLen]) {
     commonPrefixLen++;
   }
 
-  const threshold = Math.min(oldStr.length, 4);
+  const threshold = Math.min(scanWindow, 4);
   if (commonPrefixLen >= threshold) {
     // Check if we're cutting in the middle of a <tool_call> or </tool_call> tag
     const partialTag = newStr.substring(0, commonPrefixLen);
@@ -300,8 +302,8 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
     // Retry logic with exponential backoff for "chat is in progress" errors
     let stream: ReadableStream;
     let uiSessionId = '';
-    let retries = 5;
-    let retryDelay = 1000;
+    let retries = 3;
+    let retryDelay = 500;
     while (retries > 0) {
       try {
         // If it's a new session, force parent_message_id to null
