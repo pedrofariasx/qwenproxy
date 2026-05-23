@@ -5,7 +5,7 @@
  * Created: 2026-05-12
  */
 
-import { getQwenHeaders, getBasicHeaders } from './playwright.ts';
+import { getQwenHeaders, getBasicHeaders, clearCachedHeaders } from './playwright.ts';
 import { v4 as uuidv4 } from 'uuid';
 
 export class RetryableQwenStreamError extends Error {
@@ -32,6 +32,31 @@ export class QwenUpstreamError extends Error {
 
 const sessionStates: Record<string, string | null> = (globalThis as any)._sessionStates || {};
 (globalThis as any)._sessionStates = sessionStates;
+
+function jsonContainsNotExist(obj: any): string | null {
+  if (typeof obj === 'string') {
+    const lower = obj.toLowerCase();
+    if (lower.includes('is not exist') || lower.includes('not exist') || lower.includes('does not exist')) {
+      return obj;
+    }
+    return null;
+  }
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = jsonContainsNotExist(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (obj && typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      const found = jsonContainsNotExist(obj[key]);
+      if (found) return found;
+    }
+    return null;
+  }
+  return null;
+}
 
 export function updateSessionParent(sessionId: string, parentId: string | null) {
   if (sessionId) {
@@ -197,6 +222,78 @@ export async function fetchQwenModels(): Promise<any[]> {
   return [];
 }
 
+/**
+ * Peeks at the first few chunks of an SSE stream to detect "chat not exist"
+ * errors that Qwen embeds inside a 200 OK body. Clears the session cache so the
+ * retry loop in chat.ts can create a fresh chat. Returns a new stream with the
+ * already-read bytes preserved so the consumer can continue reading normally.
+ */
+async function validateStreamForNotExist(
+  source: ReadableStream<Uint8Array>,
+  chatSessionId: string
+): Promise<ReadableStream<Uint8Array>> {
+  const reader = source.getReader();
+  const decoder = new TextDecoder();
+  const bufferedChunks: Uint8Array[] = [];
+  let textBuffer = '';
+  let totalBytes = 0;
+
+  try {
+    while (bufferedChunks.length < 50 && totalBytes < 32768) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      bufferedChunks.push(value);
+      totalBytes += value.length;
+      textBuffer += decoder.decode(value, { stream: true });
+
+      const rawLower = textBuffer.toLowerCase();
+      if (rawLower.includes('is not exist') || rawLower.includes('not exist')) {
+        clearCachedHeaders();
+        if (chatSessionId) delete sessionStates[chatSessionId];
+        throw new RetryableQwenStreamError(`Qwen: chat session no longer exists`, 0);
+      }
+
+      const lines = textBuffer.split(/\r?\n/);
+      textBuffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ') || trimmed === 'data: [DONE]') continue;
+
+        try {
+          const payload = JSON.parse(trimmed.slice(6));
+          if (jsonContainsNotExist(payload)) {
+            clearCachedHeaders();
+            if (chatSessionId) delete sessionStates[chatSessionId];
+            throw new RetryableQwenStreamError(`Qwen: chat session no longer exists`, 0);
+          }
+          if (payload.choices || payload['response.created']) break;
+        } catch (e) {
+          if (e instanceof RetryableQwenStreamError) throw e;
+        }
+      }
+    }
+  } catch (e) {
+    reader.releaseLock();
+    throw e;
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      for (const chunk of bufferedChunks) controller.enqueue(chunk);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        controller.enqueue(value);
+      }
+      controller.close();
+      reader.releaseLock();
+    },
+    cancel() { reader.releaseLock(); }
+  });
+}
+
 export async function createQwenStream(
   prompt: string, 
   enableThinking: boolean, 
@@ -304,6 +401,19 @@ export async function createQwenStream(
             retryAfterMs,
           );
         }
+        // Detect deleted/expired chat BEFORE the generic success===false handler
+        const errorDetails = errorJson?.data?.details || errorJson?.message || '';
+        const notExistMessage = jsonContainsNotExist(errorJson);
+        if (notExistMessage) {
+          clearCachedHeaders();
+          if (chatSessionId) {
+            delete sessionStates[chatSessionId];
+          }
+          throw new RetryableQwenStreamError(
+            `Qwen: ${notExistMessage}`,
+            0,
+          );
+        }
         if (errorJson?.success === false) {
           const code = errorJson.data?.code || errorJson.code || 'UpstreamError';
           const details = errorJson.data?.details || errorJson.message || 'Qwen returned an error';
@@ -321,14 +431,6 @@ export async function createQwenStream(
             status,
           );
         }
-        if (errorJson?.data?.details?.includes('is not exist') ||
-            errorJson?.data?.details?.includes('not exist') ||
-            errorJson?.data?.details?.includes('does not exist')) {
-          throw new RetryableQwenStreamError(
-            `Qwen: ${errorJson.data.details}`,
-            0,
-          );
-        }
       } catch (parseOrRetryError) {
         if (parseOrRetryError instanceof RetryableQwenStreamError ||
             parseOrRetryError instanceof QwenUpstreamError) {
@@ -339,5 +441,10 @@ export async function createQwenStream(
     throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
   }
 
-  return { stream: response.body, headers, uiSessionId: chatSessionId };
+  // The Qwen API may return HTTP 200 with an SSE stream that contains an error
+  // payload (e.g. "chat is not exist"). Peek at the first chunks to catch it
+  // early so the retry loop in chat.ts can create a fresh session.
+  const validatedStream = await validateStreamForNotExist(response.body, chatSessionId);
+
+  return { stream: validatedStream, headers, uiSessionId: chatSessionId };
 }

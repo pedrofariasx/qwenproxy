@@ -280,6 +280,16 @@ async function loginToQwenUI(email: string, password: string): Promise<boolean> 
 /**
  * Ensures the session is valid and extracts headers, PoW, and session ID.
  */
+export function clearCachedHeaders() {
+  cachedQwenHeaders = null;
+  lastHeadersTime = 0;
+  if (refreshTimeout) {
+    clearTimeout(refreshTimeout);
+    refreshTimeout = null;
+  }
+  console.log('[Playwright] Cached Qwen headers cleared.');
+}
+
 export async function getQwenHeaders(forceNew = false): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
   // Use a lock to ensure only one request uses the UI at a time
   const release = await uiMutex.acquire();

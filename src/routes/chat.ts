@@ -15,6 +15,7 @@ import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
 import type { OpenAIRequest } from '../utils/types.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 import { RetryableQwenStreamError } from '../services/qwen.ts';
+import { clearCachedHeaders } from '../services/playwright.ts';
 import { Mutex } from '../services/playwright.ts';
 import { TOOL_CALL_INSTRUCTION } from '../constants.ts';
 import fs from 'fs';
@@ -471,6 +472,9 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
 
       const upstreamError = parseQwenErrorPayload(buffer);
       if (upstreamError) {
+        if (upstreamError.message.toLowerCase().includes('not exist')) {
+          clearCachedHeaders();
+        }
         releaseChatLock();
         return c.json({ error: { message: upstreamError.message } }, upstreamError.status as any);
       }
@@ -702,6 +706,9 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
 
       const upstreamError = parseQwenErrorPayload(buffer);
       if (upstreamError) {
+        if (upstreamError.message.toLowerCase().includes('not exist')) {
+          clearCachedHeaders();
+        }
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
