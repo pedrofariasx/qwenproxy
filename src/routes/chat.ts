@@ -197,6 +197,36 @@ export async function chatCompletions(c: Context) {
     
     
     // Format tools schema from request to include in prompt for Qwen
+    // Recursively format JSON schema properties into a compact, readable type signature.
+    function formatType(v: any): string {
+      if (!v || typeof v !== 'object') return 'any';
+
+      // Handle references — resolve if we can, otherwise fall through
+      if (v.$ref) {
+        return 'object';
+      }
+
+      const t = v.type || 'any';
+
+      if (t === 'array' && v.items) {
+        const itemType = formatType(v.items);
+        return `${itemType}[]`;
+      }
+
+      if (t === 'object' && v.properties) {
+        const nested = Object.entries(v.properties)
+          .map(([nk, nv]: [string, any]) => `${nk}: ${formatType(nv)}`)
+          .join(', ');
+        return `{${nested}}`;
+      }
+
+      if (Array.isArray(v.enum) && v.enum.length > 0) {
+        return v.enum.map((e: any) => JSON.stringify(e)).join(' | ');
+      }
+
+      return t;
+    }
+
     let toolsInfo = '';
     if (body.tools && body.tools.length > 0) {
       const toolSchemas = body.tools.map((tool: any) => {
@@ -205,18 +235,18 @@ export async function chatCompletions(c: Context) {
         const params = func.parameters || {};
         const required = params.required || [];
         const properties = params.properties || {};
-        
+
         let paramsStr = '';
         if (Object.keys(properties).length > 0) {
-          const paramDetails = Object.entries(properties).map(([k, v]: [string, any]) => {
-            return `${k}: ${v.type || 'string'}`;
-          }).join(', ');
+          const paramDetails = Object.entries(properties)
+            .map(([k, v]: [string, any]) => `${k}: ${formatType(v)}`)
+            .join(', ');
           paramsStr = ` (${paramDetails})`;
         }
-        
+
         return `- ${name}${paramsStr}${required.length ? ` [required: ${required.join(', ')}]` : ''}`;
       }).join('\n');
-      
+
       toolsInfo = `\n\nAVAILABLE TOOLS:\n${toolSchemas}\n\nIMPORTANT: Use only the tool names listed above. Do NOT use invented names.\n`;
     }
     
