@@ -2,6 +2,9 @@ import assert from "node:assert";
 import net from "node:net";
 import test from "node:test";
 import { serve } from "@hono/node-server";
+
+process.env.API_KEY = '';
+
 import { app } from "../index.ts";
 import { closePlaywright, initPlaywright } from "../services/playwright.ts";
 

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
+process.env.API_KEY = '';
 
 import { app } from '../index.ts';
 import { initPlaywright, closePlaywright } from '../services/playwright.ts';
