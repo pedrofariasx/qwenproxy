@@ -4,9 +4,9 @@
  * Streaming parser for <tool_call> tags - OpenAI Compatible
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { robustParseJSON } from '../utils/json.ts';
-import type { ParsedToolCall } from './types.ts';
+import type { ParsedToolCall } from '../utils/types.ts';
 
 export interface ParserResult {
   text: string;
@@ -37,7 +37,7 @@ export class StreamingToolParser {
           this.buffer = this.buffer.substring(startIdx + this.TOOL_START.length);
           this.insideTool = true;
         } else {
-          const partialLength = this.getPartialTagLength();
+          const partialLength = this.getPartialMatchLength(this.TOOL_START);
           const flushIndex = this.buffer.length - partialLength;
           if (flushIndex > 0) {
             result.text += this.buffer.substring(0, flushIndex);
@@ -53,7 +53,7 @@ export class StreamingToolParser {
             this.processToolContent(content, result);
             this.insideTool = false;
           } else {
-            const partialLen = this.getPartialEndTagLength();
+            const partialLen = this.getPartialMatchLength(this.TOOL_END);
             if (partialLen > 0) {
               break;
             }
@@ -142,14 +142,13 @@ export class StreamingToolParser {
     if (typeof args !== 'object' || args === null) args = {};
 
     return {
-      id: `call_${uuidv4()}`,
+      id: `call_${randomUUID()}`,
       name,
       arguments: args,
     };
   }
 
-  private getPartialTagLength(): number {
-    const tag = this.TOOL_START;
+  private getPartialMatchLength(tag: string): number {
     let maxMatch = 0;
     for (let i = 1; i <= tag.length; i++) {
       if (this.buffer.endsWith(tag.substring(0, i))) {
@@ -159,19 +158,8 @@ export class StreamingToolParser {
     return maxMatch;
   }
 
-  private getPartialEndTagLength(): number {
-    const endTag = this.TOOL_END;
-    let maxMatch = 0;
-    for (let i = 1; i <= endTag.length; i++) {
-      if (this.buffer.endsWith(endTag.substring(0, i))) {
-        maxMatch = i;
-      }
-    }
-    return maxMatch;
-  }
-
   isEndTagFragment(): boolean {
     if (this.buffer.includes(this.TOOL_END)) return false;
-    return this.getPartialEndTagLength() > 0;
+    return this.getPartialMatchLength(this.TOOL_END) > 0;
   }
 }

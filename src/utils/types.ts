@@ -8,8 +8,48 @@
  * Modified By: Pedro Farias
  */
 
-import type { JsonSchema, FunctionToolDefinition } from '../tools/types.ts';
-export type { JsonSchema, FunctionToolDefinition };
+// --- JSON Schema ---
+
+export interface JsonSchema {
+  type: string;
+  properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
+  required?: string[];
+  enum?: unknown[];
+  const?: unknown;
+  default?: unknown;
+  description?: string;
+  additionalProperties?: boolean | JsonSchema;
+  anyOf?: JsonSchema[];
+  oneOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  not?: JsonSchema;
+  if?: JsonSchema;
+  then?: JsonSchema;
+  else?: JsonSchema;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  format?: string;
+  minItems?: number;
+  maxItems?: number;
+  uniqueItems?: boolean;
+  nullable?: boolean;
+}
+
+// --- Function Tool Definitions ---
+
+export interface FunctionToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters?: JsonSchema;
+    strict?: boolean;
+  };
+}
 
 /** Tool choice options */
 export type ToolChoice = 'auto' | 'none' | 'required' | {
@@ -33,13 +73,9 @@ export interface MessageToolCall {
 export interface Message {
   role: string;
   content: string | null;
-  /** Present on assistant messages that invoked tools */
   tool_calls?: MessageToolCall[];
-  /** Present on tool/function response messages to link back to a call */
   tool_call_id?: string;
-  /** Present on tool/function response messages */
   name?: string;
-  /** Reasoning content for thinking models */
   reasoning_content?: string;
 }
 
@@ -98,4 +134,39 @@ export interface ChatCompletionChunk {
   model: string;
   choices: Choice[];
   usage?: Usage;
+}
+
+// --- Tool System Types ---
+
+export interface ToolRegistration {
+  name: string;
+  description: string;
+  parameters: JsonSchema;
+  strict: boolean;
+  handler: ToolHandler;
+}
+
+export type ToolHandler<TArgs = any, TResult = any> = (
+  args: TArgs,
+  context: ToolContext
+) => Promise<TResult>;
+
+export interface ToolContext {
+  messages: unknown[];
+  turn: number;
+  model: string;
+  [key: string]: any;
+}
+
+export interface ParsedToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ToolCallResult {
+  toolCallId: string;
+  name: string;
+  result: string;
+  isError: boolean;
 }

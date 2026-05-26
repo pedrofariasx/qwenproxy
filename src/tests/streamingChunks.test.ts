@@ -82,23 +82,21 @@ test('StreamingToolParser: partial end tag does not flush incomplete content', (
   assert.strictEqual(r2.toolCalls[0].arguments.filePath, 'C:\\Users\\John\\a.txt');
 });
 
-test('StreamingToolParser: getPartialEndTagLength helper works', () => {
+test('StreamingToolParser: getPartialMatchLength helper works for end tag', () => {
   const parser = new StreamingToolParser() as any;
+  const endTag = parser.TOOL_END;
 
   parser.buffer = '</tool';
-  assert.strictEqual(parser.getPartialEndTagLength(), 6);
+  assert.strictEqual(parser.getPartialMatchLength(endTag), 6);
 
   parser.buffer = '</tool_call';
-  assert.strictEqual(parser.getPartialEndTagLength(), 11);
-
-  parser.buffer = '</tool_call>';
-  assert.strictEqual(parser.getPartialEndTagLength(), 12);
+  assert.strictEqual(parser.getPartialMatchLength(endTag), 11);
 
   parser.buffer = 'some text </tool';
-  assert.strictEqual(parser.getPartialEndTagLength(), 6);
+  assert.strictEqual(parser.getPartialMatchLength(endTag), 6);
 
   parser.buffer = 'no closing tag here';
-  assert.strictEqual(parser.getPartialEndTagLength(), 0);
+  assert.strictEqual(parser.getPartialMatchLength(endTag), 0);
 });
 
 test('StreamingToolParser: real debug log pattern - tool_call fragment with newline', () => {

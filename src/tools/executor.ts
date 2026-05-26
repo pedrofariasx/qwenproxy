@@ -4,8 +4,8 @@
  * Tool execution helpers - parseToolCallsFromContent and executeToolCalls
  */
 
-import { v4 as uuidv4 } from 'uuid';
-import type { ParsedToolCall, ToolCallResult, ToolContext } from './types.ts';
+import { randomUUID } from 'crypto';
+import type { ParsedToolCall, ToolCallResult, ToolContext } from '../utils/types.ts';
 import { SchemaValidationError } from './schema.ts';
 import { registry } from './registry.ts';
 import { robustParseJSON } from '../utils/json.ts';
@@ -46,7 +46,7 @@ export function parseToolCallsFromContent(content: string): {
       if (!parsed) throw new Error('Failed to parse JSON');
 
       toolCalls.push({
-        id: 'call_' + uuidv4(),
+        id: 'call_' + randomUUID(),
         name: parsed.name || '',
         arguments: parsed.arguments
           ? (typeof parsed.arguments === 'string' ? JSON.parse(parsed.arguments) : parsed.arguments)

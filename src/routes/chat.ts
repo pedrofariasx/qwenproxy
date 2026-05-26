@@ -10,7 +10,7 @@
 
 import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
 import type { OpenAIRequest } from '../utils/types.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
@@ -129,15 +129,6 @@ export function getIncrementalDelta(oldStr: string, newStr: string): DeltaResult
     };
   }
 
-  const oldEndsWithClosingTagPlusSpace = trimmedOld.endsWith('</tool_call>') && oldStr.endsWith(' ');
-  const newStartsWithOpenTag = trimmedNew.startsWith('<tool_call>');
-  if (oldEndsWithClosingTagPlusSpace && newStartsWithOpenTag) {
-    return {
-      delta: newStr,
-      matchedContent: oldStr + newStr
-    };
-  }
-
   // If the prefix check fails, we treat it as strictly incremental (or pure delta).
   // We avoid fallback search/sliding overlap checks which cause disastrous false-positive
   // corruptions on incremental streams with repetitive code/words (like "import {", "const", etc.).
@@ -189,45 +180,114 @@ function parseQwenErrorPayload(raw: string): { message: string; status: number }
   return null;
 }
 
+
+interface StreamState {
+  currentThoughtIndex: number;
+  reasoningBuffer: string;
+  lastFullContent: string;
+  targetResponseId: string | null;
+  toolParser: StreamingToolParser;
+  completionTokens: number;
+  promptTokens: number;
+}
+
+interface ChunkOutput {
+  reasoningText?: string;
+  text?: string;
+  toolCalls: import('../utils/types.ts').ParsedToolCall[];
+}
+
+function processQwenChunk(
+  chunk: any,
+  state: StreamState,
+  uiSessionId: string
+): ChunkOutput | null {
+  appendRawLog(JSON.stringify(chunk) + '\n');
+
+  if (chunk['response.created'] && chunk['response.created'].response_id) {
+    if (!state.targetResponseId) {
+      state.targetResponseId = chunk['response.created'].response_id;
+    }
+    updateSessionParent(uiSessionId, chunk['response.created'].response_id);
+  } else if (chunk.response_id && !state.targetResponseId) {
+    state.targetResponseId = chunk.response_id;
+    updateSessionParent(uiSessionId, chunk.response_id);
+  }
+
+  if (chunk.usage) {
+    if (chunk.usage.output_tokens) state.completionTokens = chunk.usage.output_tokens;
+    if (chunk.usage.input_tokens) state.promptTokens = chunk.usage.input_tokens;
+  }
+
+  let vStr = '';
+  let foundStr = false;
+  let isThinkingChunk = false;
+
+  if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta &&
+      (state.targetResponseId === null || chunk.response_id === state.targetResponseId)) {
+    const delta = chunk.choices[0].delta;
+
+    if (delta.phase === 'thinking_summary') {
+      isThinkingChunk = true;
+      if (delta.extra && delta.extra.summary_thought && delta.extra.summary_thought.content) {
+        const thoughts = delta.extra.summary_thought.content;
+        if (thoughts.length > state.currentThoughtIndex) {
+          vStr = thoughts.slice(state.currentThoughtIndex).join('\n');
+          state.currentThoughtIndex = thoughts.length;
+          foundStr = true;
+        }
+      }
+    } else if (delta.phase === 'answer') {
+      isThinkingChunk = false;
+      if (delta.content !== undefined) {
+        const newContent = delta.content || '';
+        const result = getIncrementalDelta(state.lastFullContent, newContent);
+        vStr = result.delta;
+        if (vStr) {
+          state.lastFullContent = result.matchedContent;
+          foundStr = true;
+        }
+      }
+    }
+  }
+
+  if (!foundStr || vStr === '' || vStr === 'FINISHED') return null;
+
+  if (isThinkingChunk) {
+    state.reasoningBuffer += vStr;
+    return { reasoningText: vStr, toolCalls: [] };
+  }
+
+  const { text, toolCalls } = state.toolParser.feed(vStr);
+  if (text) appendProxyLog('CONTENT: ' + text);
+  for (const tc of toolCalls) {
+    appendProxyLog('TOOL_CALL: ' + tc.name + ' | ' + JSON.stringify(tc.arguments));
+  }
+  return { text, toolCalls };
+}
+
+function formatType(v: any): string {
+  if (!v || typeof v !== 'object') return 'any';
+  if (v.$ref) return 'object';
+  const t = v.type || 'any';
+  if (t === 'array' && v.items) return `${formatType(v.items)}[]`;
+  if (t === 'object' && v.properties) {
+    const nested = Object.entries(v.properties)
+      .map(([nk, nv]: [string, any]) => `${nk}: ${formatType(nv)}`)
+      .join(', ');
+    return `{${nested}}`;
+  }
+  if (Array.isArray(v.enum) && v.enum.length > 0) {
+    return v.enum.map((e: any) => JSON.stringify(e)).join(' | ');
+  }
+  return t;
+}
+
 export async function chatCompletions(c: Context) {
   try {
     const body: OpenAIRequest = await c.req.json();
     const isStream = body.stream ?? false;
-    const toolCount = body.tools?.length || 0;
-    const msgCount = body.messages?.length || 0;
     
-    
-    // Format tools schema from request to include in prompt for Qwen
-    // Recursively format JSON schema properties into a compact, readable type signature.
-    function formatType(v: any): string {
-      if (!v || typeof v !== 'object') return 'any';
-
-      // Handle references — resolve if we can, otherwise fall through
-      if (v.$ref) {
-        return 'object';
-      }
-
-      const t = v.type || 'any';
-
-      if (t === 'array' && v.items) {
-        const itemType = formatType(v.items);
-        return `${itemType}[]`;
-      }
-
-      if (t === 'object' && v.properties) {
-        const nested = Object.entries(v.properties)
-          .map(([nk, nv]: [string, any]) => `${nk}: ${formatType(nv)}`)
-          .join(', ');
-        return `{${nested}}`;
-      }
-
-      if (Array.isArray(v.enum) && v.enum.length > 0) {
-        return v.enum.map((e: any) => JSON.stringify(e)).join(' | ');
-      }
-
-      return t;
-    }
-
     let toolsInfo = '';
     if (body.tools && body.tools.length > 0) {
       const toolSchemas = body.tools.map((tool: any) => {
@@ -363,113 +423,53 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
       }
     }
 
-    const completionId = 'chatcmpl-' + uuidv4();
+    const completionId = 'chatcmpl-' + randomUUID();
 
     if (!isStream) {
       const reader = stream!.getReader();
       const decoder = new TextDecoder();
 
-      let currentThoughtIndex = 0;
-      let reasoningBuffer = '';
-      let lastFullContent = '';
-      let targetResponseId: string | null = null;
-      const toolParser = new StreamingToolParser();
+      const state: StreamState = {
+        currentThoughtIndex: 0,
+        reasoningBuffer: '',
+        lastFullContent: '',
+        targetResponseId: null,
+        toolParser: new StreamingToolParser(),
+        completionTokens: 0,
+        promptTokens: Math.ceil(finalPrompt.length / 3.5)
+      };
       const toolCallsOut: any[] = [];
       let buffer = '';
-      let completionTokens = 0;
-      let promptTokens = Math.ceil(finalPrompt.length / 3.5);
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
-
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
           const dataStr = trimmed.slice(6);
           if (dataStr === '[DONE]') continue;
-
           try {
             const chunk = JSON.parse(dataStr);
-            appendRawLog(JSON.stringify(chunk) + '\n');
-
-            if (chunk['response.created'] && chunk['response.created'].response_id) {
-              if (!targetResponseId) {
-                targetResponseId = chunk['response.created'].response_id;
-              }
-              updateSessionParent(uiSessionId, chunk['response.created'].response_id);
-            } else if (chunk.response_id && !targetResponseId) {
-              targetResponseId = chunk.response_id;
-              updateSessionParent(uiSessionId, chunk.response_id);
-            }
-
-            if (chunk.usage) {
-              if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
-              if (chunk.usage.input_tokens) promptTokens = chunk.usage.input_tokens;
-            }
-
-            let vStr = '';
-            let foundStr = false;
-            let isThinkingChunk = false;
-
-            if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta && 
-                (targetResponseId === null || chunk.response_id === targetResponseId)) {
-              const delta = chunk.choices[0].delta;
-
-              if (delta.phase === 'thinking_summary') {
-                isThinkingChunk = true;
-                if (delta.extra && delta.extra.summary_thought && delta.extra.summary_thought.content) {
-                  const thoughts = delta.extra.summary_thought.content;
-                  if (thoughts.length > currentThoughtIndex) {
-                    vStr = thoughts.slice(currentThoughtIndex).join('\n');
-                    currentThoughtIndex = thoughts.length;
-                    foundStr = true;
-                  }
-                }
-              } else if (delta.phase === 'answer') {
-                isThinkingChunk = false;
-                if (delta.content !== undefined) {
-                  const newContent = delta.content || '';
-                  const result = getIncrementalDelta(lastFullContent, newContent);
-                  vStr = result.delta;
-                  if (vStr) {
-                    lastFullContent = result.matchedContent;
-                    foundStr = true;
-                  }
-                }
-              }
-            }
-
-            if (foundStr && vStr !== '') {
-              if (vStr === 'FINISHED') continue;
-              if (isThinkingChunk) {
-                reasoningBuffer += vStr;
-              } else {
-                const { text, toolCalls } = toolParser.feed(vStr);
-                if (text) appendProxyLog('CONTENT: ' + text);
-                for (const tc of toolCalls) {
-                  appendProxyLog('TOOL_CALL: ' + tc.name + ' | ' + JSON.stringify(tc.arguments));
-                  toolCallsOut.push({
-                    id: tc.id,
-                    type: 'function',
-                    function: {
-                      name: tc.name,
-                      arguments: JSON.stringify(tc.arguments)
-                    }
-                  });
-                }
+            const output = processQwenChunk(chunk, state, uiSessionId);
+            if (output?.reasoningText) {
+              // reasoning already in state.reasoningBuffer
+            } else if (output) {
+              if (output.text) appendProxyLog('CONTENT: ' + output.text);
+              for (const tc of output.toolCalls) {
+                toolCallsOut.push({
+                  id: tc.id,
+                  type: 'function',
+                  function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+                });
               }
             }
           } catch (e) {
-            // parse error, ignore partial chunk
           }
         }
       }
-
       const upstreamError = parseQwenErrorPayload(buffer);
       if (upstreamError) {
         if (upstreamError.message.toLowerCase().includes('not exist')) {
@@ -479,9 +479,9 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
         return c.json({ error: { message: upstreamError.message } }, upstreamError.status as any);
       }
 
-      const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
+      const { text: remainingText, toolCalls: remainingToolCalls } = state.toolParser.flush();
       if (remainingText) {
-        lastFullContent += remainingText;
+        state.lastFullContent += remainingText;
       }
       for (const tc of remainingToolCalls) {
         toolCallsOut.push({
@@ -495,13 +495,13 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
       }
 
       const usage = {
-        prompt_tokens: promptTokens,
-        completion_tokens: completionTokens,
-        total_tokens: promptTokens + completionTokens,
+        prompt_tokens: state.promptTokens,
+        completion_tokens: state.completionTokens,
+        total_tokens: state.promptTokens + state.completionTokens,
         prompt_tokens_details: { cached_tokens: 0 }
       };
-      const message: any = { role: 'assistant', content: toolCallsOut.length ? null : lastFullContent };
-      if (reasoningBuffer) message.reasoning_content = reasoningBuffer;
+      const message: any = { role: 'assistant', content: toolCallsOut.length ? null : state.lastFullContent };
+      if (state.reasoningBuffer) message.reasoning_content = state.reasoningBuffer;
       if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
       if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
@@ -567,143 +567,72 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       
-      let currentThoughtIndex = 0;
-      
-      let reasoningBuffer = '';
-      let lastFullContent = '';
-      let targetResponseId: string | null = null;
-      const toolParser = new StreamingToolParser();
-
+      const state: StreamState = {
+        currentThoughtIndex: 0,
+        reasoningBuffer: '',
+        lastFullContent: '',
+        targetResponseId: null,
+        toolParser: new StreamingToolParser(),
+        completionTokens: 0,
+        promptTokens: Math.ceil(finalPrompt.length / 3.5)
+      };
       let buffer = '';
-      let completionTokens = 0;
-      let promptTokens = Math.ceil(finalPrompt.length / 3.5);
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
-
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
-          
           const dataStr = trimmed.slice(6);
           if (dataStr === '[DONE]') {
             await streamWriter.write('data: [DONE]\n\n');
             continue;
           }
-
           try {
             const chunk = JSON.parse(dataStr);
-            appendRawLog(JSON.stringify(chunk) + '\n');
-
-            // Extract response_id for session tracking and target filtering
-            if (chunk['response.created'] && chunk['response.created'].response_id) {
-              if (!targetResponseId) {
-                targetResponseId = chunk['response.created'].response_id;
-              }
-              updateSessionParent(uiSessionId, chunk['response.created'].response_id);
-            } else if (chunk.response_id && !targetResponseId) {
-              targetResponseId = chunk.response_id;
-              updateSessionParent(uiSessionId, chunk.response_id);
-            }
-
-            if (chunk.usage) {
-              if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
-              if (chunk.usage.input_tokens) promptTokens = chunk.usage.input_tokens;
-            }
-
-            let vStr = '';
-            let foundStr = false;
-            let isThinkingChunk = false;
-
-            if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta && 
-                (targetResponseId === null || chunk.response_id === targetResponseId)) {
-              const delta = chunk.choices[0].delta;
-              
-              if (delta.phase === 'thinking_summary') {
-                isThinkingChunk = true;
-                if (delta.extra && delta.extra.summary_thought && delta.extra.summary_thought.content) {
-                  const thoughts = delta.extra.summary_thought.content;
-                  if (thoughts.length > currentThoughtIndex) {
-                    vStr = thoughts.slice(currentThoughtIndex).join('\n');
-                    currentThoughtIndex = thoughts.length;
-                    foundStr = true;
-                  }
-                }
-              } else if (delta.phase === 'answer') {
-                isThinkingChunk = false;
-                if (delta.content !== undefined) {
-                  const newContent = delta.content || '';
-                  const result = getIncrementalDelta(lastFullContent, newContent);
-                  vStr = result.delta;
-                  if (vStr) {
-                    lastFullContent = result.matchedContent;
-                    foundStr = true;
-                  }
-                }
-              }
-            }
-
-            if (foundStr && vStr !== '') {
-              if (vStr === 'FINISHED') continue;
-
-              if (isThinkingChunk) {
-                reasoningBuffer += vStr;
+            const output = processQwenChunk(chunk, state, uiSessionId);
+            if (output?.reasoningText) {
+              await writeEvent({
+                id: completionId,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: body.model,
+                choices: [makeChoice({ reasoning_content: output.reasoningText })]
+              });
+            } else if (output) {
+              if (output.text) {
                 await writeEvent({
                   id: completionId,
                   object: 'chat.completion.chunk',
                   created: Math.floor(Date.now() / 1000),
                   model: body.model,
-                  choices: [makeChoice({ reasoning_content: vStr })]
+                  choices: [makeChoice({ content: output.text })]
                 });
-              } else {
-                const { text, toolCalls } = toolParser.feed(vStr);
-
-                if (text) {
-                  const eventData = {
-                    id: completionId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: body.model,
-                    choices: [makeChoice({ content: text })]
-                  };
-                  appendProxyLog('CONTENT: ' + text);
-                  await writeEvent(eventData);
-                }
-
-                for (const tc of toolCalls) {
-                  const eventData = {
-                    id: completionId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: body.model,
-                    choices: [makeChoice({
-                      tool_calls: [{
-                        index: toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc),
-                        id: tc.id,
-                        type: 'function',
-                        function: {
-                          name: tc.name,
-                          arguments: JSON.stringify(tc.arguments)
-                        }
-                      }]
-                    })]
-                  };
-                  appendProxyLog('TOOL_CALL: ' + tc.name + ' | ' + JSON.stringify(tc.arguments));
-                  await writeEvent(eventData);
-                }
+              }
+              for (const tc of output.toolCalls) {
+                await writeEvent({
+                  id: completionId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: body.model,
+                  choices: [makeChoice({
+                    tool_calls: [{
+                      index: state.toolParser.getEmittedToolCallCount() - output.toolCalls.length + output.toolCalls.indexOf(tc),
+                      id: tc.id,
+                      type: 'function',
+                      function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+                    }]
+                  })]
+                });
               }
             }
           } catch (e) {
-            // parse error, ignore partial chunk
           }
         }
       }
-
       const upstreamError = parseQwenErrorPayload(buffer);
       if (upstreamError) {
         if (upstreamError.message.toLowerCase().includes('not exist')) {
@@ -728,7 +657,7 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
       }
 
       // Flush tool parser
-      const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
+      const { text: remainingText, toolCalls: remainingToolCalls } = state.toolParser.flush();
       if (remainingText) {
         await writeEvent({
           id: completionId,
@@ -746,7 +675,7 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
           model: body.model,
           choices: [makeChoice({
             tool_calls: [{
-              index: toolParser.getEmittedToolCallCount() - remainingToolCalls.length + remainingToolCalls.indexOf(tc),
+              index: state.toolParser.getEmittedToolCallCount() - remainingToolCalls.length + remainingToolCalls.indexOf(tc),
               id: tc.id,
               type: 'function',
               function: {
@@ -760,13 +689,13 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
   
       // Send finish reason
       const usage = {
-        prompt_tokens: promptTokens,
-        completion_tokens: completionTokens,
-        total_tokens: promptTokens + completionTokens,
+        prompt_tokens: state.promptTokens,
+        completion_tokens: state.completionTokens,
+        total_tokens: state.promptTokens + state.completionTokens,
         prompt_tokens_details: { cached_tokens: 0 }
       };
   
-      const finalFinishReason = toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : 'stop';
+      const finalFinishReason = state.toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : 'stop';
   
       await writeEvent({
         id: completionId,

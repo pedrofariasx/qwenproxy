@@ -10,7 +10,7 @@ import type {
   ToolContext,
   ToolHandler,
   ToolRegistration,
-} from './types.ts';
+} from '../utils/types.ts';
 import { validateAgainstSchema, SchemaValidationError } from './schema.ts';
 
 /**

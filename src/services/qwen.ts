@@ -6,7 +6,7 @@
  */
 
 import { getQwenHeaders, getBasicHeaders, clearCachedHeaders } from './playwright.ts';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 
 export class RetryableQwenStreamError extends Error {
   readonly retryAfterMs: number;
@@ -146,7 +146,7 @@ export async function disableNativeTools(): Promise<void> {
         'origin': 'https://chat.qwen.ai',
         'referer': 'https://chat.qwen.ai/',
         'user-agent': headers['user-agent'],
-        'x-request-id': uuidv4(),
+        'x-request-id': randomUUID(),
         'bx-ua': headers['bx-ua'],
         'bx-umidtoken': headers['bx-umidtoken'],
         'bx-v': headers['bx-v']
@@ -185,7 +185,7 @@ export async function fetchQwenModels(): Promise<any[]> {
       'cookie': cookie,
       'referer': 'https://chat.qwen.ai/',
       'user-agent': userAgent,
-      'x-request-id': uuidv4(),
+      'x-request-id': randomUUID(),
       'bx-v': bxV,
       'timezone': new Date().toString(),
       'source': 'web'
@@ -311,7 +311,7 @@ export async function createQwenStream(
   }
 
   const timestamp = Math.floor(Date.now() / 1000);
-  const fid = uuidv4();
+  const fid = randomUUID();
   const model = modelId.replace('-no-thinking', '');
 
   const payload: QwenPayload = {
@@ -376,7 +376,7 @@ export async function createQwenStream(
       'timezone': new Date().toString().split(' (')[0], // Match closer to browser format
       'user-agent': headers['user-agent'],
       'x-accel-buffering': 'no',
-      'x-request-id': uuidv4(),
+      'x-request-id': randomUUID(),
       'bx-ua': headers['bx-ua'],
       'bx-umidtoken': headers['bx-umidtoken'],
       'bx-v': headers['bx-v']
