@@ -375,12 +375,22 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
   });
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // Clean up route handler on timeout to prevent accumulation
+      activePage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
       reject(new Error('Timeout waiting for Qwen headers'));
     }, 60000);
 
     const routeHandler = async (route: any, request: any) => {
-      clearTimeout(timeout);
+      if (settled) {
+        // Promise already settled (by a previous invocation or timeout).
+        // Always abort to prevent any "a" from reaching Qwen.
+        await route.abort('aborted').catch(() => {});
+        return;
+      }
 
       const reqHeaders = request.headers();
       const postData = request.postData();
@@ -396,10 +406,26 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
         'user-agent': reqHeaders['user-agent'] || ''
       };
 
+      // ALWAYS abort the request to prevent the "a" from reaching Qwen.
+      // If headers are incomplete, keep waiting for the next matching request.
       if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-        await route.continue();
+        console.warn('[Playwright] Intercepted request missing critical headers (cookie/bx-ua), aborting and waiting for next request...');
+        await route.abort('aborted').catch(() => {});
+        // Do NOT settle the Promise — let the handler fire again for the next request.
+        // Reset the 60s timeout so we don't wait forever.
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          activePage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+          reject(new Error('Timeout waiting for Qwen headers'));
+        }, 60000);
         return;
       }
+
+      // Headers are complete — settle the Promise.
+      clearTimeout(timeoutId);
+      settled = true;
 
       currentHeaders = extractedHeaders;
       cachedQwenHeaders = {

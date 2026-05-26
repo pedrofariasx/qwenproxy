@@ -222,78 +222,6 @@ export async function fetchQwenModels(): Promise<any[]> {
   return [];
 }
 
-/**
- * Peeks at the first few chunks of an SSE stream to detect "chat not exist"
- * errors that Qwen embeds inside a 200 OK body. Clears the session cache so the
- * retry loop in chat.ts can create a fresh chat. Returns a new stream with the
- * already-read bytes preserved so the consumer can continue reading normally.
- */
-async function validateStreamForNotExist(
-  source: ReadableStream<Uint8Array>,
-  chatSessionId: string
-): Promise<ReadableStream<Uint8Array>> {
-  const reader = source.getReader();
-  const decoder = new TextDecoder();
-  const bufferedChunks: Uint8Array[] = [];
-  let textBuffer = '';
-  let totalBytes = 0;
-
-  try {
-    while (bufferedChunks.length < 50 && totalBytes < 32768) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      bufferedChunks.push(value);
-      totalBytes += value.length;
-      textBuffer += decoder.decode(value, { stream: true });
-
-      const rawLower = textBuffer.toLowerCase();
-      if (rawLower.includes('is not exist') || rawLower.includes('not exist')) {
-        clearCachedHeaders();
-        if (chatSessionId) delete sessionStates[chatSessionId];
-        throw new RetryableQwenStreamError(`Qwen: chat session no longer exists`, 0);
-      }
-
-      const lines = textBuffer.split(/\r?\n/);
-      textBuffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ') || trimmed === 'data: [DONE]') continue;
-
-        try {
-          const payload = JSON.parse(trimmed.slice(6));
-          if (jsonContainsNotExist(payload)) {
-            clearCachedHeaders();
-            if (chatSessionId) delete sessionStates[chatSessionId];
-            throw new RetryableQwenStreamError(`Qwen: chat session no longer exists`, 0);
-          }
-          if (payload.choices || payload['response.created']) break;
-        } catch (e) {
-          if (e instanceof RetryableQwenStreamError) throw e;
-        }
-      }
-    }
-  } catch (e) {
-    reader.releaseLock();
-    throw e;
-  }
-
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      for (const chunk of bufferedChunks) controller.enqueue(chunk);
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        controller.enqueue(value);
-      }
-      controller.close();
-      reader.releaseLock();
-    },
-    cancel() { reader.releaseLock(); }
-  });
-}
-
 export async function createQwenStream(
   prompt: string, 
   enableThinking: boolean, 
@@ -441,10 +369,5 @@ export async function createQwenStream(
     throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
   }
 
-  // The Qwen API may return HTTP 200 with an SSE stream that contains an error
-  // payload (e.g. "chat is not exist"). Peek at the first chunks to catch it
-  // early so the retry loop in chat.ts can create a fresh session.
-  const validatedStream = await validateStreamForNotExist(response.body, chatSessionId);
-
-  return { stream: validatedStream, headers, uiSessionId: chatSessionId };
+  return { stream: response.body, headers, uiSessionId: chatSessionId };
 }
