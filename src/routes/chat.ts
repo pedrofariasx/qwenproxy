@@ -20,26 +20,26 @@ import { Mutex } from '../services/playwright.ts';
 import { TOOL_CALL_INSTRUCTION } from '../constants.ts';
 import fs from 'fs';
 
-const DEBUG_LOGS = process.env.DEBUG_LOGS === 'true';
+function isDebugLogs() { return process.env.DEBUG_LOGS === 'true'; }
 
 let debugRawLog = '';
 let debugProxyLog = '';
 let debugPromptLog = '';
 
 function appendRawLog(chunk: string) {
-  if (DEBUG_LOGS) debugRawLog += chunk;
+  if (isDebugLogs()) debugRawLog += chunk;
 }
 
 function appendProxyLog(data: string) {
-  if (DEBUG_LOGS) debugProxyLog += data + '\n';
+  if (isDebugLogs()) debugProxyLog += data + '\n';
 }
 
 function appendPromptLog(prompt: string) {
-  if (DEBUG_LOGS) debugPromptLog += '=== PROMPT ENVIADO AO QWEN ===\n' + prompt + '\n=== FIM DO PROMPT ===\n\n';
+  if (isDebugLogs()) debugPromptLog += '=== PROMPT ENVIADO AO QWEN ===\n' + prompt + '\n=== FIM DO PROMPT ===\n\n';
 }
 
 function flushDebugLogs() {
-  if (!DEBUG_LOGS) return;
+  if (!isDebugLogs()) return;
   const ts = Date.now().toString(36);
   try {
     fs.writeFileSync(`debug_raw_${ts}.txt`, debugRawLog);
@@ -186,6 +186,7 @@ interface StreamState {
   reasoningBuffer: string;
   lastFullContent: string;
   targetResponseId: string | null;
+  targetResponseIndex: number;
   toolParser: StreamingToolParser;
   completionTokens: number;
   promptTokens: number;
@@ -205,12 +206,16 @@ function processQwenChunk(
   appendRawLog(JSON.stringify(chunk) + '\n');
 
   if (chunk['response.created'] && chunk['response.created'].response_id) {
-    if (!state.targetResponseId) {
-      state.targetResponseId = chunk['response.created'].response_id;
+    const newId = chunk['response.created'].response_id;
+    const newIndex = parseInt(chunk['response.created'].response_index ?? '0', 10);
+    if (!state.targetResponseId || newIndex < state.targetResponseIndex) {
+      state.targetResponseId = newId;
+      state.targetResponseIndex = newIndex;
     }
-    updateSessionParent(uiSessionId, chunk['response.created'].response_id);
+    updateSessionParent(uiSessionId, newId);
   } else if (chunk.response_id && !state.targetResponseId) {
     state.targetResponseId = chunk.response_id;
+    state.targetResponseIndex = 0;
     updateSessionParent(uiSessionId, chunk.response_id);
   }
 
@@ -434,6 +439,7 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
         reasoningBuffer: '',
         lastFullContent: '',
         targetResponseId: null,
+        targetResponseIndex: Infinity,
         toolParser: new StreamingToolParser(),
         completionTokens: 0,
         promptTokens: Math.ceil(finalPrompt.length / 3.5)
@@ -572,6 +578,7 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
         reasoningBuffer: '',
         lastFullContent: '',
         targetResponseId: null,
+        targetResponseIndex: Infinity,
         toolParser: new StreamingToolParser(),
         completionTokens: 0,
         promptTokens: Math.ceil(finalPrompt.length / 3.5)

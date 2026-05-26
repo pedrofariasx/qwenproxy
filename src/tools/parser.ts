@@ -46,17 +46,22 @@ export class StreamingToolParser {
           break;
         }
 } else {
-          const endIdx = this.buffer.indexOf(this.TOOL_END);
-          if (endIdx !== -1) {
+          // Check for nested opening tag (model forgot closing tag before next tool call)
+          const nestedStart = this.buffer.indexOf(this.TOOL_START);
+          const endIdx = this.findTagOutsideQuotes(this.TOOL_END);
+
+          if (nestedStart !== -1 && (endIdx === -1 || nestedStart < endIdx)) {
+            // Another <tool_call > found before </tool_call > — split here
+            const content = this.buffer.substring(0, nestedStart);
+            this.processToolContent(content, result);
+            this.buffer = this.buffer.substring(nestedStart + this.TOOL_START.length);
+            // Stay insideTool for the next tool call
+          } else if (endIdx !== -1) {
             const content = this.buffer.substring(0, endIdx);
             this.buffer = this.buffer.substring(endIdx + this.TOOL_END.length);
             this.processToolContent(content, result);
             this.insideTool = false;
           } else {
-            const partialLen = this.getPartialMatchLength(this.TOOL_END);
-            if (partialLen > 0) {
-              break;
-            }
             break;
           }
         }
@@ -159,7 +164,47 @@ export class StreamingToolParser {
   }
 
   isEndTagFragment(): boolean {
-    if (this.buffer.includes(this.TOOL_END)) return false;
-    return this.getPartialMatchLength(this.TOOL_END) > 0;
+    if (this.findTagOutsideQuotes(this.TOOL_END) !== -1) return false;
+    return this.getPartialMatchLengthOutsideQuotes(this.TOOL_END) > 0;
+  }
+
+  private findTagOutsideQuotes(tag: string): number {
+    let searchStart = 0;
+    while (true) {
+      const idx = this.buffer.indexOf(tag, searchStart);
+      if (idx === -1) return -1;
+      if (this.isOutsideQuotes(idx)) {
+        return idx;
+      }
+      searchStart = idx + 1;
+    }
+  }
+
+  private isOutsideQuotes(upToPosition: number): boolean {
+    let inString = false;
+    for (let i = 0; i < upToPosition; i++) {
+      const ch = this.buffer[i];
+      if (inString && ch === '\\' && i + 1 < upToPosition) {
+        i++;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+      }
+    }
+    return !inString;
+  }
+
+  private getPartialMatchLengthOutsideQuotes(tag: string): number {
+    let maxMatch = 0;
+    for (let i = 1; i <= tag.length; i++) {
+      if (this.buffer.endsWith(tag.substring(0, i))) {
+        const startPos = this.buffer.length - i;
+        if (this.isOutsideQuotes(startPos)) {
+          maxMatch = i;
+        }
+      }
+    }
+    return maxMatch;
   }
 }

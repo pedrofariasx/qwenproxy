@@ -58,4 +58,10 @@ Mistake 4 — JSON array inside one block:
 
 Mistake 5 — No tags at all:
 {"name": "tool1", ...} {"name": "tool2", ...}
+
+Mistake 6 — Double opening tag (only ONE opening per block):
+<tool_call >
+<tool_call >
+{"name": "tool1", ...}
+</tool_call >
 `;
