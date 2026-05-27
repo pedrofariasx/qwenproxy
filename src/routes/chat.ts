@@ -22,6 +22,14 @@ import fs from 'fs';
 
 function isDebugLogs() { return process.env.DEBUG_LOGS === 'true'; }
 
+function isConnectionResetError(err: any): boolean {
+  const cause = err?.cause;
+  return cause?.code === 'ECONNRESET'
+    || err?.code === 'ECONNRESET'
+    || (err?.name === 'TypeError' && err?.message?.includes('terminated'))
+    || err?.name === 'AbortError';
+}
+
 let debugRawLog = '';
 let debugProxyLog = '';
 let debugPromptLog = '';
@@ -446,6 +454,7 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
       };
       const toolCallsOut: any[] = [];
       let buffer = '';
+      try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -461,7 +470,6 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
             const chunk = JSON.parse(dataStr);
             const output = processQwenChunk(chunk, state, uiSessionId);
             if (output?.reasoningText) {
-              // reasoning already in state.reasoningBuffer
             } else if (output) {
               if (output.text) appendProxyLog('CONTENT: ' + output.text);
               for (const tc of output.toolCalls) {
@@ -474,6 +482,13 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
             }
           } catch (e) {
           }
+        }
+      }
+      } catch (readError: any) {
+        if (isConnectionResetError(readError)) {
+          console.warn('[Chat] Qwen connection reset during read, returning partial response');
+        } else {
+          console.error('[Chat] Read error:', readError?.message || readError);
         }
       }
       const upstreamError = parseQwenErrorPayload(buffer);
@@ -584,6 +599,7 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
         promptTokens: Math.ceil(finalPrompt.length / 3.5)
       };
       let buffer = '';
+      try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -638,6 +654,13 @@ const payload = { name: tc.function?.name, arguments: parsedArgs };
             }
           } catch (e) {
           }
+        }
+      }
+      } catch (streamError: any) {
+        if (isConnectionResetError(streamError)) {
+          console.warn('[Chat] Qwen connection reset during streaming, flushing partial response');
+        } else {
+          console.error('[Chat] Stream read error:', streamError?.message || streamError);
         }
       }
       const upstreamError = parseQwenErrorPayload(buffer);
