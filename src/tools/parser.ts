@@ -186,10 +186,8 @@ export class StreamingToolParser {
         if (match && match.index !== undefined) {
           // Text before the tool call tag
           const textBefore = this.buffer.substring(0, match.index);
-          // Once a tool call appears, hold the lead-in text.
-          // OpenAI-compatible clients expect the whole assistant turn to be
-          // a structured tool_calls message when tools are invoked.
-          this.pendingLeadIn += textBefore;
+          result.text += textBefore;
+          this.pendingLeadIn = '';
           this.insideTool = true;
           this.currentOpenTag = match[0];
           this.buffer = this.buffer.substring(match.index + match[0].length);
@@ -200,10 +198,7 @@ export class StreamingToolParser {
           const flushIndex = partialIdx === -1 ? this.buffer.length : partialIdx;
           if (flushIndex > 0) {
             const textToEmit = this.buffer.substring(0, flushIndex);
-            // Only emit as content if no tool calls have been emitted yet
-            if (this.emittedToolCallCount === 0) {
-              result.text += textToEmit;
-            }
+            result.text += textToEmit;
             this.buffer = this.buffer.substring(flushIndex);
           }
           break;
@@ -241,18 +236,14 @@ export class StreamingToolParser {
           this.emittedToolCallCount++;
           this.pendingLeadIn = '';
         } else {
-          // Recovery failed. Restore lead-in text if no tools were emitted.
+          // Recovery failed. Preserve the raw tool-call block.
           console.warn('[parser] Dropping unrecoverable unclosed tool call at end of stream');
-          if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
-            result.text += this.pendingLeadIn;
-          }
+          result.text += `${this.currentOpenTag}${this.buffer}${TOOL_END}`;
           this.pendingLeadIn = '';
         }
       } else {
-        // Empty tool call block - restore lead-in
-        if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
-          result.text += this.pendingLeadIn;
-        }
+        // Empty tool call block - preserve raw tag
+        result.text += `${this.currentOpenTag}${TOOL_END}`;
         this.pendingLeadIn = '';
       }
     } else {
@@ -290,9 +281,7 @@ export class StreamingToolParser {
     if (!t) {
       // Empty tool call - malformed. Restore lead-in if possible.
       console.warn('[parser] Dropping empty tool call block');
-      if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
-        result.text += this.pendingLeadIn;
-      }
+      result.text += `${this.currentOpenTag}${content}${TOOL_END}`;
       this.pendingLeadIn = '';
       return;
     }
@@ -348,11 +337,8 @@ export class StreamingToolParser {
 
     // 4) Tool call is malformed and unrecoverable.
     // Never leak internal XML to user-visible content.
-    // Restore lead-in text if no tools were emitted.
     console.warn('[parser] Dropping malformed tool call block');
-    if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
-      result.text += this.pendingLeadIn;
-    }
+    result.text += `${this.currentOpenTag}${content}${TOOL_END}`;
     this.pendingLeadIn = '';
   }
 

@@ -44,6 +44,119 @@ test('Models endpoint returns qwen3.6-plus and qwen3.6-plus-no-thinking', async 
   }
 });
 
+test('Modes endpoint returns chat and coder usage modes', async () => {
+  const req = new Request('http://localhost/v1/modes');
+  const res = await app.fetch(req);
+
+  assert.strictEqual(res.status, 200);
+
+  const body = await res.json();
+  assert.strictEqual(body.object, 'list');
+  assert.ok(Array.isArray(body.data));
+  assert.ok(body.data.some((m: any) => m.id === 'chat'));
+  assert.ok(body.data.some((m: any) => m.id === 'coder'));
+});
+
+test('Create chat endpoint creates a persistent chat record', async () => {
+  const req = new Request('http://localhost/v1/chats', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'My chat', model: 'qwen3.6-plus', mode: 'coder' })
+  });
+
+  const res = await app.fetch(req);
+  assert.strictEqual(res.status, 201);
+
+  const body = await res.json();
+  assert.strictEqual(body.object, 'chat');
+  assert.ok(body.data.id, 'Chat id should be returned');
+  assert.strictEqual(body.data.title, 'My chat');
+  assert.strictEqual(body.data.model, 'qwen3.6-plus');
+  assert.strictEqual(body.data.mode, 'coder');
+  assert.deepStrictEqual(body.data.messages, []);
+  assert.ok(body.links?.messages, 'Should expose messages link');
+
+  const getRes = await app.fetch(new Request(`http://localhost/v1/chats/${body.data.id}`));
+  assert.strictEqual(getRes.status, 200);
+  const stored = await getRes.json();
+  assert.strictEqual(stored.data.id, body.data.id);
+  assert.strictEqual(stored.data.title, 'My chat');
+  assert.strictEqual(stored.data.mode, 'coder');
+
+  const modeRes = await app.fetch(new Request(`http://localhost/v1/chats/${body.data.id}/mode`));
+  assert.strictEqual(modeRes.status, 200);
+  const modeBody = await modeRes.json();
+  assert.strictEqual(modeBody.object, 'chat.mode');
+  assert.strictEqual(modeBody.data.mode, 'coder');
+
+  const patchRes = await app.fetch(new Request(`http://localhost/v1/chats/${body.data.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'chat', title: 'Updated chat' })
+  }));
+  assert.strictEqual(patchRes.status, 200);
+  const patched = await patchRes.json();
+  assert.strictEqual(patched.data.mode, 'chat');
+  assert.strictEqual(patched.data.title, 'Updated chat');
+
+  const messagesRes = await app.fetch(new Request(`http://localhost/v1/chats/${body.data.id}/messages`));
+  assert.strictEqual(messagesRes.status, 200);
+  const messagesBody = await messagesRes.json();
+  assert.strictEqual(messagesBody.object, 'chat.messages');
+  assert.strictEqual(messagesBody.data.totalMessages, 0);
+
+  const deleteRes = await app.fetch(new Request(`http://localhost/v1/chats/${body.data.id}`, {
+    method: 'DELETE'
+  }));
+  assert.strictEqual(deleteRes.status, 200);
+});
+
+test('Chat completions persists messages under an existing chat id', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Hello"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input);
+  };
+
+  try {
+    const createRes = await app.fetch(new Request('http://localhost/v1/chats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Persist me', model: 'qwen3.6-plus' })
+    }));
+    const created = await createRes.json();
+
+    const completionRes = await app.fetch(new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: created.data.id,
+        model: 'qwen3.6-plus',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: false
+      })
+    }));
+    assert.strictEqual(completionRes.status, 200);
+
+    const messagesRes = await app.fetch(new Request(`http://localhost/v1/chats/${created.data.id}/messages`));
+    assert.strictEqual(messagesRes.status, 200);
+    const messagesBody = await messagesRes.json();
+    assert.ok(messagesBody.data.messages.some((m: any) => m.role === 'assistant' && m.content === 'Hello'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Chat Completions endpoint with qwen3.6-plus (thinking enabled)', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: any) => {

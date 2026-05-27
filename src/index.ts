@@ -13,6 +13,17 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { bearerAuth } from 'hono/bearer-auth';
 import { chatCompletions } from './routes/chat.ts';
+import {
+  compactChatHandler,
+  createChatHandler,
+  deleteChatHandler,
+  getChatHandler,
+  getChatModeHandler,
+  getChatMessagesHandler,
+  listChatsHandler,
+  listModesHandler,
+  patchChatHandler,
+} from './routes/chats.ts';
 import { fetchQwenModels } from './services/qwen.ts';
 import * as dotenv from 'dotenv';
 import { initPlaywright, BrowserType } from './services/playwright.ts';
@@ -22,7 +33,8 @@ dotenv.config();
 
 export const app = new Hono();
 
-app.use('*', cors());
+const corsOrigin = process.env.CORS_ORIGIN || '*';
+app.use('*', cors({ origin: corsOrigin }));
 
 // Helper to get local network IPs
 function getNetworkAddress() {
@@ -51,6 +63,15 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 
 // OpenAI compatible routes
 app.post('/v1/chat/completions', chatCompletions);
+app.get('/v1/modes', listModesHandler);
+app.get('/v1/chats', listChatsHandler);
+app.post('/v1/chats', createChatHandler);
+app.get('/v1/chats/:chatId', getChatHandler);
+app.patch('/v1/chats/:chatId', patchChatHandler);
+app.get('/v1/chats/:chatId/mode', getChatModeHandler);
+app.get('/v1/chats/:chatId/messages', getChatMessagesHandler);
+app.delete('/v1/chats/:chatId', deleteChatHandler);
+app.post('/v1/chats/:chatId/compact', compactChatHandler);
 
 app.get('/v1/models', async (c) => {
   try {

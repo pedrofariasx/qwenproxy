@@ -66,6 +66,45 @@ test('multiturn-thinking-tools: maintains reasoning_content history', async () =
   }
 });
 
+test('mode-separation: coder mode injects coder-oriented system prompt', async () => {
+  let capturedBody = '';
+
+  const restore = setupFetchMock((url, init) => {
+    capturedBody = init?.body as string || '';
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        mode: 'coder',
+        messages: [{ role: 'user', content: 'review this code' }]
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+    assert.ok(capturedBody.includes('review this code') || capturedBody.includes('User: review this code'));
+    assert.ok(
+      capturedBody.includes('Qwen Coder') ||
+      capturedBody.includes('coding-focused assistant') ||
+      capturedBody.includes('software engineering'),
+      'Coder mode should inject coder-oriented instructions'
+    );
+  } finally {
+    restore();
+  }
+});
+
 test('streaming-whitespace: preserves exact whitespace', async () => {
   const restore = setupFetchMock((url) => {
     const stream = new ReadableStream({
@@ -114,6 +153,60 @@ test('streaming-whitespace: preserves exact whitespace', async () => {
   }
 });
 
+test('streaming-function-call: converts upstream function_call into OpenAI tool_calls', async () => {
+  const restore = setupFetchMock((url) => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"function_call":{"name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}}]}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen3.6-plus', messages: [{ role: 'user', content: 'inspect file' }], stream: true })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const reader = res.body?.getReader();
+    const decoder = new TextDecoder();
+    let sawToolCall = false;
+    let finishReason = '';
+
+    while (true) {
+      const { done, value } = await reader!.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          const delta = data.choices?.[0]?.delta;
+          if (delta?.tool_calls?.length) {
+            sawToolCall = true;
+          }
+          if (data.choices?.[0]?.finish_reason) {
+            finishReason = data.choices[0].finish_reason;
+          }
+        } catch {}
+      }
+    }
+
+    assert.ok(sawToolCall, 'Should expose upstream function_call as OpenAI tool_calls');
+    assert.strictEqual(finishReason, 'tool_calls');
+  } finally {
+    restore();
+  }
+});
+
 test('caching-streaming and cache-control: returns prompt_tokens_details', async () => {
   const restore = setupFetchMock((url) => {
     const stream = new ReadableStream({
@@ -130,7 +223,12 @@ test('caching-streaming and cache-control: returns prompt_tokens_details', async
     const req = new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'qwen3.6-plus', messages: [{role: 'user', content: 'test'}], stream: true })
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        messages: [{role: 'user', content: 'test'}],
+        stream: true,
+        stream_options: { include_usage: true }
+      })
     });
     
     const res = await app.fetch(req);
@@ -222,7 +320,10 @@ test('session-parent-tracking: appends messages using response message_id as par
     assert.strictEqual(capturedPayloads[0].parent_id, null);
     // In Turn 2, parent_id should be qwen-1001 (the ID returned in Turn 1)
     assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-1001', 'Turn 2 should use response_id from Turn 1 as parent');
-    assert.strictEqual(capturedPayloads[1].messages[0].content, 'User: Turn 1\n\nAssistant: Response 1\n\nUser: Turn 2\n\n', 'Should send the full OpenAI message history');
+    assert.ok(capturedPayloads[1].messages[0].content.includes('User: Turn 1'));
+    assert.ok(capturedPayloads[1].messages[0].content.includes('Assistant: Response 1'));
+    assert.ok(capturedPayloads[1].messages[0].content.includes('User: Turn 2'));
+    assert.ok(capturedPayloads[1].messages[0].content.includes('general-purpose assistant'));
   } finally {
     restore();
   }
