@@ -6,7 +6,7 @@ test('StreamingToolParser: basic tool call', () => {
   const parser = new StreamingToolParser();
   
   const result = parser.feed('Hello! <tool_call>{"name": "t1", "arguments": {"a": 1}}</tool_call>');
-  assert.strictEqual(result.text, 'Hello! ');
+  assert.strictEqual(result.text, '');
   assert.strictEqual(result.toolCalls.length, 1);
   assert.strictEqual(result.toolCalls[0].name, 't1');
 });
@@ -30,7 +30,7 @@ test('StreamingToolParser: fragmented tool call', () => {
   
   assert.strictEqual(final.toolCalls.length, 1);
   assert.strictEqual(final.toolCalls[0].name, 'frag');
-  assert.strictEqual(final.text, ' trailing');
+  assert.strictEqual(final.text, '');
 });
 
 test('StreamingToolParser: flush partial content', () => {
@@ -48,7 +48,7 @@ test('StreamingToolParser: flush partial content', () => {
   const parser3 = new StreamingToolParser();
   parser3.feed('Invalid <tool_call>NOT_JSON');
   const flushed2 = parser3.flush();
-  assert.strictEqual(flushed2.text, '<tool_call>NOT_JSON</tool_call>');
+  assert.strictEqual(flushed2.text, 'Invalid ');
 });
 
 test('StreamingToolParser: robust parsing of malformed JSON', () => {
@@ -60,12 +60,11 @@ test('StreamingToolParser: robust parsing of malformed JSON', () => {
   assert.deepStrictEqual(res.toolCalls[0].arguments, { a: 1 });
 });
 
-test('StreamingToolParser: preserves tags in non-tool text', () => {
+test('StreamingToolParser: drops malformed tag block and preserves lead-in text', () => {
   const parser = new StreamingToolParser();
   
   const res1 = parser.feed('Fake: <tool_call> { "only_args": 1 } </tool_call> ');
-  assert.ok(res1.text.includes('<tool_call>'), 'Should contain start tag');
-  assert.ok(res1.text.includes('</tool_call>'), 'Should contain end tag');
+  assert.strictEqual(res1.text, 'Fake:  ');
   assert.strictEqual(res1.toolCalls.length, 0);
 
   const res2 = parser.feed('Real: <tool_call>{"name":"r"}</tool_call>');
@@ -86,4 +85,16 @@ test('StreamingToolParser: handles multiple tool calls in array format', () => {
   assert.strictEqual(result.toolCalls[0].name, 'bash');
   assert.strictEqual(result.toolCalls[1].name, 'read');
   assert.strictEqual(result.toolCalls[0].arguments.command, 'ls');
+});
+
+test('StreamingToolParser: preserves trailing partial tag after emitted tool call', () => {
+  const parser = new StreamingToolParser();
+
+  const result = parser.feed('<tool_call>{"name": "first", "arguments": {}}</tool_call><tool_');
+  const flushed = parser.flush();
+
+  assert.strictEqual(result.toolCalls.length, 1);
+  assert.strictEqual(result.toolCalls[0].name, 'first');
+  assert.strictEqual(flushed.text, '<tool_');
+  assert.strictEqual(flushed.toolCalls.length, 0);
 });

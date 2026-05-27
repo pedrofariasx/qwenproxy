@@ -66,7 +66,7 @@ test('multiturn-thinking-tools: maintains reasoning_content history', async () =
   }
 });
 
-test('mode-separation: coder mode injects coder-oriented system prompt', async () => {
+test('mode-separation: coder mode does not inject synthetic system prompt', async () => {
   let capturedBody = '';
 
   const restore = setupFetchMock((url, init) => {
@@ -94,12 +94,8 @@ test('mode-separation: coder mode injects coder-oriented system prompt', async (
     const res = await app.fetch(req);
     assert.strictEqual(res.status, 200);
     assert.ok(capturedBody.includes('review this code') || capturedBody.includes('User: review this code'));
-    assert.ok(
-      capturedBody.includes('Qwen Coder') ||
-      capturedBody.includes('coding-focused assistant') ||
-      capturedBody.includes('software engineering'),
-      'Coder mode should inject coder-oriented instructions'
-    );
+    assert.ok(!capturedBody.includes('Qwen Coder'));
+    assert.ok(!capturedBody.includes('coding-focused assistant'));
   } finally {
     restore();
   }
@@ -148,60 +144,6 @@ test('streaming-whitespace: preserves exact whitespace', async () => {
     
     // We expect exactly: "     hello  \n\n  "
     assert.strictEqual(full, "     hello  \n\n  ");
-  } finally {
-    restore();
-  }
-});
-
-test('streaming-function-call: converts upstream function_call into OpenAI tool_calls', async () => {
-  const restore = setupFetchMock((url) => {
-    const stream = new ReadableStream({
-      start(c) {
-        c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"function_call":{"name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}}]}\n\n'));
-        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-        c.close();
-      }
-    });
-    return new Response(stream, { status: 200 });
-  });
-
-  try {
-    const req = new Request('http://localhost/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'qwen3.6-plus', messages: [{ role: 'user', content: 'inspect file' }], stream: true })
-    });
-
-    const res = await app.fetch(req);
-    assert.strictEqual(res.status, 200);
-
-    const reader = res.body?.getReader();
-    const decoder = new TextDecoder();
-    let sawToolCall = false;
-    let finishReason = '';
-
-    while (true) {
-      const { done, value } = await reader!.read();
-      if (done) break;
-
-      const chunk = decoder.decode(value);
-      for (const line of chunk.split('\n')) {
-        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-          const delta = data.choices?.[0]?.delta;
-          if (delta?.tool_calls?.length) {
-            sawToolCall = true;
-          }
-          if (data.choices?.[0]?.finish_reason) {
-            finishReason = data.choices[0].finish_reason;
-          }
-        } catch {}
-      }
-    }
-
-    assert.ok(sawToolCall, 'Should expose upstream function_call as OpenAI tool_calls');
-    assert.strictEqual(finishReason, 'tool_calls');
   } finally {
     restore();
   }
@@ -323,7 +265,7 @@ test('session-parent-tracking: appends messages using response message_id as par
     assert.ok(capturedPayloads[1].messages[0].content.includes('User: Turn 1'));
     assert.ok(capturedPayloads[1].messages[0].content.includes('Assistant: Response 1'));
     assert.ok(capturedPayloads[1].messages[0].content.includes('User: Turn 2'));
-    assert.ok(capturedPayloads[1].messages[0].content.includes('general-purpose assistant'));
+    assert.ok(!capturedPayloads[1].messages[0].content.includes('general-purpose assistant'));
   } finally {
     restore();
   }

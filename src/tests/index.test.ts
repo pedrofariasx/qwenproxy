@@ -111,6 +111,26 @@ test('Create chat endpoint creates a persistent chat record', async () => {
   assert.strictEqual(deleteRes.status, 200);
 });
 
+test('Create chat endpoint accepts empty body and rejects malformed JSON', async () => {
+  const emptyRes = await app.fetch(new Request('http://localhost/v1/chats', {
+    method: 'POST'
+  }));
+  assert.strictEqual(emptyRes.status, 201);
+  const emptyBody = await emptyRes.json();
+  assert.ok(emptyBody.data.id);
+
+  const malformedRes = await app.fetch(new Request('http://localhost/v1/chats', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{bad json'
+  }));
+  assert.strictEqual(malformedRes.status, 400);
+
+  await app.fetch(new Request(`http://localhost/v1/chats/${emptyBody.data.id}`, {
+    method: 'DELETE'
+  }));
+});
+
 test('Chat completions persists messages under an existing chat id', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: any) => {
@@ -152,6 +172,141 @@ test('Chat completions persists messages under an existing chat id', async () =>
     assert.strictEqual(messagesRes.status, 200);
     const messagesBody = await messagesRes.json();
     assert.ok(messagesBody.data.messages.some((m: any) => m.role === 'assistant' && m.content === 'Hello'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint returns OpenAI-compatible response object', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Hello from responses"}}], "usage": {"input_tokens": 4, "output_tokens": 3}}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        instructions: 'Be concise.',
+        input: 'Say hello'
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.object, 'response');
+    assert.strictEqual(body.status, 'completed');
+    assert.strictEqual(body.output_text, 'Hello from responses');
+    assert.strictEqual(body.output[0].type, 'message');
+    assert.strictEqual(body.output[0].content[0].type, 'output_text');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint supports /v1/chat/responses alias and function tools', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      assert.ok(requestBody.messages[0].content.includes('Use a tool'));
+      assert.ok(requestBody.messages[0].content.includes('"name": "read_file"'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"read_file\\",\\"arguments\\":{\\"path\\":\\"README.md\\"}}</tool_call>"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/chat/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: [{ role: 'user', content: [{ type: 'input_text', text: 'Use a tool' }] }],
+        tools: [{
+          type: 'function',
+          name: 'read_file',
+          description: 'Read a file',
+          parameters: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path']
+          }
+        }]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.object, 'response');
+    assert.strictEqual(body.output[0].type, 'function_call');
+    assert.strictEqual(body.output[0].name, 'read_file');
+    assert.match(body.output[0].arguments, /README\.md/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint streams semantic response events', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Hel"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Hello"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'Say hello',
+        stream: true
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.headers.get('Content-Type'), 'text/event-stream');
+
+    const text = await res.text();
+    assert.match(text, /event: response.created/);
+    assert.match(text, /event: response.output_text.delta/);
+    assert.match(text, /"delta":"Hel"/);
+    assert.match(text, /event: response.completed/);
   } finally {
     globalThis.fetch = originalFetch;
   }

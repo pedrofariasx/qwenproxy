@@ -13,6 +13,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { bearerAuth } from 'hono/bearer-auth';
 import { chatCompletions } from './routes/chat.ts';
+import { createResponsesHandler } from './routes/responses.ts';
 import {
   compactChatHandler,
   createChatHandler,
@@ -32,6 +33,7 @@ import { networkInterfaces } from 'os';
 dotenv.config();
 
 export const app = new Hono();
+const responsesHandler = createResponsesHandler(request => Promise.resolve(app.fetch(request)));
 
 const corsOrigin = process.env.CORS_ORIGIN || '*';
 app.use('*', cors({ origin: corsOrigin }));
@@ -63,6 +65,8 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 
 // OpenAI compatible routes
 app.post('/v1/chat/completions', chatCompletions);
+app.post('/v1/responses', responsesHandler);
+app.post('/v1/chat/responses', responsesHandler);
 app.get('/v1/modes', listModesHandler);
 app.get('/v1/chats', listChatsHandler);
 app.post('/v1/chats', createChatHandler);

@@ -17,6 +17,16 @@ import {
   updateChat,
 } from '../storage/chat-store.ts';
 
+async function parseOptionalJsonBody(c: Context): Promise<{ ok: true; body: any } | { ok: false }> {
+  try {
+    const raw = await c.req.text();
+    if (!raw.trim()) return { ok: true, body: {} };
+    return { ok: true, body: JSON.parse(raw) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 export async function listChatsHandler(c: Context) {
   const chats = await listChats();
   return c.json({ object: 'list', data: chats });
@@ -31,7 +41,10 @@ export async function listModesHandler(c: Context) {
 }
 
 export async function createChatHandler(c: Context) {
-  const body = await c.req.json().catch(() => ({}));
+  const parsed = await parseOptionalJsonBody(c);
+  if (!parsed.ok) return c.json({ error: { message: 'Malformed JSON body' } }, 400);
+  const body = parsed.body;
+
   const mode = body?.mode || inferModeFromModel(body?.model || null);
   const chat = await createChat({
     title: body?.title,
@@ -51,14 +64,14 @@ export async function createChatHandler(c: Context) {
 }
 
 export async function getChatHandler(c: Context) {
-  const chatId = c.req.param('chatId');
+  const chatId = c.req.param('chatId')!;
   const chat = await getChat(chatId);
   if (!chat) return c.json({ error: { message: 'Chat not found' } }, 404);
   return c.json({ object: 'chat', data: chat });
 }
 
 export async function getChatModeHandler(c: Context) {
-  const chatId = c.req.param('chatId');
+  const chatId = c.req.param('chatId')!;
   const chat = await getChat(chatId);
   if (!chat) return c.json({ error: { message: 'Chat not found' } }, 404);
   const modeInfo = listChatModes().find(mode => mode.id === chat.mode) || null;
@@ -75,8 +88,11 @@ export async function getChatModeHandler(c: Context) {
 }
 
 export async function patchChatHandler(c: Context) {
-  const chatId = c.req.param('chatId');
-  const body = await c.req.json().catch(() => ({}));
+  const chatId = c.req.param('chatId')!;
+  const parsed = await parseOptionalJsonBody(c);
+  if (!parsed.ok) return c.json({ error: { message: 'Malformed JSON body' } }, 400);
+  const body = parsed.body;
+
   const patch: any = {};
 
   if (typeof body?.title === 'string') patch.title = body.title;
@@ -90,7 +106,7 @@ export async function patchChatHandler(c: Context) {
 }
 
 export async function getChatMessagesHandler(c: Context) {
-  const chatId = c.req.param('chatId');
+  const chatId = c.req.param('chatId')!;
   const limit = Number.parseInt(c.req.query('limit') || '200', 10);
   const offset = Number.parseInt(c.req.query('offset') || '0', 10);
   const payload = await getChatMessages(chatId, {
@@ -102,14 +118,14 @@ export async function getChatMessagesHandler(c: Context) {
 }
 
 export async function deleteChatHandler(c: Context) {
-  const chatId = c.req.param('chatId');
+  const chatId = c.req.param('chatId')!;
   const deleted = await deleteChat(chatId);
   if (!deleted) return c.json({ error: { message: 'Chat not found' } }, 404);
   return c.json({ object: 'chat.deleted', id: chatId });
 }
 
 export async function compactChatHandler(c: Context) {
-  const chatId = c.req.param('chatId');
+  const chatId = c.req.param('chatId')!;
   const chat = await compactChat(chatId);
   if (!chat) return c.json({ error: { message: 'Chat not found' } }, 404);
   return c.json({ object: 'chat', data: chat });

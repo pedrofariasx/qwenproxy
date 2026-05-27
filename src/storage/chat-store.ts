@@ -125,12 +125,29 @@ function getChatLock(chatId: string): Mutex {
   return lock;
 }
 
-function sanitizeId(id: string): string {
+function legacySanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+function encodeChatId(id: string): string {
+  return Buffer.from(id, 'utf8').toString('base64url');
+}
+
+function decodeChatId(encoded: string): string | null {
+  try {
+    const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
+    return encodeChatId(decoded) === encoded ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
 function filePathForChat(chatId: string): string {
-  return path.join(CHAT_DIR, `${sanitizeId(chatId)}.json`);
+  return path.join(CHAT_DIR, `${encodeChatId(chatId)}.json`);
+}
+
+function legacyFilePathForChat(chatId: string): string {
+  return path.join(CHAT_DIR, `${legacySanitizeId(chatId)}.json`);
 }
 
 function nowIso(): string {
@@ -290,28 +307,36 @@ async function ensureStorageDir(): Promise<void> {
 
 async function readChatFile(chatId: string): Promise<ChatRecord | null> {
   try {
-    const raw = await fs.readFile(filePathForChat(chatId), 'utf8');
-    const parsed = JSON.parse(raw) as Partial<ChatRecord>;
-    return {
-      id: parsed.id || chatId,
-      title: parsed.title || 'New chat',
-      model: parsed.model || null,
-      mode: parsed.mode || inferModeFromModel(parsed.model || null),
-      summary: parsed.summary || null,
-      lastMessageId: parsed.lastMessageId || null,
-      lastResponseId: parsed.lastResponseId || null,
-      messages: Array.isArray(parsed.messages) ? parsed.messages : [],
-      createdAt: parsed.createdAt || nowIso(),
-      updatedAt: parsed.updatedAt || nowIso(),
-      stats: {
-        requestCount: parsed.stats?.requestCount || 0,
-        assistantCount: parsed.stats?.assistantCount || 0,
-        approximateChars: parsed.stats?.approximateChars || 0
-      }
-    };
+    return await readChatFileAt(filePathForChat(chatId), chatId);
   } catch {
-    return null;
+    try {
+      return await readChatFileAt(legacyFilePathForChat(chatId), chatId);
+    } catch {
+      return null;
+    }
   }
+}
+
+async function readChatFileAt(filePath: string, fallbackId: string): Promise<ChatRecord> {
+  const raw = await fs.readFile(filePath, 'utf8');
+  const parsed = JSON.parse(raw) as Partial<ChatRecord>;
+  return {
+    id: parsed.id || fallbackId,
+    title: parsed.title || 'New chat',
+    model: parsed.model || null,
+    mode: parsed.mode || inferModeFromModel(parsed.model || null),
+    summary: parsed.summary || null,
+    lastMessageId: parsed.lastMessageId || null,
+    lastResponseId: parsed.lastResponseId || null,
+    messages: Array.isArray(parsed.messages) ? parsed.messages : [],
+    createdAt: parsed.createdAt || nowIso(),
+    updatedAt: parsed.updatedAt || nowIso(),
+    stats: {
+      requestCount: parsed.stats?.requestCount || 0,
+      assistantCount: parsed.stats?.assistantCount || 0,
+      approximateChars: parsed.stats?.approximateChars || 0
+    }
+  };
 }
 
 function buildChatListItem(chat: ChatRecord): ChatListItem {
@@ -347,8 +372,9 @@ export async function listChats(): Promise<ChatListItem[]> {
 
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const chatId = entry.name.slice(0, -5);
-    const chat = await readChatFile(chatId);
+    const encodedId = entry.name.slice(0, -5);
+    const chatId = decodeChatId(encodedId) || encodedId;
+    const chat = await readChatFileAt(path.join(CHAT_DIR, entry.name), chatId).catch(() => null);
     if (chat) chats.push(buildChatListItem(chat));
   }
 
@@ -399,26 +425,32 @@ export async function updateChat(
   chatId: string,
   patch: Partial<Pick<ChatRecord, 'title' | 'model' | 'summary' | 'mode'>>
 ): Promise<ChatRecord | null> {
-  const current = await getChat(chatId);
-  if (!current) return null;
+  const lock = getChatLock(chatId);
+  const release = await lock.acquire();
+  try {
+    const current = await getChat(chatId);
+    if (!current) return null;
 
-  const next: ChatRecord = {
-    ...current,
-    title: patch.title ?? current.title,
-    model: patch.model ?? current.model,
-    mode: patch.mode ?? current.mode ?? inferModeFromModel(patch.model ?? current.model),
-    summary: patch.summary ?? current.summary,
-    lastMessageId: current.lastMessageId,
-    lastResponseId: current.lastResponseId,
-    updatedAt: nowIso(),
-    stats: {
-      ...current.stats,
-      approximateChars: countApproxChars(current.messages)
-    }
-  };
+    const next: ChatRecord = {
+      ...current,
+      title: patch.title ?? current.title,
+      model: patch.model ?? current.model,
+      mode: patch.mode ?? current.mode ?? inferModeFromModel(patch.model ?? current.model),
+      summary: patch.summary ?? current.summary,
+      lastMessageId: current.lastMessageId,
+      lastResponseId: current.lastResponseId,
+      updatedAt: nowIso(),
+      stats: {
+        ...current.stats,
+        approximateChars: countApproxChars(current.messages)
+      }
+    };
 
-  await writeChatFile(next);
-  return next;
+    await writeChatFile(next);
+    return next;
+  } finally {
+    release();
+  }
 }
 
 export async function ensureChat(chatId?: string, defaults?: Partial<Pick<ChatRecord, 'title' | 'model' | 'mode'>>): Promise<ChatRecord> {
@@ -511,14 +543,19 @@ export async function appendConversationTurn(
     const nextTitle = current.title === 'New chat'
       ? inferTitleFromMessages(merged)
       : current.title;
+    const assistantMessageId = (assistantMessage as any).id || `msg_${uuidv4()}`;
+    const persistedAssistantMessage = {
+      ...assistantMessage,
+      id: assistantMessageId
+    };
     const next: ChatRecord = {
       ...current,
       model,
       title: nextTitle,
       mode: current.mode || inferModeFromModel(model),
-      lastMessageId: assistantMessage?.id || `msg_${uuidv4()}`,
+      lastMessageId: assistantMessageId,
       lastResponseId: responseId || current.lastResponseId,
-      messages: [...merged, cloneMessage(assistantMessage)],
+      messages: [...merged, cloneMessage(persistedAssistantMessage)],
       updatedAt: nowIso(),
       stats: {
         requestCount: current.stats.requestCount + 1,
@@ -541,19 +578,35 @@ export async function appendConversationTurn(
 }
 
 export async function compactChat(chatId: string): Promise<ChatRecord | null> {
-  const current = await getChat(chatId);
-  if (!current) return null;
-  const compacted = compactPersistedRecord(current);
-  await writeChatFile(compacted);
-  return compacted;
+  const lock = getChatLock(chatId);
+  const release = await lock.acquire();
+  try {
+    const current = await getChat(chatId);
+    if (!current) return null;
+    const compacted = compactPersistedRecord(current);
+    await writeChatFile(compacted);
+    return compacted;
+  } finally {
+    release();
+  }
 }
 
 export async function deleteChat(chatId: string): Promise<boolean> {
+  const lock = getChatLock(chatId);
+  const release = await lock.acquire();
   try {
-    await fs.unlink(filePathForChat(chatId));
-    return true;
-  } catch {
-    return false;
+    let deleted = false;
+    for (const filePath of [filePathForChat(chatId), legacyFilePathForChat(chatId)]) {
+      try {
+        await fs.unlink(filePath);
+        deleted = true;
+      } catch {
+        // Missing files are fine; callers only need to know whether anything was removed.
+      }
+    }
+    return deleted;
+  } finally {
+    release();
   }
 }
 
