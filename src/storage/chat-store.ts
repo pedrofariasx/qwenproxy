@@ -296,9 +296,12 @@ function compactPersistedRecord(record: ChatRecord): ChatRecord {
   const older = body.slice(0, Math.max(0, body.length - recent.length));
   const summaryText = summarizeMessages(older);
 
-  const nextSummary = record.summary
+  const combined = record.summary
     ? `${record.summary}\n${summaryText}`.trim()
     : summaryText;
+  const nextSummary = combined.length > MAX_PROMPT_CHARS
+    ? combined.slice(-MAX_PROMPT_CHARS)
+    : combined;
 
   return {
     ...record,
@@ -417,19 +420,6 @@ export async function createChat(input?: Partial<Pick<ChatRecord, 'id' | 'title'
   };
   await writeChatFile(chat);
   return chat;
-}
-
-export async function upsertChat(chat: ChatRecord): Promise<ChatRecord> {
-  const next = {
-    ...chat,
-    updatedAt: nowIso(),
-    stats: {
-      ...chat.stats,
-      approximateChars: countApproxChars(chat.messages)
-    }
-  };
-  await writeChatFile(next);
-  return next;
 }
 
 export async function updateChat(
@@ -665,22 +655,6 @@ export async function deleteChat(chatId: string): Promise<boolean> {
   }
 }
 
-export function getConversationPrompt(chat: ChatRecord, incomingMessages: Message[]): PromptBuildResult {
-  const merged = mergeChatMessages(chat.messages, incomingMessages);
-  return buildPromptMessages(chat, merged);
-}
-
-export function estimateContextUsage(messages: Message[]): { messages: number; chars: number } {
-  return {
-    messages: messages.length,
-    chars: countApproxChars(messages),
-  };
-}
-
 export function listChatModes(): ChatModeInfo[] {
   return CHAT_MODES.map(mode => ({ ...mode }));
-}
-
-export function getChatModeLabel(mode: QwenMode): string {
-  return CHAT_MODES.find(item => item.id === mode)?.title || 'Chat';
 }

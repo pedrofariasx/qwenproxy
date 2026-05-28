@@ -11,11 +11,8 @@
 import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
+import { createQwenStream, updateSessionParent, stopQwenGeneration } from '../services/qwen.ts';
 import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
-import { registry } from '../tools/registry.ts';
-import type { FunctionToolDefinition } from '../tools/types.ts';
-import { robustParseJSON } from '../utils/json.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 import { RetryableQwenStreamError } from '../services/qwen.ts';
 import { Mutex } from '../services/playwright.ts';
@@ -235,6 +232,7 @@ export async function chatCompletions(c: Context) {
     // Retry logic with exponential backoff for "chat is in progress" errors
     let stream: ReadableStream | null = null;
     let uiSessionId = '';
+    let qwenHeaders: Record<string, string> = {};
     let retries = 3;
     let retryDelay = 500;
     while (retries > 0) {
@@ -244,12 +242,20 @@ export async function chatCompletions(c: Context) {
           isThinkingModel,
           body.model,
           forcedParentId,
-          !shouldReplaceStoredHistory && forcedParentId === null
+          !shouldReplaceStoredHistory && forcedParentId === null,
+          c.req.raw.signal
         );
         stream = result.stream;
         uiSessionId = result.uiSessionId;
+        qwenHeaders = result.headers;
         break; // Success
       } catch (err: any) {
+        // Client disconnected - don't retry, release lock immediately
+        if (c.req.raw.signal.aborted) {
+          console.log(`[Client] Disconnected during createQwenStream: chat=${chatId || 'none'} model=${body.model}`);
+          releaseChatLockOnce();
+          return c.text('', 200);
+        }
         retries--;
         if (retries === 0) {
           releaseChatLockOnce();
@@ -268,6 +274,13 @@ export async function chatCompletions(c: Context) {
         await new Promise(r => setTimeout(r, useDelay));
         retryDelay = Math.min(retryDelay * 2, 5000);
       }
+    }
+
+    // Client disconnected while createQwenStream was running (Playwright is slow)
+    if (c.req.raw.signal.aborted) {
+      console.log(`[Client] Disconnected before stream started: chat=${chatId || 'none'} model=${body.model}`);
+      releaseChatLockOnce();
+      return c.text('', 200);
     }
 
     const completionId = 'chatcmpl-' + uuidv4();
@@ -460,8 +473,35 @@ export async function chatCompletions(c: Context) {
     c.header('Cache-Control', 'no-cache');
     c.header('Connection', 'keep-alive');
 
+    const streamStartMs = Date.now();
+
     return honoStream(c, async (streamWriter: any) => {
       let heartbeatInterval: any;
+      let targetResponseId: string | null = null;
+      let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+      // Client disconnected BEFORE stream was set up (e.g. during createQwenStream)
+      if (streamWriter.aborted) {
+        const elapsed = Date.now() - streamStartMs;
+        console.log(`[Client] Disconnected before streaming started: chat=${chatId || 'none'} model=${body.model} elapsed=${elapsed}ms`);
+        if (uiSessionId) {
+          stopQwenGeneration(qwenHeaders, uiSessionId, '');
+        }
+        return;
+      }
+
+      streamWriter.onAbort(() => {
+        const elapsed = Date.now() - streamStartMs;
+        console.log(`[Client] Disconnected during streaming: chat=${chatId || 'none'} model=${body.model} elapsed=${elapsed}ms`);
+        clearInterval(heartbeatInterval);
+        if (uiSessionId && targetResponseId) {
+          stopQwenGeneration(qwenHeaders, uiSessionId, targetResponseId);
+        }
+        if (upstreamReader) {
+          upstreamReader.cancel().catch(() => {});
+        }
+      });
+
       try {
       // Send heartbeat to prevent Cloudflare 524 timeout
       await streamWriter.write(': heartbeat\n\n');
@@ -472,6 +512,7 @@ export async function chatCompletions(c: Context) {
           await streamWriter.write(': keep-alive\n\n');
         } catch (e) {
           clearInterval(heartbeatInterval);
+          console.warn(`[Client] Heartbeat write failed (client likely disconnected): chat=${chatId || 'none'} model=${body.model}`);
         }
       }, 15000); // Every 15 seconds
 
@@ -500,13 +541,13 @@ export async function chatCompletions(c: Context) {
       }
 
       const reader = stream.getReader();
+      upstreamReader = reader;
       const decoder = new TextDecoder();
       
       let currentThoughtIndex = 0;
       
        let reasoningBuffer = '';
        let lastFullContent = '';
-       let targetResponseId: string | null = null;
        const toolParser = new StreamingToolParser(bodyAny.tools || []);
       const toolCallsOut: any[] = [];
 
@@ -516,6 +557,7 @@ export async function chatCompletions(c: Context) {
       let upstreamError: { message: string; status: number } | null = null;
 
       while (true) {
+        if (streamWriter.aborted) break;
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -528,10 +570,7 @@ export async function chatCompletions(c: Context) {
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
           
           const dataStr = trimmed.slice(6);
-          if (dataStr === '[DONE]') {
-            await streamWriter.write('data: [DONE]\n\n');
-            continue;
-          }
+          if (dataStr === '[DONE]') continue;
 
           try {
             const chunk = JSON.parse(dataStr);

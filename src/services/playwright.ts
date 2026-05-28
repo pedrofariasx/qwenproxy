@@ -54,7 +54,7 @@ export class Mutex {
 // Lock to prevent concurrent UI interactions
 const uiMutex = new Mutex();
 
-export async function getCookies(): Promise<string> {
+async function getCookies(): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
   if (!activePage) return '';
   const cookies = await activePage.context().cookies();
@@ -365,14 +365,14 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      console.error('[Playwright] Timeout waiting for Qwen headers. Current URL:', activePage!.url());
+      const url = activePage?.url() ?? '(page closed)';
+      console.error(`[Playwright] Timeout waiting for Qwen headers. Current URL: ${url}`);
+      activePage?.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
       reject(new Error('Timeout waiting for Qwen headers'));
     }, 60000);
 
     console.log('[Playwright] Setting up route interception...');
     const routeHandler = async (route: any, request: any) => {
-      clearTimeout(timeout);
-      
       const reqHeaders = request.headers();
       let uiSessionId = '';
       let uiParentMessageId: string | null = null;
@@ -408,6 +408,7 @@ async function _getQwenHeadersInternal(forceNew = false): Promise<{ headers: Rec
         return;
       }
 
+      clearTimeout(timeout);
       console.log('[Playwright] Successfully intercepted headers.');
       currentHeaders = extractedHeaders;
       cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };

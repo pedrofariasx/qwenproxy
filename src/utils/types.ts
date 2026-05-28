@@ -8,8 +8,7 @@
  * Modified By: Pedro Farias
  */
 
-import type { JsonSchema, FunctionToolDefinition } from '../tools/types.ts';
-export type { JsonSchema, FunctionToolDefinition };
+import type { FunctionToolDefinition } from '../tools/types.ts';
 
 /** Tool choice options */
 export type ToolChoice = 'auto' | 'none' | 'required' | {
