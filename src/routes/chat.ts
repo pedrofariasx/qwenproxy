@@ -233,7 +233,7 @@ export async function chatCompletions(c: Context) {
     };
 
     // Retry logic with exponential backoff for "chat is in progress" errors
-    let stream: ReadableStream;
+    let stream: ReadableStream | null = null;
     let uiSessionId = '';
     let retries = 3;
     let retryDelay = 500;
@@ -495,13 +495,14 @@ export async function chatCompletions(c: Context) {
         choices: [makeChoice({ role: 'assistant', content: '' })]
       });
 
+      if (!stream) {
+        throw new Error('Qwen stream was not initialized');
+      }
+
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       
-      let inThinkingState = false;
-      let thinkingFragments: Record<string, boolean> = {};
       let currentThoughtIndex = 0;
-      let currentAppendPath = '';
       
        let reasoningBuffer = '';
        let lastFullContent = '';
@@ -597,7 +598,6 @@ export async function chatCompletions(c: Context) {
               if (vStr === 'FINISHED') continue;
 
               if (isThinkingChunk) {
-                inThinkingState = true;
                 reasoningBuffer += vStr;
                 await writeEvent({
                   id: completionId,
@@ -607,7 +607,6 @@ export async function chatCompletions(c: Context) {
                   choices: [makeChoice({ reasoning_content: vStr })]
                 });
               } else {
-                inThinkingState = false;
                 const { text, toolCalls } = toolParser.feed(vStr);
 
                 if (text) {

@@ -113,6 +113,10 @@ class Mutex {
     }
     this.locked = false;
   }
+
+  get idle(): boolean {
+    return !this.locked && this.queue.length === 0;
+  }
 }
 
 const chatLocks = new Map<string, Mutex>();
@@ -123,6 +127,13 @@ function getChatLock(chatId: string): Mutex {
   const lock = new Mutex();
   chatLocks.set(chatId, lock);
   return lock;
+}
+
+function releaseChatLock(chatId: string, lock: Mutex, release: () => void): void {
+  release();
+  if (lock.idle) {
+    chatLocks.delete(chatId);
+  }
 }
 
 function legacySanitizeId(id: string): string {
@@ -449,7 +460,7 @@ export async function updateChat(
     await writeChatFile(next);
     return next;
   } finally {
-    release();
+    releaseChatLock(chatId, lock, release);
   }
 }
 
@@ -573,7 +584,7 @@ export async function appendConversationTurn(
     await writeChatFile(stored);
     return stored;
   } finally {
-    release();
+    releaseChatLock(chatId, lock, release);
   }
 }
 
@@ -617,7 +628,7 @@ export async function replaceConversationTurn(
     await writeChatFile(next);
     return next;
   } finally {
-    release();
+    releaseChatLock(chatId, lock, release);
   }
 }
 
@@ -631,7 +642,7 @@ export async function compactChat(chatId: string): Promise<ChatRecord | null> {
     await writeChatFile(compacted);
     return compacted;
   } finally {
-    release();
+    releaseChatLock(chatId, lock, release);
   }
 }
 
@@ -650,7 +661,7 @@ export async function deleteChat(chatId: string): Promise<boolean> {
     }
     return deleted;
   } finally {
-    release();
+    releaseChatLock(chatId, lock, release);
   }
 }
 
