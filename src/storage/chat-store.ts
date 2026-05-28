@@ -577,6 +577,50 @@ export async function appendConversationTurn(
   }
 }
 
+export async function replaceConversationTurn(
+  chatId: string,
+  incomingMessages: Message[],
+  assistantMessage: Message,
+  model: string,
+  responseId?: string | null
+): Promise<ChatRecord> {
+  const lock = getChatLock(chatId);
+  const release = await lock.acquire();
+  try {
+    const current = await ensureChat(chatId, { model });
+    const cleanedIncoming = uniqueConsecutive(incomingMessages);
+    const nextTitle = current.title === 'New chat'
+      ? inferTitleFromMessages(cleanedIncoming)
+      : current.title;
+    const assistantMessageId = (assistantMessage as any).id || `msg_${uuidv4()}`;
+    const persistedAssistantMessage = {
+      ...assistantMessage,
+      id: assistantMessageId
+    };
+    const next: ChatRecord = {
+      ...current,
+      model,
+      title: nextTitle,
+      mode: current.mode || inferModeFromModel(model),
+      summary: null,
+      lastMessageId: assistantMessageId,
+      lastResponseId: responseId || current.lastResponseId,
+      messages: [...cleanedIncoming, cloneMessage(persistedAssistantMessage)],
+      updatedAt: nowIso(),
+      stats: {
+        requestCount: current.stats.requestCount + 1,
+        assistantCount: current.stats.assistantCount + 1,
+        approximateChars: 0
+      }
+    };
+    next.stats.approximateChars = countApproxChars(next.messages);
+    await writeChatFile(next);
+    return next;
+  } finally {
+    release();
+  }
+}
+
 export async function compactChat(chatId: string): Promise<ChatRecord | null> {
   const lock = getChatLock(chatId);
   const release = await lock.acquire();

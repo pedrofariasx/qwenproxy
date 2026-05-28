@@ -40,6 +40,8 @@ type ResponsesRequest = {
   temperature?: number;
   top_p?: number;
   max_output_tokens?: number;
+  prompt_cache_key?: string;
+  client_metadata?: Record<string, unknown>;
 };
 
 const DEFAULT_CODEX_TOOLS = [
@@ -340,7 +342,7 @@ function conversationId(body: ResponsesRequest): string | undefined {
   return undefined;
 }
 
-async function resolveChatId(body: ResponsesRequest): Promise<{ chatId?: string; missingPreviousResponseId?: string }> {
+async function resolveChatId(body: ResponsesRequest): Promise<{ chatId?: string; missingPreviousResponseId?: string; replaceHistory?: boolean }> {
   const explicitConversationId = conversationId(body);
   if (explicitConversationId) return { chatId: explicitConversationId };
 
@@ -348,6 +350,10 @@ async function resolveChatId(body: ResponsesRequest): Promise<{ chatId?: string;
     const previous = await getStoredResponse(body.previous_response_id);
     if (!previous) return { missingPreviousResponseId: body.previous_response_id };
     return { chatId: previous.chatId };
+  }
+
+  if (typeof body.prompt_cache_key === 'string' && body.prompt_cache_key.trim()) {
+    return { chatId: `resp_cache_${body.prompt_cache_key.trim()}`, replaceHistory: true };
   }
 
   return { chatId: `resp_chat_${uuidv4()}` };
@@ -365,7 +371,7 @@ function normalizeInputItems(input: ResponsesRequest['input']): unknown[] {
   return Array.isArray(input) ? input : [];
 }
 
-function buildChatRequest(body: ResponsesRequest, stream: boolean, chatId?: string) {
+function buildChatRequest(body: ResponsesRequest, stream: boolean, chatId?: string, replaceHistory = false) {
   const messages = responsesInputToMessages(body);
   const tools = responsesToolsToChatTools(body.tools);
 
@@ -375,7 +381,8 @@ function buildChatRequest(body: ResponsesRequest, stream: boolean, chatId?: stri
     stream,
     ...(tools ? { tools } : {}),
     ...(body.tool_choice !== undefined ? { tool_choice: body.tool_choice } : {}),
-    ...(chatId ? { chat_id: chatId } : {})
+    ...(chatId ? { chat_id: chatId } : {}),
+    ...(replaceHistory ? { history_policy: 'replace' } : {})
   };
 }
 
@@ -509,7 +516,7 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
       }, 400);
     }
     const body = withDefaultCodexTools(rawBody);
-    const { chatId, missingPreviousResponseId } = await resolveChatId(body);
+    const { chatId, missingPreviousResponseId, replaceHistory } = await resolveChatId(body);
     if (missingPreviousResponseId) {
       return c.json({
         error: {
@@ -522,7 +529,7 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
     const inputItems = normalizeInputItems(rawBody.input);
     const responseId = `resp_${uuidv4()}`;
 
-    const chatBody = buildChatRequest(body, !!body.stream, chatId);
+    const chatBody = buildChatRequest(body, !!body.stream, chatId, !!replaceHistory);
     const headers = new Headers(c.req.raw.headers);
     headers.set('content-type', 'application/json');
 

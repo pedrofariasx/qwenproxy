@@ -24,7 +24,8 @@ import {
   buildPromptMessages,
   ensureChat,
   inferModeFromModel,
-  mergeChatMessages
+  mergeChatMessages,
+  replaceConversationTurn
 } from '../storage/chat-store.ts';
 
 // Global mutex that serializes ALL Qwen chat completions requests.
@@ -108,6 +109,7 @@ export async function chatCompletions(c: Context) {
     const bodyAny = body as any;
     const requestedChatId = bodyAny.chat_id || bodyAny.conversation_id;
     const hasPersistentChat = typeof requestedChatId === 'string' && requestedChatId.trim().length > 0;
+    const shouldReplaceStoredHistory = bodyAny.history_policy === 'replace';
     const requestedMode = bodyAny.mode === 'coder' ? 'coder' : (bodyAny.mode === 'chat' ? 'chat' : inferModeFromModel(body.model));
     const conversation = hasPersistentChat
       ? await ensureChat(requestedChatId, { model: body.model, mode: requestedMode })
@@ -117,9 +119,14 @@ export async function chatCompletions(c: Context) {
     // Extract the prompt
     let prompt = '';
     const messages = body.messages || [];
-    const mergedMessages = conversation ? mergeChatMessages(conversation.messages, messages) : messages;
+    const mergedMessages = conversation && !shouldReplaceStoredHistory
+      ? mergeChatMessages(conversation.messages, messages)
+      : messages;
     const promptBuild = conversation
-      ? buildPromptMessages(conversation, mergedMessages)
+      ? buildPromptMessages(
+        shouldReplaceStoredHistory ? { ...conversation, summary: null, messages: [] } : conversation,
+        mergedMessages
+      )
       : { messages: mergedMessages, summaryUsed: null, wasCompacted: false };
     const promptMessages = promptBuild.messages;
     let systemPrompt = '';
@@ -209,7 +216,9 @@ export async function chatCompletions(c: Context) {
     // A session is new if it doesn't have any assistant messages yet.
     // This handles cases where the first request has [System, User] messages.
     const isNewSession = !mergedMessages.some(m => m.role === 'assistant');
-    const forcedParentId = conversation?.lastResponseId ?? (isNewSession ? null : undefined);
+    const forcedParentId = shouldReplaceStoredHistory
+      ? null
+      : conversation?.lastResponseId ?? (isNewSession ? null : undefined);
 
     // Acquire the global Qwen chat mutex to prevent concurrent generations.
     // The Qwen backend only allows one active generation per session; without
@@ -416,7 +425,11 @@ export async function chatCompletions(c: Context) {
         if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
         if (chatId) {
-          await appendConversationTurn(chatId, messages, message, body.model, targetResponseId);
+          if (shouldReplaceStoredHistory) {
+            await replaceConversationTurn(chatId, messages, message, body.model, targetResponseId);
+          } else {
+            await appendConversationTurn(chatId, messages, message, body.model, targetResponseId);
+          }
         }
 
         return c.json({
@@ -735,7 +748,11 @@ export async function chatCompletions(c: Context) {
       if (toolCallsOut.length) assistantMessage.tool_calls = toolCallsOut.map((tc, idx) => ({ ...tc, index: idx }));
 
       if (chatId) {
-        await appendConversationTurn(chatId, messages, assistantMessage, body.model, targetResponseId);
+        if (shouldReplaceStoredHistory) {
+          await replaceConversationTurn(chatId, messages, assistantMessage, body.model, targetResponseId);
+        } else {
+          await appendConversationTurn(chatId, messages, assistantMessage, body.model, targetResponseId);
+        }
       }
   
       await writeEvent({

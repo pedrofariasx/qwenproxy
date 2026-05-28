@@ -289,6 +289,69 @@ test('Responses endpoint keeps context through previous_response_id', async () =
   }
 });
 
+test('Responses endpoint uses prompt_cache_key as stateless Codex session', async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      prompts.push(requestBody.messages[0].content);
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"response.created":{"response_id":"qwen-parent-id"}}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Answer"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const firstRes = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        prompt_cache_key: 'codex-thread-1',
+        input: 'First question'
+      })
+    }));
+    assert.strictEqual(firstRes.status, 200);
+    const first = await firstRes.json();
+
+    const secondRes = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        prompt_cache_key: 'codex-thread-1',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'First question' }] },
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Answer' }] },
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Second question' }] }
+        ]
+      })
+    }));
+    assert.strictEqual(secondRes.status, 200);
+    const second = await secondRes.json();
+    assert.strictEqual(second.conversation.id, first.conversation.id);
+    assert.strictEqual((prompts[1].match(/First question/g) || []).length, 1);
+    assert.strictEqual((prompts[1].match(/Answer/g) || []).length, 1);
+    assert.match(prompts[1], /Second question/);
+
+    await app.fetch(new Request(`http://localhost/v1/chats/${first.conversation.id}`, { method: 'DELETE' }));
+    await app.fetch(new Request(`http://localhost/v1/responses/${first.id}`, { method: 'DELETE' }));
+    await app.fetch(new Request(`http://localhost/v1/responses/${second.id}`, { method: 'DELETE' }));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Responses endpoint rejects previous_response_id with conversation', async () => {
   const res = await app.fetch(new Request('http://localhost/v1/responses', {
     method: 'POST',
