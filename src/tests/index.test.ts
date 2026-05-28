@@ -505,6 +505,54 @@ test('Responses endpoint rewrites unsupported apply_patch tool calls to exec_com
     assert.strictEqual(body.output[0].name, 'exec_command');
     assert.match(body.output[0].arguments, /apply_patch/);
     assert.match(body.output[0].arguments, /hello\.txt/);
+    assert.match(body.output[0].arguments, /PATCH/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint rewrites apply_patch path/content calls to patch command', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"apply_patch\\",\\"arguments\\":{\\"path\\":\\"src/a.txt\\",\\"content\\":\\"one\\\\ntwo\\"}}</tool_call>"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'Patch a file',
+        tools: [{
+          type: 'function',
+          name: 'exec_command',
+          parameters: {
+            type: 'object',
+            properties: { cmd: { type: 'string' } },
+            required: ['cmd']
+          }
+        }]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.output[0].name, 'exec_command');
+    assert.match(body.output[0].arguments, /Delete File: src\/a\.txt/);
+    assert.match(body.output[0].arguments, /Add File: src\/a\.txt/);
+    assert.match(JSON.parse(body.output[0].arguments).cmd, /\n\+one\n\+two/);
   } finally {
     globalThis.fetch = originalFetch;
   }

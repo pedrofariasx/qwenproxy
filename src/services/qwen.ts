@@ -201,9 +201,10 @@ export async function createQwenStream(
   prompt: string, 
   enableThinking: boolean, 
   modelId: string,
-  forcedParentId?: string | null
+  forcedParentId?: string | null,
+  forceNewSession = forcedParentId === null
 ): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string }> {
-  const { headers, chatSessionId, parentMessageId } = await getQwenHeaders(forcedParentId === null);
+  const { headers, chatSessionId, parentMessageId } = await getQwenHeaders(forceNewSession);
 
   let actualParentId: string | null = parentMessageId;
   

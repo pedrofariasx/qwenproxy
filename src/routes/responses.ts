@@ -344,8 +344,13 @@ function availableToolNames(tools: any[] | undefined): Set<string> {
   return new Set((tools || []).map(toolName).filter(Boolean));
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+function patchCommand(patch: string): string {
+  return `apply_patch <<'PATCH'\n${patch.replace(/\n?$/, '\n')}PATCH`;
+}
+
+function replacementPatch(path: string, content: string): string {
+  const lines = content.split('\n').map(line => `+${line}`).join('\n');
+  return `*** Begin Patch\n*** Delete File: ${path}\n*** Add File: ${path}\n${lines}\n*** End Patch\n`;
 }
 
 function normalizeToolCallForRuntime(toolCall: any, request: ResponsesRequest): any {
@@ -361,6 +366,8 @@ function normalizeToolCallForRuntime(toolCall: any, request: ResponsesRequest): 
         ? parsed.patch
         : typeof parsed?.command === 'string'
           ? parsed.command
+          : typeof parsed?.path === 'string' && typeof parsed?.content === 'string'
+            ? replacementPatch(parsed.path, parsed.content)
           : '';
     } catch {
       patch = typeof rawArguments === 'string' ? rawArguments : '';
@@ -372,7 +379,7 @@ function normalizeToolCallForRuntime(toolCall: any, request: ResponsesRequest): 
         type: 'function',
         function: {
           name: 'exec_command',
-          arguments: JSON.stringify({ cmd: `apply_patch ${shellQuote(patch)}` })
+          arguments: JSON.stringify({ cmd: patchCommand(patch) })
         }
       };
     }

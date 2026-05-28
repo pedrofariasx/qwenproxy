@@ -239,7 +239,13 @@ export async function chatCompletions(c: Context) {
     let retryDelay = 500;
     while (retries > 0) {
       try {
-        const result = await createQwenStream(finalPrompt, isThinkingModel, body.model, forcedParentId);
+        const result = await createQwenStream(
+          finalPrompt,
+          isThinkingModel,
+          body.model,
+          forcedParentId,
+          !shouldReplaceStoredHistory && forcedParentId === null
+        );
         stream = result.stream;
         uiSessionId = result.uiSessionId;
         break; // Success
