@@ -306,6 +306,47 @@ test('Responses endpoint rejects previous_response_id with conversation', async 
   assert.strictEqual(body.error.param, 'previous_response_id');
 });
 
+test('Responses endpoint maps developer messages into the prompt', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      assert.ok(requestBody.messages[0].content.includes('Always use apply_patch for file edits.'));
+      assert.ok(requestBody.messages[0].content.includes('User: Edit the file'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "ok"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: [
+          { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'Always use apply_patch for file edits.' }] },
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Edit the file' }] }
+        ]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Responses endpoint supports /v1/chat/responses alias and function tools', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: any, init?: RequestInit) => {
@@ -367,13 +408,13 @@ test('Responses endpoint injects default Codex tools when none are provided', as
       const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
       const requestBody = JSON.parse(rawBody as string);
       const prompt = requestBody.messages[0].content;
-      assert.ok(prompt.includes('"name": "functions.exec_command"'));
-      assert.ok(prompt.includes('"name": "functions.apply_patch"'));
+      assert.ok(prompt.includes('"name": "exec_command"'));
+      assert.ok(prompt.includes('"name": "apply_patch"'));
       assert.ok(prompt.includes('"name": "multi_tool_use.parallel"'));
 
       const stream = new ReadableStream({
         start(c) {
-          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"functions.exec_command\\",\\"arguments\\":{\\"cmd\\":\\"pwd\\"}}</tool_call>"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"exec_command\\",\\"arguments\\":{\\"cmd\\":\\"pwd\\"}}</tool_call>"}}]}\n\n'));
           c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
           c.close();
         }
@@ -389,7 +430,7 @@ test('Responses endpoint injects default Codex tools when none are provided', as
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'qwen3.6-plus',
-        instructions: 'You are Codex and can use functions.exec_command.',
+        instructions: 'You are Codex and can use exec_command.',
         input: 'Check the current directory.'
       })
     }));
@@ -397,9 +438,9 @@ test('Responses endpoint injects default Codex tools when none are provided', as
     assert.strictEqual(res.status, 200);
     const body = await res.json();
     assert.strictEqual(body.output[0].type, 'function_call');
-    assert.strictEqual(body.output[0].name, 'functions.exec_command');
+    assert.strictEqual(body.output[0].name, 'exec_command');
     assert.match(body.output[0].arguments, /pwd/);
-    assert.ok(body.tools.some((tool: any) => tool.name === 'functions.exec_command'));
+    assert.ok(body.tools.some((tool: any) => tool.name === 'exec_command'));
   } finally {
     globalThis.fetch = originalFetch;
   }

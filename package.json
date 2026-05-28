@@ -12,6 +12,7 @@
     "login:firefox": "npx tsx src/login.ts --browser=firefox",
     "login:chrome": "npx tsx src/login.ts --browser=chrome",
     "login:edge": "npx tsx src/login.ts --browser=edge",
+    "build": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts"
   },
   "keywords": [],

@@ -45,7 +45,7 @@ type ResponsesRequest = {
 const DEFAULT_CODEX_TOOLS = [
   {
     type: 'function',
-    name: 'functions.exec_command',
+    name: 'exec_command',
     description: 'Run a shell command in the current workspace.',
     parameters: {
       type: 'object',
@@ -60,7 +60,7 @@ const DEFAULT_CODEX_TOOLS = [
   },
   {
     type: 'function',
-    name: 'functions.write_stdin',
+    name: 'write_stdin',
     description: 'Send input to an existing command session and read recent output.',
     parameters: {
       type: 'object',
@@ -75,7 +75,7 @@ const DEFAULT_CODEX_TOOLS = [
   },
   {
     type: 'function',
-    name: 'functions.apply_patch',
+    name: 'apply_patch',
     description: 'Apply a source-code patch to files in the workspace.',
     parameters: {
       type: 'object',
@@ -87,7 +87,7 @@ const DEFAULT_CODEX_TOOLS = [
   },
   {
     type: 'function',
-    name: 'functions.update_plan',
+    name: 'update_plan',
     description: 'Update the visible task plan.',
     parameters: {
       type: 'object',
@@ -110,7 +110,7 @@ const DEFAULT_CODEX_TOOLS = [
   },
   {
     type: 'function',
-    name: 'functions.view_image',
+    name: 'view_image',
     description: 'Inspect a local image file.',
     parameters: {
       type: 'object',
@@ -123,7 +123,7 @@ const DEFAULT_CODEX_TOOLS = [
   },
   {
     type: 'function',
-    name: 'functions.list_mcp_resources',
+    name: 'list_mcp_resources',
     description: 'List MCP resources available to the agent.',
     parameters: {
       type: 'object',
@@ -135,7 +135,19 @@ const DEFAULT_CODEX_TOOLS = [
   },
   {
     type: 'function',
-    name: 'functions.read_mcp_resource',
+    name: 'list_mcp_resource_templates',
+    description: 'List MCP resource templates available to the agent.',
+    parameters: {
+      type: 'object',
+      properties: {
+        server: { type: 'string' },
+        cursor: { type: 'string' }
+      }
+    }
+  },
+  {
+    type: 'function',
+    name: 'read_mcp_resource',
     description: 'Read a specific MCP resource.',
     parameters: {
       type: 'object',
@@ -144,6 +156,52 @@ const DEFAULT_CODEX_TOOLS = [
         uri: { type: 'string' }
       },
       required: ['server', 'uri']
+    }
+  },
+  {
+    type: 'function',
+    name: 'get_goal',
+    description: 'Get the current goal for this thread.',
+    parameters: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  {
+    type: 'function',
+    name: 'create_goal',
+    description: 'Create a goal when explicitly requested.',
+    parameters: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string' },
+        token_budget: { type: 'number' }
+      },
+      required: ['objective']
+    }
+  },
+  {
+    type: 'function',
+    name: 'update_goal',
+    description: 'Mark the existing goal complete or blocked.',
+    parameters: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['complete', 'blocked'] }
+      },
+      required: ['status']
+    }
+  },
+  {
+    type: 'function',
+    name: 'request_user_input',
+    description: 'Request structured user input when available in the active mode.',
+    parameters: {
+      type: 'object',
+      properties: {
+        questions: { type: 'array', items: { type: 'object' } }
+      },
+      required: ['questions']
     }
   },
   {
@@ -249,7 +307,7 @@ function responsesInputToMessages(body: ResponsesRequest): any[] {
     const role = item.role || (item.type === 'message' ? 'user' : null);
     if (role) {
       messages.push({
-        role,
+        role: role === 'developer' ? 'system' : role,
         content: textFromContent(item.content)
       });
     }
