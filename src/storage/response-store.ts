@@ -29,10 +29,6 @@ function filePathForResponse(responseId: string): string {
   return path.join(RESPONSE_DIR, `${encodeResponseId(responseId)}.json`);
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
 async function ensureStorageDir(): Promise<void> {
   await fs.mkdir(RESPONSE_DIR, { recursive: true });
 }
@@ -45,8 +41,8 @@ export async function getStoredResponse(responseId: string): Promise<StoredRespo
     return {
       id: parsed.id,
       chatId: parsed.chatId,
-      createdAt: parsed.createdAt || nowIso(),
-      updatedAt: parsed.updatedAt || nowIso(),
+      createdAt: parsed.createdAt || new Date().toISOString(),
+      updatedAt: parsed.updatedAt || new Date().toISOString(),
       request: parsed.request || null,
       response: parsed.response || null,
       inputItems: Array.isArray(parsed.inputItems) ? parsed.inputItems : []
@@ -60,7 +56,7 @@ export async function saveStoredResponse(record: StoredResponseRecord): Promise<
   await ensureStorageDir();
   const next: StoredResponseRecord = {
     ...record,
-    updatedAt: nowIso()
+    updatedAt: new Date().toISOString()
   };
   const filePath = filePathForResponse(record.id);
   const tmpPath = `${filePath}.${uuidv4()}.tmp`;

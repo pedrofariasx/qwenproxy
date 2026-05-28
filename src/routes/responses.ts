@@ -824,7 +824,14 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
     c.header('Cache-Control', 'no-cache');
     c.header('Connection', 'keep-alive');
 
+    const streamStartMs = Date.now();
+
     return honoStream(c, async streamWriter => {
+      streamWriter.onAbort(() => {
+        const elapsed = Date.now() - streamStartMs;
+        console.log(`[Client] Disconnected during response streaming: response=${responseId} chat=${chatId || 'none'} model=${body.model} elapsed=${elapsed}ms`);
+      });
+
       const messageItemId = `msg_${uuidv4()}`;
       let sequence = 0;
       let outputText = '';

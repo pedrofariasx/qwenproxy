@@ -18,7 +18,7 @@ export class RetryableQwenStreamError extends Error {
   }
 }
 
-export class QwenUpstreamError extends Error {
+class QwenUpstreamError extends Error {
   readonly upstreamCode: string;
   readonly upstreamStatus: number;
 
@@ -84,6 +84,44 @@ let cachedModels: any[] | null = null;
 let lastModelsFetch = 0;
 let nativeToolsDisabled = false;
 let disablingNativeToolsInProgress = false;
+
+export async function stopQwenGeneration(
+  headers: Record<string, string>,
+  chatId: string,
+  responseId: string
+): Promise<void> {
+  if (!chatId || !responseId) return;
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const resp = await fetch(`https://chat.qwen.ai/api/v2/chat/completions/stop?chat_id=${chatId}`, {
+      method: 'POST',
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'content-type': 'application/json',
+        'cookie': headers['cookie'],
+        'origin': 'https://chat.qwen.ai',
+        'referer': `https://chat.qwen.ai/c/${chatId}`,
+        'user-agent': headers['user-agent'],
+        'x-request-id': uuidv4(),
+        'bx-ua': headers['bx-ua'],
+        'bx-umidtoken': headers['bx-umidtoken'],
+        'bx-v': headers['bx-v']
+      },
+      body: JSON.stringify({ chat_id: chatId, response_id: responseId }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (resp.ok) {
+      console.log(`[Qwen] Generation stopped: chat=${chatId} response=${responseId}`);
+    } else {
+      const text = await resp.text().catch(() => '');
+      console.warn(`[Qwen] Stop request failed: ${resp.status} ${text}`);
+    }
+  } catch (err: any) {
+    console.warn(`[Qwen] Stop request error: ${err.message}`);
+  }
+}
 
 export async function disableNativeTools(): Promise<void> {
   if (nativeToolsDisabled || disablingNativeToolsInProgress) {
@@ -202,9 +240,15 @@ export async function createQwenStream(
   enableThinking: boolean, 
   modelId: string,
   forcedParentId?: string | null,
-  forceNewSession = forcedParentId === null
+  forceNewSession = forcedParentId === null,
+  clientSignal?: AbortSignal
 ): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string }> {
   const { headers, chatSessionId, parentMessageId } = await getQwenHeaders(forceNewSession);
+
+  // Client disconnected while Playwright was getting headers
+  if (clientSignal?.aborted) {
+    throw new Error('Client disconnected before prompt was sent');
+  }
 
   let actualParentId: string | null = parentMessageId;
   
@@ -265,6 +309,11 @@ export async function createQwenStream(
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+  // Abort fetch if client disconnects
+  const onClientAbort = () => controller.abort();
+  clientSignal?.addEventListener('abort', onClientAbort);
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -289,6 +338,7 @@ export async function createQwenStream(
     signal: controller.signal
   });
   clearTimeout(timeoutId);
+  clientSignal?.removeEventListener('abort', onClientAbort);
 
   if (!response.ok || !response.body) {
     const errText = await response.text().catch(() => '');
