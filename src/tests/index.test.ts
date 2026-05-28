@@ -675,6 +675,183 @@ test('Responses endpoint maps Codex custom tool outputs back into chat history',
   }
 });
 
+test('Responses endpoint preserves namespace function calls for Codex MCP tools', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      assert.ok(requestBody.messages[0].content.includes('"type": "namespace"'));
+      assert.ok(requestBody.messages[0].content.includes('"name": "mcp__demo"'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"lookup_order\\",\\"arguments\\":{\\"order_id\\":\\"42\\"}}</tool_call>"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'Look up order 42',
+        tools: [{
+          type: 'namespace',
+          name: 'mcp__demo',
+          description: 'Demo namespace',
+          tools: [{
+            type: 'function',
+            name: 'lookup_order',
+            description: 'Look up an order',
+            parameters: {
+              type: 'object',
+              properties: { order_id: { type: 'string' } },
+              required: ['order_id']
+            }
+          }]
+        }]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.output[0].type, 'function_call');
+    assert.strictEqual(body.output[0].namespace, 'mcp__demo');
+    assert.strictEqual(body.output[0].name, 'lookup_order');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint emits Codex tool_search_call items', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      assert.ok(requestBody.messages[0].content.includes('"type": "tool_search"'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"tool_search\\",\\"arguments\\":{\\"query\\":\\"filesystem\\"}}</tool_call>"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'Find filesystem tools',
+        tools: [{
+          type: 'tool_search',
+          execution: 'client',
+          description: 'Search deferred tools',
+          parameters: {
+            type: 'object',
+            properties: { query: { type: 'string' } },
+            required: ['query']
+          }
+        }]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.output[0].type, 'tool_search_call');
+    assert.strictEqual(body.output[0].execution, 'client');
+    assert.strictEqual(body.output[0].arguments.query, 'filesystem');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint maps Codex shell and tool_search history back into chat', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      const prompt = requestBody.messages[0].content;
+      assert.ok(prompt.includes('Tool Response (shell_command): ran'));
+      assert.ok(prompt.includes('Tool Response (tool_search):'));
+      assert.ok(prompt.includes('filesystem.read_file'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Continuing"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Inspect files' }] },
+          {
+            type: 'local_shell_call',
+            call_id: 'call_shell',
+            status: 'completed',
+            action: { type: 'exec', command: ['ls'] }
+          },
+          {
+            type: 'function_call_output',
+            call_id: 'call_shell',
+            output: 'ran'
+          },
+          {
+            type: 'tool_search_call',
+            call_id: 'call_search',
+            execution: 'client',
+            arguments: { query: 'filesystem' }
+          },
+          {
+            type: 'tool_search_output',
+            call_id: 'call_search',
+            status: 'completed',
+            execution: 'client',
+            tools: [{ name: 'filesystem.read_file' }]
+          }
+        ],
+        tools: [{ type: 'tool_search', execution: 'client', description: 'Search tools', parameters: { type: 'object' } }]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.output_text, 'Continuing');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Responses endpoint injects default Codex tools when none are provided', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: any, init?: RequestInit) => {
