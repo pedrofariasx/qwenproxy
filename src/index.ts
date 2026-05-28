@@ -13,7 +13,12 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { bearerAuth } from 'hono/bearer-auth';
 import { chatCompletions } from './routes/chat.ts';
-import { createResponsesHandler } from './routes/responses.ts';
+import {
+  createResponsesHandler,
+  deleteResponseHandler,
+  getResponseHandler,
+  listResponseInputItemsHandler
+} from './routes/responses.ts';
 import {
   compactChatHandler,
   createChatHandler,
@@ -66,7 +71,13 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 // OpenAI compatible routes
 app.post('/v1/chat/completions', chatCompletions);
 app.post('/v1/responses', responsesHandler);
+app.get('/v1/responses/:responseId', getResponseHandler);
+app.delete('/v1/responses/:responseId', deleteResponseHandler);
+app.get('/v1/responses/:responseId/input_items', listResponseInputItemsHandler);
 app.post('/v1/chat/responses', responsesHandler);
+app.get('/v1/chat/responses/:responseId', getResponseHandler);
+app.delete('/v1/chat/responses/:responseId', deleteResponseHandler);
+app.get('/v1/chat/responses/:responseId/input_items', listResponseInputItemsHandler);
 app.get('/v1/modes', listModesHandler);
 app.get('/v1/chats', listChatsHandler);
 app.post('/v1/chats', createChatHandler);

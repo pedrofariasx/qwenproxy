@@ -217,6 +217,95 @@ test('Responses endpoint returns OpenAI-compatible response object', async () =>
   }
 });
 
+test('Responses endpoint keeps context through previous_response_id', async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      prompts.push(requestBody.messages[0].content);
+      const answer = prompts.length === 1 ? 'First answer' : 'Second answer';
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(`data: {"choices": [{"delta": {"phase": "answer", "content": "${answer}"}}]}\n\n`));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const firstRes = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'First question'
+      })
+    }));
+    assert.strictEqual(firstRes.status, 200);
+    const first = await firstRes.json();
+    assert.ok(first.id);
+    assert.ok(first.conversation?.id);
+
+    const secondRes = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        previous_response_id: first.id,
+        input: 'Second question'
+      })
+    }));
+    assert.strictEqual(secondRes.status, 200);
+    const second = await secondRes.json();
+    assert.strictEqual(second.previous_response_id, first.id);
+    assert.strictEqual(second.conversation.id, first.conversation.id);
+    assert.match(prompts[1], /First question/);
+    assert.match(prompts[1], /First answer/);
+    assert.match(prompts[1], /Second question/);
+
+    const getRes = await app.fetch(new Request(`http://localhost/v1/responses/${first.id}`));
+    assert.strictEqual(getRes.status, 200);
+    const stored = await getRes.json();
+    assert.strictEqual(stored.id, first.id);
+
+    const itemsRes = await app.fetch(new Request(`http://localhost/v1/responses/${first.id}/input_items`));
+    assert.strictEqual(itemsRes.status, 200);
+    const items = await itemsRes.json();
+    assert.strictEqual(items.object, 'list');
+    assert.strictEqual(items.data[0].content[0].text, 'First question');
+
+    await app.fetch(new Request(`http://localhost/v1/chats/${first.conversation.id}`, { method: 'DELETE' }));
+    await app.fetch(new Request(`http://localhost/v1/responses/${first.id}`, { method: 'DELETE' }));
+    await app.fetch(new Request(`http://localhost/v1/responses/${second.id}`, { method: 'DELETE' }));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint rejects previous_response_id with conversation', async () => {
+  const res = await app.fetch(new Request('http://localhost/v1/responses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'qwen3.6-plus',
+      previous_response_id: 'resp_previous',
+      conversation: 'conv_existing',
+      input: 'hello'
+    })
+  }));
+
+  assert.strictEqual(res.status, 400);
+  const body = await res.json();
+  assert.strictEqual(body.error.param, 'previous_response_id');
+});
+
 test('Responses endpoint supports /v1/chat/responses alias and function tools', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: any, init?: RequestInit) => {
@@ -265,6 +354,52 @@ test('Responses endpoint supports /v1/chat/responses alias and function tools', 
     assert.strictEqual(body.output[0].type, 'function_call');
     assert.strictEqual(body.output[0].name, 'read_file');
     assert.match(body.output[0].arguments, /README\.md/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint injects default Codex tools when none are provided', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      const prompt = requestBody.messages[0].content;
+      assert.ok(prompt.includes('"name": "functions.exec_command"'));
+      assert.ok(prompt.includes('"name": "functions.apply_patch"'));
+      assert.ok(prompt.includes('"name": "multi_tool_use.parallel"'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"functions.exec_command\\",\\"arguments\\":{\\"cmd\\":\\"pwd\\"}}</tool_call>"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        instructions: 'You are Codex and can use functions.exec_command.',
+        input: 'Check the current directory.'
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.output[0].type, 'function_call');
+    assert.strictEqual(body.output[0].name, 'functions.exec_command');
+    assert.match(body.output[0].arguments, /pwd/);
+    assert.ok(body.tools.some((tool: any) => tool.name === 'functions.exec_command'));
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -7,6 +7,12 @@
 import type { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  deleteStoredResponse,
+  getStoredResponse,
+  saveStoredResponse,
+  type StoredResponseRecord
+} from '../storage/response-store.ts';
 
 type ChatDispatch = (request: Request) => Promise<Response>;
 
@@ -35,6 +41,150 @@ type ResponsesRequest = {
   top_p?: number;
   max_output_tokens?: number;
 };
+
+const DEFAULT_CODEX_TOOLS = [
+  {
+    type: 'function',
+    name: 'functions.exec_command',
+    description: 'Run a shell command in the current workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        cmd: { type: 'string' },
+        workdir: { type: 'string' },
+        yield_time_ms: { type: 'number' },
+        max_output_tokens: { type: 'number' }
+      },
+      required: ['cmd']
+    }
+  },
+  {
+    type: 'function',
+    name: 'functions.write_stdin',
+    description: 'Send input to an existing command session and read recent output.',
+    parameters: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'number' },
+        chars: { type: 'string' },
+        yield_time_ms: { type: 'number' },
+        max_output_tokens: { type: 'number' }
+      },
+      required: ['session_id']
+    }
+  },
+  {
+    type: 'function',
+    name: 'functions.apply_patch',
+    description: 'Apply a source-code patch to files in the workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        patch: { type: 'string' }
+      },
+      required: ['patch']
+    }
+  },
+  {
+    type: 'function',
+    name: 'functions.update_plan',
+    description: 'Update the visible task plan.',
+    parameters: {
+      type: 'object',
+      properties: {
+        explanation: { type: 'string' },
+        plan: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              step: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] }
+            },
+            required: ['step', 'status']
+          }
+        }
+      },
+      required: ['plan']
+    }
+  },
+  {
+    type: 'function',
+    name: 'functions.view_image',
+    description: 'Inspect a local image file.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        detail: { type: 'string', enum: ['high', 'original'] }
+      },
+      required: ['path']
+    }
+  },
+  {
+    type: 'function',
+    name: 'functions.list_mcp_resources',
+    description: 'List MCP resources available to the agent.',
+    parameters: {
+      type: 'object',
+      properties: {
+        server: { type: 'string' },
+        cursor: { type: 'string' }
+      }
+    }
+  },
+  {
+    type: 'function',
+    name: 'functions.read_mcp_resource',
+    description: 'Read a specific MCP resource.',
+    parameters: {
+      type: 'object',
+      properties: {
+        server: { type: 'string' },
+        uri: { type: 'string' }
+      },
+      required: ['server', 'uri']
+    }
+  },
+  {
+    type: 'function',
+    name: 'multi_tool_use.parallel',
+    description: 'Run multiple tool calls in parallel.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tool_uses: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              recipient_name: { type: 'string' },
+              parameters: { type: 'object' }
+            },
+            required: ['recipient_name', 'parameters']
+          }
+        }
+      },
+      required: ['tool_uses']
+    }
+  }
+];
+
+function withDefaultCodexTools(body: ResponsesRequest): ResponsesRequest {
+  if (Array.isArray(body.tools) && body.tools.length > 0) return body;
+  const haystack = JSON.stringify({
+    instructions: body.instructions || '',
+    input: body.input || ''
+  }).toLowerCase();
+  const looksLikeCodex =
+    haystack.includes('codex') ||
+    haystack.includes('functions.') ||
+    haystack.includes('multi_tool_use') ||
+    haystack.includes('exec_command') ||
+    haystack.includes('apply_patch');
+  if (!looksLikeCodex) return body;
+  return { ...body, tools: DEFAULT_CODEX_TOOLS };
+}
 
 function textFromContent(content: any): string {
   if (content === null || content === undefined) return '';
@@ -129,16 +279,37 @@ function responsesToolsToChatTools(tools: any[] | undefined): any[] | undefined 
 function conversationId(body: ResponsesRequest): string | undefined {
   if (typeof body.conversation === 'string' && body.conversation.trim()) return body.conversation;
   if (body.conversation && typeof body.conversation === 'object' && body.conversation.id) return body.conversation.id;
-  if (typeof body.previous_response_id === 'string' && body.previous_response_id.trim()) {
-    return `resp_${body.previous_response_id}`;
-  }
   return undefined;
 }
 
-function buildChatRequest(body: ResponsesRequest, stream: boolean) {
+async function resolveChatId(body: ResponsesRequest): Promise<{ chatId?: string; missingPreviousResponseId?: string }> {
+  const explicitConversationId = conversationId(body);
+  if (explicitConversationId) return { chatId: explicitConversationId };
+
+  if (typeof body.previous_response_id === 'string' && body.previous_response_id.trim()) {
+    const previous = await getStoredResponse(body.previous_response_id);
+    if (!previous) return { missingPreviousResponseId: body.previous_response_id };
+    return { chatId: previous.chatId };
+  }
+
+  return { chatId: `resp_chat_${uuidv4()}` };
+}
+
+function normalizeInputItems(input: ResponsesRequest['input']): unknown[] {
+  if (typeof input === 'string') {
+    return [{
+      id: `msg_${uuidv4()}`,
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: input }]
+    }];
+  }
+  return Array.isArray(input) ? input : [];
+}
+
+function buildChatRequest(body: ResponsesRequest, stream: boolean, chatId?: string) {
   const messages = responsesInputToMessages(body);
   const tools = responsesToolsToChatTools(body.tools);
-  const chatId = conversationId(body);
 
   return {
     model: body.model,
@@ -158,6 +329,7 @@ function buildResponseObject(params: {
   usage?: any;
   request: ResponsesRequest;
   status?: 'in_progress' | 'completed' | 'failed';
+  chatId?: string;
 }) {
   const createdAt = Math.floor(Date.now() / 1000);
   const output: any[] = [];
@@ -205,6 +377,7 @@ function buildResponseObject(params: {
     output_text: params.outputText,
     parallel_tool_calls: true,
     previous_response_id: params.request.previous_response_id || null,
+    conversation: params.chatId ? { id: params.chatId } : null,
     store: params.request.store ?? true,
     temperature: params.request.temperature ?? null,
     text: { format: { type: 'text' } },
@@ -221,6 +394,25 @@ function buildResponseObject(params: {
     },
     metadata: params.request.metadata || {}
   };
+}
+
+async function persistResponse(params: {
+  id: string;
+  chatId: string;
+  request: ResponsesRequest;
+  response: unknown;
+  inputItems: unknown[];
+}): Promise<StoredResponseRecord> {
+  const now = new Date().toISOString();
+  return await saveStoredResponse({
+    id: params.id,
+    chatId: params.chatId,
+    createdAt: now,
+    updatedAt: now,
+    request: params.request,
+    response: params.response,
+    inputItems: params.inputItems
+  });
 }
 
 function sse(event: string, data: any): string {
@@ -245,12 +437,34 @@ function parseSsePayloads(buffer: string): { payloads: string[]; rest: string } 
 
 export function createResponsesHandler(dispatchChat: ChatDispatch) {
   return async function responsesHandler(c: Context) {
-    const body = await c.req.json().catch(() => null) as ResponsesRequest | null;
-    if (!body || !body.model) {
+    const rawBody = await c.req.json().catch(() => null) as ResponsesRequest | null;
+    if (!rawBody || !rawBody.model) {
       return c.json({ error: { message: 'Malformed Responses API request' } }, 400);
     }
+    if (rawBody.previous_response_id && rawBody.conversation) {
+      return c.json({
+        error: {
+          message: 'previous_response_id cannot be used together with conversation',
+          type: 'invalid_request_error',
+          param: 'previous_response_id'
+        }
+      }, 400);
+    }
+    const body = withDefaultCodexTools(rawBody);
+    const { chatId, missingPreviousResponseId } = await resolveChatId(body);
+    if (missingPreviousResponseId) {
+      return c.json({
+        error: {
+          message: `Unknown previous_response_id: ${missingPreviousResponseId}`,
+          type: 'invalid_request_error',
+          param: 'previous_response_id'
+        }
+      }, 404);
+    }
+    const inputItems = normalizeInputItems(rawBody.input);
+    const responseId = `resp_${uuidv4()}`;
 
-    const chatBody = buildChatRequest(body, !!body.stream);
+    const chatBody = buildChatRequest(body, !!body.stream, chatId);
     const headers = new Headers(c.req.raw.headers);
     headers.set('content-type', 'application/json');
 
@@ -270,14 +484,18 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
 
       const message = chatJson?.choices?.[0]?.message || {};
       const response = buildResponseObject({
-        id: `resp_${uuidv4()}`,
+        id: responseId,
         model: chatJson?.model || body.model,
         outputText: message.content || '',
         toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls : [],
         usage: chatJson?.usage,
         request: body,
-        status: 'completed'
+        status: 'completed',
+        chatId
       });
+      if (chatId) {
+        await persistResponse({ id: response.id, chatId, request: body, response, inputItems });
+      }
 
       return c.json(response);
     }
@@ -287,7 +505,6 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
     c.header('Connection', 'keep-alive');
 
     return honoStream(c, async streamWriter => {
-      const responseId = `resp_${uuidv4()}`;
       const messageItemId = `msg_${uuidv4()}`;
       let sequence = 0;
       let outputText = '';
@@ -307,7 +524,8 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
           outputText: '',
           toolCalls: [],
           request: body,
-          status: 'in_progress'
+          status: 'in_progress',
+          chatId
         })
       });
 
@@ -449,17 +667,65 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
           content: [{ type: 'output_text', text: outputText, annotations: [] }]
         }
       });
-      await emit('response.completed', {
-        response: buildResponseObject({
-          id: responseId,
-          model,
-          outputText,
-          toolCalls,
-          usage,
-          request: body,
-          status: 'completed'
-        })
+      const response = buildResponseObject({
+        id: responseId,
+        model,
+        outputText,
+        toolCalls,
+        usage,
+        request: body,
+        status: 'completed',
+        chatId
       });
+      await emit('response.completed', {
+        response
+      });
+      if (chatId) {
+        await persistResponse({
+          id: responseId,
+          chatId,
+          request: body,
+          response,
+          inputItems
+        });
+      }
     });
   };
+}
+
+export async function getResponseHandler(c: Context) {
+  const responseId = c.req.param('responseId');
+  if (!responseId) return c.json({ error: { message: 'Missing response id' } }, 400);
+  const stored = await getStoredResponse(responseId);
+  if (!stored) {
+    return c.json({ error: { message: `Response not found: ${responseId}` } }, 404);
+  }
+  return c.json(stored.response);
+}
+
+export async function deleteResponseHandler(c: Context) {
+  const responseId = c.req.param('responseId');
+  if (!responseId) return c.json({ error: { message: 'Missing response id' } }, 400);
+  const deleted = await deleteStoredResponse(responseId);
+  if (!deleted) {
+    return c.json({ error: { message: `Response not found: ${responseId}` } }, 404);
+  }
+  return c.json({ id: responseId, object: 'response.deleted', deleted: true });
+}
+
+export async function listResponseInputItemsHandler(c: Context) {
+  const responseId = c.req.param('responseId');
+  if (!responseId) return c.json({ error: { message: 'Missing response id' } }, 400);
+  const stored = await getStoredResponse(responseId);
+  if (!stored) {
+    return c.json({ error: { message: `Response not found: ${responseId}` } }, 404);
+  }
+  const data = stored.inputItems;
+  return c.json({
+    object: 'list',
+    data,
+    first_id: (data[0] as any)?.id || null,
+    last_id: (data[data.length - 1] as any)?.id || null,
+    has_more: false
+  });
 }
