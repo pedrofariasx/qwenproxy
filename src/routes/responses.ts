@@ -336,6 +336,51 @@ function responsesToolsToChatTools(tools: any[] | undefined): any[] | undefined 
     });
 }
 
+function toolName(tool: any): string {
+  return tool?.name || tool?.function?.name || '';
+}
+
+function availableToolNames(tools: any[] | undefined): Set<string> {
+  return new Set((tools || []).map(toolName).filter(Boolean));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function normalizeToolCallForRuntime(toolCall: any, request: ResponsesRequest): any {
+  const names = availableToolNames(request.tools);
+  const name = toolCall.function?.name || toolCall.name;
+  const rawArguments = toolCall.function?.arguments || toolCall.arguments || '{}';
+
+  if ((name === 'apply_patch' || name === 'functions.apply_patch') && !names.has(name) && names.has('exec_command')) {
+    let patch = '';
+    try {
+      const parsed = typeof rawArguments === 'string' ? JSON.parse(rawArguments) : rawArguments;
+      patch = typeof parsed?.patch === 'string'
+        ? parsed.patch
+        : typeof parsed?.command === 'string'
+          ? parsed.command
+          : '';
+    } catch {
+      patch = typeof rawArguments === 'string' ? rawArguments : '';
+    }
+
+    if (patch.trim()) {
+      return {
+        ...toolCall,
+        type: 'function',
+        function: {
+          name: 'exec_command',
+          arguments: JSON.stringify({ cmd: `apply_patch ${shellQuote(patch)}` })
+        }
+      };
+    }
+  }
+
+  return toolCall;
+}
+
 function conversationId(body: ResponsesRequest): string | undefined {
   if (typeof body.conversation === 'string' && body.conversation.trim()) return body.conversation;
   if (body.conversation && typeof body.conversation === 'object' && body.conversation.id) return body.conversation.id;
@@ -413,7 +458,8 @@ function buildResponseObject(params: {
     });
   }
 
-  for (const toolCall of params.toolCalls) {
+  for (const originalToolCall of params.toolCalls) {
+    const toolCall = normalizeToolCallForRuntime(originalToolCall, params.request);
     output.push({
       id: toolCall.id || `fc_${uuidv4()}`,
       type: 'function_call',
@@ -664,14 +710,14 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
 
           if (Array.isArray(delta.tool_calls)) {
             for (const toolCall of delta.tool_calls) {
-              const normalized = {
+              const normalized = normalizeToolCallForRuntime({
                 id: toolCall.id || `call_${uuidv4()}`,
                 type: 'function',
                 function: {
                   name: toolCall.function?.name,
                   arguments: toolCall.function?.arguments || ''
                 }
-              };
+              }, body);
               toolCalls.push(normalized);
               await emit('response.output_item.added', {
                 output_index: toolCalls.length,
