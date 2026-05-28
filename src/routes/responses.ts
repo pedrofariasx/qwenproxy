@@ -23,6 +23,7 @@ type ResponseInputItem = {
   call_id?: string;
   name?: string;
   arguments?: string;
+  input?: string;
   output?: any;
 };
 
@@ -290,6 +291,16 @@ function responsesInputToMessages(body: ResponsesRequest): any[] {
       continue;
     }
 
+    if (item.type === 'custom_tool_call_output') {
+      messages.push({
+        role: 'tool',
+        tool_call_id: item.call_id,
+        name: item.name,
+        content: textFromContent(item.output)
+      });
+      continue;
+    }
+
     if (item.type === 'function_call') {
       messages.push({
         role: 'assistant',
@@ -300,6 +311,24 @@ function responsesInputToMessages(body: ResponsesRequest): any[] {
           function: {
             name: item.name,
             arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {})
+          }
+        }]
+      });
+      continue;
+    }
+
+    if (item.type === 'custom_tool_call') {
+      messages.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: item.call_id || `call_${uuidv4()}`,
+          type: 'function',
+          function: {
+            name: item.name,
+            arguments: typeof item.input === 'string'
+              ? JSON.stringify({ input: item.input })
+              : JSON.stringify({})
           }
         }]
       });
@@ -322,9 +351,12 @@ function responsesToolsToChatTools(tools: any[] | undefined): any[] | undefined 
   if (!Array.isArray(tools)) return undefined;
 
   return tools
-    .filter(tool => tool && (tool.type === 'function' || tool.function))
+    .filter(tool => tool && (tool.type === 'function' || tool.type === 'custom' || tool.function))
     .map(tool => {
       if (tool.function) return tool;
+      if (tool.type === 'custom') {
+        return tool;
+      }
       return {
         type: 'function',
         function: {
@@ -344,6 +376,10 @@ function availableToolNames(tools: any[] | undefined): Set<string> {
   return new Set((tools || []).map(toolName).filter(Boolean));
 }
 
+function customToolNames(tools: any[] | undefined): Set<string> {
+  return new Set((tools || []).filter(tool => tool?.type === 'custom').map(toolName).filter(Boolean));
+}
+
 function patchCommand(patch: string): string {
   return `apply_patch <<'PATCH'\n${patch.replace(/\n?$/, '\n')}PATCH`;
 }
@@ -357,6 +393,36 @@ function normalizeToolCallForRuntime(toolCall: any, request: ResponsesRequest): 
   const names = availableToolNames(request.tools);
   const name = toolCall.function?.name || toolCall.name;
   const rawArguments = toolCall.function?.arguments || toolCall.arguments || '{}';
+  const customNames = customToolNames(request.tools);
+
+  if (customNames.has(name)) {
+    let input = '';
+    try {
+      const parsed = typeof rawArguments === 'string' ? JSON.parse(rawArguments) : rawArguments;
+      input = typeof parsed === 'string'
+        ? parsed
+        : typeof parsed?.input === 'string'
+          ? parsed.input
+          : typeof parsed?.patch === 'string'
+            ? parsed.patch
+            : typeof parsed?.command === 'string'
+              ? parsed.command
+              : typeof parsed?.path === 'string' && typeof parsed?.content === 'string'
+                ? replacementPatch(parsed.path, parsed.content)
+                : typeof rawArguments === 'string'
+                  ? rawArguments
+                  : JSON.stringify(rawArguments || '');
+    } catch {
+      input = typeof rawArguments === 'string' ? rawArguments : JSON.stringify(rawArguments || '');
+    }
+
+    return {
+      ...toolCall,
+      type: 'custom',
+      name,
+      input
+    };
+  }
 
   if ((name === 'apply_patch' || name === 'functions.apply_patch') && !names.has(name) && names.has('exec_command')) {
     let patch = '';
@@ -386,6 +452,30 @@ function normalizeToolCallForRuntime(toolCall: any, request: ResponsesRequest): 
   }
 
   return toolCall;
+}
+
+function responseToolCallItem(toolCall: any): any {
+  if (toolCall.type === 'custom') {
+    const callId = toolCall.call_id || toolCall.id || `call_${uuidv4()}`;
+    return {
+      id: toolCall.id || `ctc_${uuidv4()}`,
+      type: 'custom_tool_call',
+      status: 'completed',
+      call_id: callId,
+      name: toolCall.name,
+      input: toolCall.input || ''
+    };
+  }
+
+  const callId = toolCall.call_id || toolCall.id || `call_${uuidv4()}`;
+  return {
+    id: toolCall.id || `fc_${uuidv4()}`,
+    type: 'function_call',
+    status: 'completed',
+    call_id: callId,
+    name: toolCall.function?.name || toolCall.name,
+    arguments: toolCall.function?.arguments || toolCall.arguments || '{}'
+  };
 }
 
 function conversationId(body: ResponsesRequest): string | undefined {
@@ -467,14 +557,7 @@ function buildResponseObject(params: {
 
   for (const originalToolCall of params.toolCalls) {
     const toolCall = normalizeToolCallForRuntime(originalToolCall, params.request);
-    output.push({
-      id: toolCall.id || `fc_${uuidv4()}`,
-      type: 'function_call',
-      status: 'completed',
-      call_id: toolCall.id || `call_${uuidv4()}`,
-      name: toolCall.function?.name || toolCall.name,
-      arguments: toolCall.function?.arguments || toolCall.arguments || '{}'
-    });
+    output.push(responseToolCallItem(toolCall));
   }
 
   const promptTokens = params.usage?.prompt_tokens || 0;
@@ -725,38 +808,36 @@ export function createResponsesHandler(dispatchChat: ChatDispatch) {
                   arguments: toolCall.function?.arguments || ''
                 }
               }, body);
+              const responseItem = responseToolCallItem(normalized);
               toolCalls.push(normalized);
               await emit('response.output_item.added', {
                 output_index: toolCalls.length,
-                item: {
-                  id: normalized.id,
-                  type: 'function_call',
-                  status: 'in_progress',
-                  call_id: normalized.id,
-                  name: normalized.function.name,
-                  arguments: ''
-                }
+                item: responseItem.type === 'custom_tool_call'
+                  ? { ...responseItem, status: 'in_progress', input: '' }
+                  : { ...responseItem, status: 'in_progress', arguments: '' }
               });
-              await emit('response.function_call_arguments.delta', {
-                item_id: normalized.id,
-                output_index: toolCalls.length,
-                delta: normalized.function.arguments
-              });
-              await emit('response.function_call_arguments.done', {
-                item_id: normalized.id,
-                output_index: toolCalls.length,
-                arguments: normalized.function.arguments
-              });
+              if (responseItem.type === 'custom_tool_call') {
+                await emit('response.custom_tool_call_input.delta', {
+                  item_id: responseItem.id,
+                  call_id: responseItem.call_id,
+                  output_index: toolCalls.length,
+                  delta: responseItem.input
+                });
+              } else {
+                await emit('response.function_call_arguments.delta', {
+                  item_id: responseItem.id,
+                  output_index: toolCalls.length,
+                  delta: responseItem.arguments
+                });
+                await emit('response.function_call_arguments.done', {
+                  item_id: responseItem.id,
+                  output_index: toolCalls.length,
+                  arguments: responseItem.arguments
+                });
+              }
               await emit('response.output_item.done', {
                 output_index: toolCalls.length,
-                item: {
-                  id: normalized.id,
-                  type: 'function_call',
-                  status: 'completed',
-                  call_id: normalized.id,
-                  name: normalized.function.name,
-                  arguments: normalized.function.arguments
-                }
+                item: responseItem
               });
             }
           }

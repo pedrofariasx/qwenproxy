@@ -558,6 +558,123 @@ test('Responses endpoint rewrites apply_patch path/content calls to patch comman
   }
 });
 
+test('Responses endpoint emits Codex custom apply_patch calls for freeform tools', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      assert.ok(requestBody.messages[0].content.includes('"type": "custom"'));
+      assert.ok(requestBody.messages[0].content.includes('"name": "apply_patch"'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "<tool_call>{\\"name\\":\\"apply_patch\\",\\"arguments\\":{\\"patch\\":\\"*** Begin Patch\\\\n*** Add File: hello.txt\\\\n+hello\\\\n*** End Patch\\\\n\\"}}</tool_call>"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'Patch a file',
+        tools: [{
+          type: 'custom',
+          name: 'apply_patch',
+          description: 'Use the apply_patch tool to edit files.',
+          format: {
+            type: 'grammar',
+            syntax: 'lark',
+            definition: 'start: begin_patch hunk+ end_patch'
+          }
+        }]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.output[0].type, 'custom_tool_call');
+    assert.strictEqual(body.output[0].name, 'apply_patch');
+    assert.match(body.output[0].input, /Add File: hello\.txt/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Responses endpoint maps Codex custom tool outputs back into chat history', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: any, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/v2/chat/completions')) {
+      const rawBody = init?.body || (input instanceof Request ? await input.clone().text() : '{}');
+      const requestBody = JSON.parse(rawBody as string);
+      assert.ok(requestBody.messages[0].content.includes('<tool_call>'));
+      assert.ok(requestBody.messages[0].content.includes('Tool Response (apply_patch): ok'));
+
+      const stream = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"phase": "answer", "content": "Done"}}]}\n\n'));
+          c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          c.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const res = await app.fetch(new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Patch a file' }] },
+          {
+            type: 'custom_tool_call',
+            call_id: 'call_patch',
+            name: 'apply_patch',
+            input: '*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n'
+          },
+          {
+            type: 'custom_tool_call_output',
+            call_id: 'call_patch',
+            name: 'apply_patch',
+            output: 'ok'
+          }
+        ],
+        tools: [{
+          type: 'custom',
+          name: 'apply_patch',
+          description: 'Use the apply_patch tool to edit files.',
+          format: {
+            type: 'grammar',
+            syntax: 'lark',
+            definition: 'start: begin_patch hunk+ end_patch'
+          }
+        }]
+      })
+    }));
+
+    assert.strictEqual(res.status, 200);
+    const body = await res.json();
+    assert.strictEqual(body.output[0].type, 'message');
+    assert.strictEqual(body.output_text, 'Done');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('Responses endpoint injects default Codex tools when none are provided', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input: any, init?: RequestInit) => {
