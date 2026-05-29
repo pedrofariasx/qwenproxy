@@ -162,12 +162,14 @@ export class StreamingToolParser {
   private emittedToolCallCount = 0;
   private pendingLeadIn = '';
   private tools: FunctionToolDefinition[] = [];
+  private allowedToolNames = new Set<string>();
 
   /**
    * @param tools - Optional array of tool definitions for name inference
    */
   constructor(tools: FunctionToolDefinition[] = []) {
     this.tools = tools;
+    this.refreshAllowedToolNames();
   }
 
   /**
@@ -175,6 +177,7 @@ export class StreamingToolParser {
    */
   setTools(tools: FunctionToolDefinition[]): void {
     this.tools = tools;
+    this.refreshAllowedToolNames();
   }
 
   feed(chunk: string): ParserResult {
@@ -201,10 +204,7 @@ export class StreamingToolParser {
           const flushIndex = partialIdx === -1 ? this.buffer.length : partialIdx;
           if (flushIndex > 0) {
             const textToEmit = this.buffer.substring(0, flushIndex);
-            // Only emit as content if no tool calls have been emitted yet
-            if (this.emittedToolCallCount === 0) {
-              result.text += textToEmit;
-            }
+            result.text += textToEmit;
             this.buffer = this.buffer.substring(flushIndex);
           }
           break;
@@ -244,8 +244,8 @@ export class StreamingToolParser {
         } else {
           // Recovery failed. Restore lead-in text if no tools were emitted.
           logger.warn('[parser] Dropping unrecoverable unclosed tool call at end of stream');
-          if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
-            result.text += this.pendingLeadIn;
+          if (this.emittedToolCallCount === 0) {
+            result.text += this.pendingLeadIn + this.currentOpenTag + this.buffer;
           }
           this.pendingLeadIn = '';
         }
@@ -291,8 +291,8 @@ export class StreamingToolParser {
     if (!t) {
       // Empty tool call - malformed. Restore lead-in if possible.
       logger.warn('[parser] Dropping empty tool call block');
-      if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
-        result.text += this.pendingLeadIn;
+      if (this.emittedToolCallCount === 0) {
+        result.text += this.pendingLeadIn + this.currentOpenTag + TOOL_END;
       }
       this.pendingLeadIn = '';
       return;
@@ -301,11 +301,17 @@ export class StreamingToolParser {
     // 1) Try Hermes-style XML <parameter> format first
     const xmlParsed = parseXmlParameterToolCall(t, this.currentOpenTag, this.tools);
     if (xmlParsed) {
-      result.toolCalls.push({
+      const normalized = this.normalizeParsedToolCall({
         id: `call_${uuidv4()}`,
         name: xmlParsed.name,
         arguments: xmlParsed.arguments,
       });
+      if (normalized) {
+        if (this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
+          result.text += this.pendingLeadIn;
+        }
+        result.toolCalls.push(normalized);
+      }
       this.emittedToolCallCount++;
       this.pendingLeadIn = '';
       return;
@@ -318,6 +324,9 @@ export class StreamingToolParser {
         for (const item of arr) {
           const tc = this.parseToolCall(item);
           if (tc) {
+            if (this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
+              result.text += this.pendingLeadIn;
+            }
             result.toolCalls.push(tc);
             this.emittedToolCallCount++;
           }
@@ -339,8 +348,12 @@ export class StreamingToolParser {
             const attrName = extractToolName(this.currentOpenTag, t);
             if (attrName) tc.name = attrName;
           }
-          if (tc.name) {
-            result.toolCalls.push(tc);
+          const normalized = this.normalizeParsedToolCall(tc);
+          if (normalized) {
+            if (this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
+              result.text += this.pendingLeadIn;
+            }
+            result.toolCalls.push(normalized);
             this.emittedToolCallCount++;
           }
         }
@@ -358,8 +371,8 @@ export class StreamingToolParser {
       hasArgs: t.includes('"arguments"') || t.includes('"args"') || t.includes('"parameters"') || t.includes('"input"'),
       first100Chars: t.substring(0, 100)
     });
-    if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
-      result.text += this.pendingLeadIn;
+    if (this.emittedToolCallCount === 0) {
+      result.text += this.pendingLeadIn + this.currentOpenTag + content + TOOL_END;
     }
     this.pendingLeadIn = '';
   }
@@ -368,11 +381,12 @@ export class StreamingToolParser {
     // Try full parse first
     const xmlParsed = parseXmlParameterToolCall(block, this.currentOpenTag, this.tools);
     if (xmlParsed) {
-      return {
+      const normalized = this.normalizeParsedToolCall({
         id: `call_${uuidv4()}`,
         name: xmlParsed.name,
         arguments: xmlParsed.arguments,
-      };
+      });
+      if (normalized) return normalized;
     }
 
     // Try recoverable (unclosed parameters)
@@ -391,7 +405,8 @@ export class StreamingToolParser {
       const first = jsonParsed[0];
       const attrName = extractToolName(this.currentOpenTag, block);
       if (attrName && !first.name) first.name = attrName;
-      if (first.name) return first;
+      const normalized = this.normalizeParsedToolCall(first);
+      if (normalized) return normalized;
     }
 
     return null;
@@ -441,10 +456,78 @@ export class StreamingToolParser {
     }
     if (typeof args !== 'object' || args === null) args = {};
 
-    return {
+    return this.normalizeParsedToolCall({
       id: parsed.id || parsed.tool_call_id || `call_${uuidv4()}`,
       name,
       arguments: args,
-    };
+    });
+  }
+
+  private refreshAllowedToolNames(): void {
+    this.allowedToolNames = new Set(
+      this.tools
+        .map((tool: any) => tool?.type === 'function' ? tool.function?.name : tool?.function?.name)
+        .filter((name: unknown): name is string => typeof name === 'string' && name.length > 0)
+    );
+  }
+
+  private isAllowedToolName(name: string): boolean {
+    if (!this.allowedToolNames.size) return true;
+    return this.allowedToolNames.has(name);
+  }
+
+  private isPlainObject(value: unknown): value is Record<string, unknown> {
+    if (!value || typeof value !== 'object') return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+  }
+
+  private sanitizeArguments(value: unknown, depth = 0): Record<string, unknown> {
+    if (!this.isPlainObject(value) || depth > 6) return {};
+
+    const out: Record<string, unknown> = {};
+    let count = 0;
+    for (const [key, child] of Object.entries(value)) {
+      if (count >= 100) break;
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+
+      if (child && typeof child === 'object') {
+        if (Array.isArray(child)) {
+          out[key] = child.slice(0, 100).map((item) => {
+            if (this.isPlainObject(item)) return this.sanitizeArguments(item, depth + 1);
+            if (Array.isArray(item)) return item.slice(0, 100);
+            return item;
+          });
+        } else if (this.isPlainObject(child)) {
+          out[key] = this.sanitizeArguments(child, depth + 1);
+        } else {
+          out[key] = JSON.parse(JSON.stringify(child));
+        }
+      } else {
+        out[key] = child;
+      }
+      count++;
+    }
+
+    return out;
+  }
+
+  private normalizeParsedToolCall(call: ParsedToolCall | null): ParsedToolCall | null {
+    if (!call || typeof call.name !== 'string' || !call.name.trim()) return null;
+
+    const name = call.name.trim();
+    if (!this.isAllowedToolName(name)) {
+      const inferred = inferToolNameFromParameters(call.arguments, this.tools);
+      if (!inferred || !this.isAllowedToolName(inferred)) {
+        logger.warn('[parser] Dropping tool call with unknown tool name', { name });
+        return null;
+      }
+      call.name = inferred;
+    } else {
+      call.name = name;
+    }
+
+    call.arguments = this.sanitizeArguments(call.arguments);
+    return call;
   }
 }

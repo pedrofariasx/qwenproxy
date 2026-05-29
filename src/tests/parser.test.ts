@@ -48,7 +48,7 @@ test('StreamingToolParser: flush partial content', () => {
   const parser3 = new StreamingToolParser();
   parser3.feed('Invalid <tool_call>NOT_JSON');
   const flushed2 = parser3.flush();
-  assert.strictEqual(flushed2.text, '<tool_call>NOT_JSON</tool_call>');
+  assert.strictEqual(flushed2.text, 'Invalid <tool_call>NOT_JSON');
 });
 
 test('StreamingToolParser: robust parsing of malformed JSON', () => {
@@ -71,6 +71,16 @@ test('StreamingToolParser: preserves tags in non-tool text', () => {
   const res2 = parser.feed('Real: <tool_call>{"name":"r"}</tool_call>');
   assert.strictEqual(res2.toolCalls.length, 1);
   assert.strictEqual(res2.toolCalls[0].name, 'r');
+});
+
+test('StreamingToolParser: preserves literal <tool_call> in plain text', () => {
+  const parser = new StreamingToolParser();
+
+  parser.feed('frase de teste <tool_call> continua');
+  const flushed = parser.flush();
+
+  assert.strictEqual(flushed.toolCalls.length, 0);
+  assert.strictEqual(flushed.text, 'frase de teste <tool_call> continua');
 });
 
 test('StreamingToolParser: handles multiple tool calls in array format', () => {

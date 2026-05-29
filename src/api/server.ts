@@ -5,12 +5,18 @@ import { metrics } from '../core/metrics.js'
 import { MemoryCache } from '../cache/memory-cache.js'
 import { Watchdog } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
-import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
+import { chatCompletions } from '../routes/chat.js'
+import { chatResponses, responsesStop } from '../routes/responses.js'
 
 const app = new Hono()
 app.route('', modelsApp)
 app.post('/v1/chat/completions', chatCompletions)
-app.post('/v1/chat/completions/stop', chatCompletionsStop)
+app.post('/v1/chat/responses', chatResponses)
+app.post('/v1/responses', chatResponses)
+app.post('/v1/chat/responses/stop', responsesStop)
+app.post('/v1/responses/stop', responsesStop)
+app.post('/v1/chat/responses/:response_id/cancel', responsesStop)
+app.post('/v1/responses/:response_id/cancel', responsesStop)
 
 let cache: MemoryCache
 let watchdog: Watchdog
