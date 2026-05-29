@@ -30,6 +30,19 @@ interface AccountHeaderCache {
 
 const accountHeaderCaches = new Map<string, AccountHeaderCache>();
 
+function getFallbackAccountId(): string | null {
+  const first = accountPages.keys().next();
+  return first.done ? null : first.value;
+}
+
+function resolvePage(accountId?: string): Page | null {
+  if (accountId) {
+    return accountPages.get(accountId) || null;
+  }
+  const fallbackAccountId = getFallbackAccountId();
+  return activePage || (fallbackAccountId ? accountPages.get(fallbackAccountId) ?? null : null);
+}
+
 function getAccountHeaderCache(accountId: string): AccountHeaderCache {
   let cache = accountHeaderCaches.get(accountId);
   if (!cache) {
@@ -79,7 +92,7 @@ const uiMutex = new Mutex();
 
 export async function getCookies(accountId?: string): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
-  const page = accountId ? accountPages.get(accountId) : activePage;
+  const page = resolvePage(accountId);
   if (!page) return '';
   const cookies = await page.context().cookies();
   return cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -88,13 +101,13 @@ export async function getCookies(accountId?: string): Promise<string> {
 export async function getBasicHeaders(accountId?: string): Promise<{ cookie: string, userAgent: string, bxV: string }> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return { cookie: 'token=mock', userAgent: 'mock', bxV: '2.5.36' };
   
-  let page = accountId ? accountPages.get(accountId) : activePage;
+  let page = resolvePage(accountId);
   if (accountId && !page) {
     const { getAccountCredentials } = await import('../core/accounts.ts');
     const creds = getAccountCredentials(accountId);
     if (creds) {
       await initPlaywrightForAccount(creds, config.browser.headless);
-      page = accountPages.get(accountId);
+      page = accountPages.get(accountId) ?? null;
     }
   }
   
@@ -370,7 +383,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
     }
   }
 
-  const page = accountId ? accountPages.get(accountId) : activePage;
+  const page = resolvePage(accountId);
   if (!page) {
     throw new Error(`Playwright not initialized for account: ${cacheKey}`);
   }
