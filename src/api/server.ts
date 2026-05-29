@@ -18,6 +18,27 @@ app.post('/v1/responses/stop', responsesStop)
 app.post('/v1/chat/responses/:response_id/cancel', responsesStop)
 app.post('/v1/responses/:response_id/cancel', responsesStop)
 
+const routeManifest = [
+  'GET /health',
+  'GET /metrics',
+  'GET /v1/models',
+  'GET /v1/models/:model',
+  'POST /v1/chat/completions',
+  'POST /v1/chat/responses',
+  'POST /v1/responses',
+  'POST /v1/chat/responses/stop',
+  'POST /v1/responses/stop',
+  'POST /v1/chat/responses/:response_id/cancel',
+  'POST /v1/responses/:response_id/cancel',
+]
+
+function logRouteManifest(): void {
+  console.log('[Server] Public routes:')
+  for (const route of routeManifest) {
+    console.log(`  - ${route}`)
+  }
+}
+
 let cache: MemoryCache
 let watchdog: Watchdog
 let server: any
@@ -73,20 +94,55 @@ app.notFound((c) => c.json({ error: 'Not found' }, 404))
 export async function startServer(): Promise<void> {
   cache = new MemoryCache()
   await cache.connect()
+  logRouteManifest()
 
   const { loadAccounts } = await import('../core/accounts.ts')
   const accounts = loadAccounts()
 
   if (accounts.length > 0) {
     console.log(`[Server] Pre-warming ${accounts.length} configured account(s)...`)
-    const { initPlaywrightForAccount } = await import('../services/playwright.ts')
-    for (const account of accounts) {
+    const { initPlaywrightForAccount, getQwenHeaders } = await import('../services/playwright.ts')
+    const warmAccountRoutes = async (account: { id: string; email: string }) => {
+      const startedAt = Date.now()
+      const warmTimeoutMs = 90000
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Timeout warming routes for ${account.email || account.id}`))
+        }, warmTimeoutMs)
+      })
+
       try {
-        await initPlaywrightForAccount(account, config.browser.headless)
-      } catch (err: any) {
-        console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
+        await Promise.race([
+          getQwenHeaders(true, account.id),
+          timeout,
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
       }
+
+      console.log(`[Server] Routes warmed for ${account.email} in ${Date.now() - startedAt}ms`)
     }
+
+    void Promise.allSettled(
+      accounts.map(async (account) => {
+        const startedAt = Date.now()
+        try {
+          await initPlaywrightForAccount(account, config.browser.headless)
+          console.log(`[Server] Account ${account.email} ready in ${Date.now() - startedAt}ms`)
+          await warmAccountRoutes(account)
+        } catch (err: any) {
+          console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
+        }
+      })
+    ).then((results) => {
+      const failed = results.filter((result) => result.status === 'rejected').length
+      if (failed > 0) {
+        console.warn(`[Server] Pre-warm completed with ${failed} failure(s)`)
+      } else {
+        console.log('[Server] Pre-warm completed')
+      }
+    })
   } else {
     const { initPlaywright } = await import('../services/playwright.ts')
     await initPlaywright(config.browser.headless)
