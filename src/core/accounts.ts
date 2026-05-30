@@ -1,5 +1,5 @@
 import crypto from 'crypto'
-import { getDatabase } from './database.ts'
+import { getDatabase, encryptPassword, decryptPassword } from './database.ts'
 
 export interface QwenAccount {
   id: string
@@ -9,8 +9,11 @@ export interface QwenAccount {
 
 export function loadAccounts(): QwenAccount[] {
   const db = getDatabase()
-  const rows = db.prepare('SELECT id, email, password FROM accounts ORDER BY created_at ASC').all()
-  return rows as QwenAccount[]
+  const rows = db.prepare('SELECT id, email, password FROM accounts ORDER BY created_at ASC').all() as QwenAccount[]
+  for (const row of rows) {
+    row.password = decryptPassword(row.password)
+  }
+  return rows
 }
 
 export function addAccount(email: string, password: string, id?: string): QwenAccount {
@@ -25,6 +28,8 @@ export function addAccount(email: string, password: string, id?: string): QwenAc
     throw new Error(`Account with email ${email} already exists`)
   }
 
+  const encryptedPassword = encryptPassword(password)
+
   const newAccount: QwenAccount = {
     id: id || crypto.randomUUID(),
     email: email.trim(),
@@ -34,7 +39,7 @@ export function addAccount(email: string, password: string, id?: string): QwenAc
   db.prepare('INSERT INTO accounts (id, email, password) VALUES (?, ?, ?)').run(
     newAccount.id,
     newAccount.email,
-    newAccount.password,
+    encryptedPassword,
   )
 
   return newAccount
@@ -52,6 +57,9 @@ export function listAccounts(): QwenAccount[] {
 
 export function getAccountCredentials(id: string): QwenAccount | undefined {
   const db = getDatabase()
-  const row = db.prepare('SELECT id, email, password FROM accounts WHERE id = ?').get(id)
-  return row as QwenAccount | undefined
+  const row = db.prepare('SELECT id, email, password FROM accounts WHERE id = ?').get(id) as QwenAccount | undefined
+  if (row) {
+    row.password = decryptPassword(row.password)
+  }
+  return row
 }

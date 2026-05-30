@@ -3,6 +3,9 @@ import { z } from 'zod'
 const envSchema = z.object({
   PORT: z.string().default('3000'),
   HOST: z.string().default('0.0.0.0'),
+  SSL_ENABLED: z.string().default('false'),
+  SSL_CERT_PATH: z.string().default(''),
+  SSL_KEY_PATH: z.string().default(''),
   HEADLESS: z.string().default('true'),
   USER_DATA_DIR: z.string().default('./qwen_profile'),
   USER_AGENT: z.string().default('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
@@ -25,6 +28,7 @@ const envSchema = z.object({
   QWEN_API_KEY: z.string().default(''),
   QWEN_EMAIL: z.string().default(''),
   QWEN_PASSWORD: z.string().default(''),
+  QWEN_ENCRYPTION_KEY: z.string().default(''),
   API_KEY: z.string().default(''),
   SHUTDOWN_TIMEOUT_MS: z.string().default('10000'),
   CACHE_MAX_ENTRIES: z.string().default('10000'),
@@ -35,6 +39,9 @@ const envSchema = z.object({
   EXECUTOR_ENABLED: z.string().default('false'),
   EXECUTOR_MAX_TURNS: z.string().default('10'),
   EXECUTOR_TIMEOUT_MS: z.string().default('120000'),
+  TOOL_TIMEOUT_MS: z.string().default('30000'),
+  TOOL_MAX_ARGUMENTS_BYTES: z.string().default('1048576'),
+  TOOL_MAX_RESULT_BYTES: z.string().default('524288'),
   LOG_FORMAT: z.enum(['text', 'json']).default('text'),
 })
 
@@ -44,6 +51,11 @@ export const config = {
   server: {
     port: parseInt(env.PORT),
     host: env.HOST,
+  },
+  ssl: {
+    enabled: env.SSL_ENABLED === 'true',
+    certPath: env.SSL_CERT_PATH,
+    keyPath: env.SSL_KEY_PATH,
   },
   browser: {
     headless: env.HEADLESS !== 'false',
@@ -109,6 +121,9 @@ export const config = {
     enabled: env.EXECUTOR_ENABLED === 'true',
     maxTurns: parseInt(env.EXECUTOR_MAX_TURNS),
     timeoutMs: parseInt(env.EXECUTOR_TIMEOUT_MS),
+    toolTimeoutMs: parseInt(env.TOOL_TIMEOUT_MS),
+    maxArgumentBytes: parseInt(env.TOOL_MAX_ARGUMENTS_BYTES),
+    maxResultBytes: parseInt(env.TOOL_MAX_RESULT_BYTES),
   },
   qwen: {
     baseUrl: env.QWEN_BASE_URL,
@@ -116,6 +131,7 @@ export const config = {
     apiKey: env.QWEN_API_KEY,
     email: env.QWEN_EMAIL,
     password: env.QWEN_PASSWORD,
+    encryptionKey: env.QWEN_ENCRYPTION_KEY,
   },
   logFormat: env.LOG_FORMAT,
 }

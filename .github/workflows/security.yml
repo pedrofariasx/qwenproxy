@@ -1,0 +1,25 @@
+name: Security Audit
+
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday 6am
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Run npm audit
+        run: npm audit --audit-level=high || true
+        continue-on-error: true
+      - name: Run npm audit JSON
+        run: npm audit --json || true
+        continue-on-error: true

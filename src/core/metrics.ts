@@ -157,13 +157,41 @@ export class Metrics extends EventEmitter {
       output += `# HELP ${metric.name} ${metric.help}\n`
       output += `# TYPE ${metric.name} ${metric.type}\n`
 
-      for (const [key, point] of metric.values) {
-        const labelsStr = point.labels
-          ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')}}`
-          : ''
-        output += `${metric.name}${labelsStr} ${point.value} ${point.timestamp}\n`
+      if (metric.type === 'histogram') {
+        for (const [, point] of metric.values) {
+          const histData = point.value as any
+          const labelsPrefix = point.labels
+            ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')},`
+            : '{'
+
+          const buckets: number[] = [...(metric.histogramBuckets || [])].sort((a, b) => a - b)
+          for (const bucket of buckets) {
+            const count = histData.buckets?.get(bucket) || 0
+            output += `${metric.name}_bucket${labelsPrefix}le="${bucket}"} ${count}\n`
+          }
+          const totalCount = histData.count || 0
+          output += `${metric.name}_bucket${labelsPrefix}le="+Inf"} ${totalCount}\n`
+          output += `${metric.name}_sum${labelsPrefix === '{' ? '' : labelsPrefix.slice(0, -1)}} ${histData.sum || 0}\n`
+          output += `${metric.name}_count${labelsPrefix === '{' ? '' : labelsPrefix.slice(0, -1)}} ${totalCount}\n`
+        }
+      } else {
+        for (const [, point] of metric.values) {
+          const labelsStr = point.labels
+            ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')}}`
+            : ''
+          output += `${metric.name}${labelsStr} ${point.value} ${point.timestamp}\n`
+        }
       }
     }
+
+    // Standard Prometheus liveness and build info metrics
+    output += '# HELP up Liveness check\n'
+    output += '# TYPE up gauge\n'
+    output += 'up 1\n'
+    output += '# HELP build_info Build information\n'
+    output += '# TYPE build_info gauge\n'
+    output += 'build_info{version="1.0.0",commit="unknown"} 1\n'
+
     return output
   }
 

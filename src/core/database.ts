@@ -1,9 +1,47 @@
+import crypto from 'crypto'
 import Database from 'better-sqlite3'
 import path from 'path'
 import fs from 'fs'
 import { Logger } from './logger.js'
+import { config } from './config.js'
 
 const logger = new Logger('info', 'Database')
+
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm'
+const ENCRYPTION_KEY_LENGTH = 32
+const IV_LENGTH = 16
+
+function getEncryptionKey(): Buffer | null {
+  const passphrase = config.qwen.encryptionKey
+  if (!passphrase) return null
+  return crypto.scryptSync(passphrase, 'qwenproxy-salt', ENCRYPTION_KEY_LENGTH)
+}
+
+export function encryptPassword(password: string): string {
+  const key = getEncryptionKey()
+  if (!key) return password
+  const iv = crypto.randomBytes(IV_LENGTH)
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv)
+  let encrypted = cipher.update(password, 'utf8', 'hex')
+  encrypted += cipher.final('hex')
+  const tag = cipher.getAuthTag()
+  return iv.toString('hex') + ':' + tag.toString('hex') + ':' + encrypted
+}
+
+export function decryptPassword(encrypted: string): string {
+  const key = getEncryptionKey()
+  if (!key) return encrypted
+  const parts = encrypted.split(':')
+  if (parts.length !== 3) return encrypted
+  const iv = Buffer.from(parts[0], 'hex')
+  const tag = Buffer.from(parts[1], 'hex')
+  const ciphertext = parts[2]
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv)
+  decipher.setAuthTag(tag)
+  let decrypted = decipher.update(ciphertext, 'hex', 'utf8')
+  decrypted += decipher.final('utf8')
+  return decrypted
+}
 
 const DATA_DIR = path.resolve('data')
 const DB_PATH = path.join(DATA_DIR, 'qwenproxy.db')
@@ -29,6 +67,17 @@ export function getDatabase(): Database.Database {
 
   runMigrations(db)
   migrateFromJson(db)
+
+  // Fail fast in production mode if encryption key is not set
+  if (process.env.NODE_ENV === 'production' && !config.qwen.encryptionKey) {
+    throw new Error(
+      'QWEN_ENCRYPTION_KEY is required when NODE_ENV=production. ' +
+      'Set the environment variable to a secure passphrase for password encryption.'
+    )
+  }
+
+  // Migrate plaintext passwords to encrypted on startup
+  migratePlaintextPasswords(db)
 
   return db
 }
@@ -85,6 +134,36 @@ function migrateFromJson(db: Database.Database): void {
   } catch (err: any) {
     logger.error('[Database] Failed to migrate accounts.json: ' + (err as Error).message)
   }
+}
+
+function migratePlaintextPasswords(db: Database.Database): void {
+  if (!config.qwen.encryptionKey) {
+    logger.warn('QWEN_ENCRYPTION_KEY not set — passwords are stored in plaintext')
+    return
+  }
+
+  // Detect plaintext passwords (the iv:tag:ciphertext format has two colons)
+  const sample = db
+    .prepare('SELECT password FROM accounts WHERE password != "" AND password NOT LIKE "%:%:%" LIMIT 1')
+    .get() as { password: string } | undefined
+
+  if (!sample) return // Already encrypted or no passwords present
+
+  logger.info('Migrating plaintext passwords to encrypted...')
+  const rows = db
+    .prepare('SELECT id, password FROM accounts WHERE password != ""')
+    .all() as Array<{ id: string; password: string }>
+
+  const update = db.prepare('UPDATE accounts SET password = ? WHERE id = ?')
+
+  const migration = db.transaction(() => {
+    for (const row of rows) {
+      update.run(encryptPassword(row.password), row.id)
+    }
+  })
+
+  migration()
+  logger.info(`Encrypted ${rows.length} password(s)`)
 }
 
 export function closeDatabase(): void {

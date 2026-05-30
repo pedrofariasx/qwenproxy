@@ -46,7 +46,8 @@ export interface ToolRegistration {
  */
 export type ToolHandler<TArgs = Record<string, unknown>, TResult = unknown> = (
   args: TArgs,
-  context: ToolContext
+  context: ToolContext,
+  signal?: AbortSignal
 ) => Promise<TResult>;
 
 /**

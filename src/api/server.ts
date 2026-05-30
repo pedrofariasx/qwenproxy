@@ -1,6 +1,8 @@
 import crypto from 'node:crypto'
+import https from 'node:https'
+import fs from 'node:fs'
 import { Hono } from 'hono'
-import { serve } from '@hono/node-server'
+import { serve, getRequestListener } from '@hono/node-server'
 import { config } from '../core/config.js'
 import { metrics } from '../core/metrics.js'
 import { MemoryCache } from '../cache/memory-cache.js'
@@ -11,6 +13,13 @@ import { sanitizeError } from '../utils/error-sanitization.js'
 import { Logger } from '../core/logger.js'
 import { RateLimiter } from '../core/rate-limiter.js'
 
+declare module 'hono' {
+  interface ContextVariableMap {
+    requestId: string
+    requestLogger: Logger
+  }
+}
+
 const logger = new Logger('info', 'Server')
 
 const app = new Hono()
@@ -18,12 +27,37 @@ const app = new Hono()
 /** Server start timestamp used by /health to compute uptime. */
 const startTime = Date.now()
 
-/* Security headers middleware — registered first so they wrap all routes. */
+/* Request ID tracking middleware — registered first so every request has an ID. */
+app.use('*', async (c, next) => {
+  let requestId = c.req.header('X-Request-Id')
+
+  if (requestId) {
+    // Validate: alphanumeric, hyphens, underscores, dots only, max 64 chars
+    const isValid = /^[a-zA-Z0-9\-_.]{1,64}$/.test(requestId)
+    if (!isValid) {
+      requestId = crypto.randomUUID()
+    }
+  } else {
+    requestId = crypto.randomUUID()
+  }
+
+  c.set('requestId', requestId)
+  c.header('x-request-id', requestId)
+
+  const requestLogger = logger.withRequestId(requestId)
+  c.set('requestLogger', requestLogger)
+
+  await next()
+})
+
+/* Security headers middleware — registered so they wrap all authenticated routes. */
 app.use('*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff')
   c.header('X-Frame-Options', 'DENY')
   c.header('X-XSS-Protection', '1; mode=block')
-  c.header('Strict-Transport-Security', 'max-age=31536000')
+  if (config.ssl.enabled) {
+    c.header('Strict-Transport-Security', 'max-age=31536000')
+  }
   if (c.req.path.startsWith('/v1/')) {
     c.header('Cache-Control', 'no-store')
   }
@@ -132,23 +166,31 @@ app.get('/health', async (c) => {
 })
 
 // === ROTAS PROTEGIDAS POR API KEY (registre abaixo desta linha) ===
-app.use('/v1/*', async (c, next) => {
+
+/** Verify the request carries a valid API key. Returns null on success or a 401 Response on failure. */
+function verifyApiKey(c: any): Response | null {
   const apiKey = process.env.API_KEY || config.apiKey
-  if (apiKey) {
-    const auth = c.req.header('Authorization')
-    if (!auth?.startsWith('Bearer ')) {
-      return c.json({ error: 'Missing or invalid Authorization header' }, 401)
-    }
-    const token = auth.slice(7)
-    // Timing-safe comparison — first guard against length mismatch to avoid
-    // crypto.timingSafeEqual throwing on unequal buffers.
-    if (Buffer.byteLength(token, 'utf-8') !== Buffer.byteLength(apiKey, 'utf-8')) {
-      return c.json({ error: 'Invalid API key' }, 401)
-    }
-    if (!crypto.timingSafeEqual(Buffer.from(token, 'utf-8'), Buffer.from(apiKey, 'utf-8'))) {
-      return c.json({ error: 'Invalid API key' }, 401)
-    }
-  } else {
+  if (!apiKey) return null
+  const auth = c.req.header('Authorization')
+  if (!auth?.startsWith('Bearer ')) {
+    return c.json({ error: 'Missing or invalid Authorization header' }, 401)
+  }
+  const token = auth.slice(7)
+  // Timing-safe comparison — first guard against length mismatch to avoid
+  // crypto.timingSafeEqual throwing on unequal buffers.
+  if (Buffer.byteLength(token, 'utf-8') !== Buffer.byteLength(apiKey, 'utf-8')) {
+    return c.json({ error: 'Invalid API key' }, 401)
+  }
+  if (!crypto.timingSafeEqual(Buffer.from(token, 'utf-8'), Buffer.from(apiKey, 'utf-8'))) {
+    return c.json({ error: 'Invalid API key' }, 401)
+  }
+  return null
+}
+
+app.use('/v1/*', async (c, next) => {
+  const result = verifyApiKey(c)
+  if (result !== null) return result
+  if (!(process.env.API_KEY || config.apiKey)) {
     logger.warn('API_KEY is not set — all requests will be accepted without authentication')
   }
   await next()
@@ -157,6 +199,13 @@ app.use('/v1/*', async (c, next) => {
 app.route('', modelsApp)
 app.post('/v1/chat/completions', chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
+
+/* Auth middleware for /metrics — keeps /health accessible without credentials. */
+app.use('/metrics', async (c, next) => {
+  const result = verifyApiKey(c)
+  if (result !== null) return result
+  await next()
+})
 
 app.get('/metrics', (c) => {
   return c.text(metrics.formatPrometheus(), {
@@ -200,13 +249,25 @@ export async function startServer(): Promise<void> {
 
   metrics.startCollection()
 
-  server = serve({
-    fetch: app.fetch,
-    port: config.server.port,
-    hostname: config.server.host,
-  }, (info) => {
-    logger.info(`Server listening on http://${info.address}:${info.port}`)
-  })
+  if (config.ssl.enabled) {
+    const sslOptions: https.ServerOptions = {
+      key: fs.readFileSync(config.ssl.keyPath, 'utf-8'),
+      cert: fs.readFileSync(config.ssl.certPath, 'utf-8'),
+    }
+    const requestListener = getRequestListener(app.fetch)
+    server = https.createServer(sslOptions, requestListener)
+    server.listen(config.server.port, config.server.host, () => {
+      logger.info(`Server listening on https://${config.server.host}:${config.server.port}`)
+    })
+  } else {
+    server = serve({
+      fetch: app.fetch,
+      port: config.server.port,
+      hostname: config.server.host,
+    }, (info) => {
+      logger.info(`Server listening on http://${info.address}:${info.port}`)
+    })
+  }
 
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down gracefully...`)

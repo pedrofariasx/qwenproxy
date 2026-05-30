@@ -11,6 +11,7 @@ import { SchemaValidationError } from './schema';
 import { registry } from './registry';
 import { robustParseJSON } from '../utils/json.ts';
 import { Logger } from '../core/logger.js';
+import { config } from '../core/config.js';
 
 const logger = new Logger('info', 'Executor')
 
@@ -111,11 +112,30 @@ export async function executeToolCalls(
           };
         }
 
+        // Check argument size before executing
+        const argsJson = JSON.stringify(tc.arguments);
+        if (Buffer.byteLength(argsJson, 'utf-8') > config.executor.maxArgumentBytes) {
+          return {
+            toolCallId: tc.id,
+            name: tc.name,
+            result: JSON.stringify({ error: `Arguments exceed maximum size of ${config.executor.maxArgumentBytes} bytes` }),
+            isError: true,
+          };
+        }
+
         const result = await registry.execute(tc.name, tc.arguments, context);
+
+        // Truncate oversized results
+        let finalResult = result;
+        if (Buffer.byteLength(result, 'utf-8') > config.executor.maxResultBytes) {
+          const truncated = result.substring(0, config.executor.maxResultBytes);
+          finalResult = truncated + '...[truncated]';
+        }
+
         return {
           toolCallId: tc.id,
           name: tc.name,
-          result,
+          result: finalResult,
           isError: false,
         };
       } catch (err: unknown) {

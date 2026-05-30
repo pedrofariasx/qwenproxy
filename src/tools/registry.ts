@@ -13,6 +13,7 @@ import type {
 } from './types';
 import { validateAgainstSchema, SchemaValidationError } from './schema';
 import { metrics } from '../core/metrics.js';
+import { config } from '../core/config.js';
 
 /**
  * Central tool registry. Tools are registered at startup and looked up by name
@@ -113,7 +114,8 @@ export class ToolRegistry {
   async execute(
     toolName: string,
     rawArgs: Record<string, unknown>,
-    context: ToolContext
+    context: ToolContext,
+    signal?: AbortSignal
   ): Promise<string> {
     const registration = this.tools.get(toolName);
     if (!registration) {
@@ -129,7 +131,13 @@ export class ToolRegistry {
       `$.${toolName}`
     ) as Record<string, unknown>;
 
-    const result = await registration.handler(validatedArgs, context);
+    // Combine optional caller signal with tool-level timeout
+    const toolTimeoutSignal = AbortSignal.timeout(config.executor.toolTimeoutMs);
+    const effectiveSignal = signal
+      ? AbortSignal.any([signal, toolTimeoutSignal])
+      : toolTimeoutSignal;
+
+    const result = await registration.handler(validatedArgs, context, effectiveSignal);
 
     const durationMs = performance.now() - startTime;
 

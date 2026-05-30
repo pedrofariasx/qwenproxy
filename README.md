@@ -271,6 +271,20 @@ qwenproxy/
 
 ---
 
+## Seguranca
+
+Auditorias de dependencias sao executadas automaticamente via GitHub Actions em toda pull request que altere `package.json` ou `package-lock.json`, e semanalmente as segundas-feiras as 06:00.
+
+Para executar a auditoria manualmente:
+
+```bash
+npm run audit
+```
+
+Isso executa `npm audit` com nivel minimo `high`, reportando vulnerabilidades criticas e altas.
+
+---
+
 ## Disclaimer
 
 > Este projeto é fornecido estritamente para fins educacionais e de pesquisa.

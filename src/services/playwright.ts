@@ -17,6 +17,12 @@ import { Logger } from '../core/logger.js';
 
 const logger = new Logger('info', 'Playwright')
 
+let captchaDetected = false;
+
+export function isCaptchaDetected(): boolean {
+  return captchaDetected;
+}
+
 let testOptions = {
   mockMode: process.env.TEST_MOCK_PLAYWRIGHT === 'true',
   mockSessionId: process.env.TEST_SESSION_ID,
@@ -63,6 +69,47 @@ const HEADERS_TTL = 30 * 60 * 1000;
 const REFRESH_THRESHOLD = 0.7;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Gaussian random number using Box-Muller transform.
+ */
+function gaussianRandom(mean: number, stdDev: number): number {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return mean + stdDev * Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+/**
+ * Type text into a field with human-like per-character delays (100-300ms, Gaussian variation).
+ */
+async function humanLikeType(page: Page, selector: string, text: string): Promise<void> {
+  await page.fill(selector, '');
+  await page.focus(selector);
+  for (const char of text) {
+    const delay = Math.max(100, Math.min(300, Math.round(gaussianRandom(175, 60))));
+    await page.keyboard.type(char, { delay });
+  }
+}
+
+/**
+ * Click an element after moving the mouse to a random near-center position,
+ * simulating human movement.
+ */
+async function humanLikeClick(page: Page, selector: string): Promise<void> {
+  const box = await page.locator(selector).boundingBox();
+  if (box) {
+    const offsetX = (Math.random() - 0.5) * box.width * 0.6;
+    const offsetY = (Math.random() - 0.5) * box.height * 0.6;
+    await page.mouse.move(
+      box.x + box.width / 2 + offsetX,
+      box.y + box.height / 2 + offsetY,
+      { steps: 5 + Math.floor(Math.random() * 10) }
+    );
+    await sleep(50 + Math.random() * 150);
+  }
+  await page.click(selector);
+}
 
 export class Mutex {
   private queue: (() => void)[] = [];
@@ -307,15 +354,28 @@ async function loginToQwenUI(email: string, password: string): Promise<boolean> 
     return true;
   }
 
-  logger.info('UI: Filling email...');
-  await activePage.fill('input[type="email"], input[placeholder*="Email"]', email);
+  logger.info('UI: Filling email (human-like)...');
+  await humanLikeType(activePage, 'input[type="email"], input[placeholder*="Email"]', email);
   await activePage.keyboard.press('Enter');
-  await sleep(1000);
+
+  // Random delay between email and password (500-1500ms)
+  const interFieldDelay = 500 + Math.floor(Math.random() * 1000);
+  await sleep(interFieldDelay);
 
   await activePage.waitForSelector('input[type="password"]', { timeout: 10000 });
-  logger.info('UI: Filling password...');
-  await activePage.fill('input[type="password"]', password);
-  await activePage.keyboard.press('Enter');
+  logger.info('UI: Filling password (human-like)...');
+  await humanLikeType(activePage, 'input[type="password"]', password);
+
+  // Random delay before submit (300-2000ms)
+  const preSubmitDelay = 300 + Math.floor(Math.random() * 1700);
+  await sleep(preSubmitDelay);
+
+  // Click submit instead of Enter for human-like behavior
+  try {
+    await humanLikeClick(activePage, 'button[type="submit"], button:has-text("Sign In"), button:has-text("Login"), button:has-text("Entrar")');
+  } catch {
+    await activePage.keyboard.press('Enter');
+  }
 
   await sleep(2000);
 
@@ -345,6 +405,40 @@ export async function getQwenHeaders(forceNew = false, accountId?: string): Prom
     return await _getQwenHeadersInternal(forceNew, accountId);
   } finally {
     release();
+  }
+}
+
+async function checkForCaptcha(page: Page): Promise<void> {
+  const url = page.url();
+  if (url.includes('/cdn-cgi/') || url.includes('/challenge') || url.includes('/block')) {
+    logger.warn('CAPTCHA detected via url');
+    captchaDetected = true;
+    throw new Error('CAPTCHA detected - manual intervention required');
+  }
+
+  const layer = await page.evaluate(() => {
+    for (const iframe of document.querySelectorAll('iframe')) {
+      const src = iframe.src || '';
+      if (src.includes('challenges.cloudflare.com') || src.includes('recaptcha.api.google.com') || src.includes('hcaptcha')) {
+        return 'iframe';
+      }
+    }
+    for (const script of document.querySelectorAll('script')) {
+      const src = script.src || '';
+      if (src.includes('challenges.cloudflare.com') || src.includes('recaptcha/api.js') || src.includes('hcaptcha.com/1/api.js')) {
+        return 'script';
+      }
+    }
+    if (!!(window as any).turnstile || !!(window as any).grecaptcha) {
+      return 'window';
+    }
+    return null;
+  });
+
+  if (layer) {
+    logger.warn(`CAPTCHA detected via ${layer}`);
+    captchaDetected = true;
+    throw new Error('CAPTCHA detected - manual intervention required');
   }
 }
 
@@ -397,6 +491,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
   if (!isOnQwen || forceNew || isOnSpecificChat) {
     logger.info(`Navigating to Qwen home for ${cacheKey}... (Current: ${currentUrl})`);
     await page.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
+    await checkForCaptcha(page);
   }
 
   const isLoginPage = page.url().includes('login') || (await page.$('input[type="email"], input[placeholder*="Email"]'));
@@ -450,6 +545,13 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
         logger.info(`Error screenshot saved to ${screenshotPath}`);
       } catch (err: any) {
         logger.error('Failed to save error screenshot: ' + (err as Error).message);
+      }
+
+      try {
+        await checkForCaptcha(page);
+      } catch (captchaErr) {
+        reject(captchaErr);
+        return;
       }
 
       if (!retryAttempted) {
@@ -535,7 +637,8 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
       await page.type(inputSelector, 'a', { delay: 100 });
       logger.info(`Typed char for ${cacheKey}, waiting for UI to update...`);
       await sleep(2000);
-      
+      await checkForCaptcha(page);
+
       const selectors = [
         '.message-input-right-button-send .send-button',
         '.chat-prompt-send-button',

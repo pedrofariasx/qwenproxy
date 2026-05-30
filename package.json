@@ -13,7 +13,8 @@
     "login:chrome": "npx tsx src/login.ts --browser=chrome",
     "login:edge": "npx tsx src/login.ts --browser=edge",
     "test": "tsx --test src/**/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "audit": "npm audit --audit-level=high"
   },
   "keywords": [],
   "author": "Pedro Farias",
