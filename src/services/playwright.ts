@@ -175,11 +175,13 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
 
   activePage = await context.newPage();
 
-  const hasCredentials = !!(process.env.QWEN_EMAIL && process.env.QWEN_PASSWORD);
+  const { loadAccounts } = await import('../core/accounts.ts');
+  const accounts = loadAccounts();
+  const hasCredentials = accounts.length > 0;
   const hasValidSession = await checkValidSession();
 
   if (!hasValidSession && !hasCredentials) {
-    console.warn('[Playwright] No valid session AND no credentials in .env. Manual login will be required.');
+    console.warn('[Playwright] No valid session AND no credentials configured. Manual login will be required.');
   }
 
   if (!hasValidSession) {
@@ -202,10 +204,11 @@ async function checkValidSession(): Promise<boolean> {
 }
 
 async function attemptAutoLogin(): Promise<void> {
-  const email = process.env.QWEN_EMAIL;
-  const password = process.env.QWEN_PASSWORD;
-  if (!email || !password) return;
-  console.log('[Playwright] Attempting auto-login with credentials from .env...');
+  const { loadAccounts } = await import('../core/accounts.ts');
+  const accounts = loadAccounts();
+  if (accounts.length === 0) return;
+  const { email, password } = accounts[0];
+  console.log('[Playwright] Attempting auto-login with configured credentials...');
   try {
     const success = await loginToQwen(email, password);
     if (success) {
@@ -399,34 +402,32 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
 
   const isLoginPage = page.url().includes('login') || (await page.$('input[type="email"], input[placeholder*="Email"]'));
   if (isLoginPage) {
-    if (!accountId) {
-      const email = process.env.QWEN_EMAIL;
-      const password = process.env.QWEN_PASSWORD;
-      
-      if (email && password) {
-        console.log('[Playwright] Detected login page. Attempting automated login...');
-        try {
-          const loggedIn = await loginToQwen(email, password);
+    const { loadAccounts } = await import('../core/accounts.ts');
+    const accounts = loadAccounts();
+    const targetAccount = accountId
+      ? accounts.find(a => a.id === accountId)
+      : accounts[0];
+
+    if (targetAccount && targetAccount.email && targetAccount.password) {
+      console.log(`[Playwright] Detected login page. Attempting login for ${targetAccount.email}...`);
+      try {
+        if (accountId) {
+          const acctContext = accountContexts.get(accountId);
+          if (acctContext) {
+            await loginToQwenWithContext(acctContext, page, targetAccount.email, targetAccount.password);
+          }
+        } else {
+          const loggedIn = await loginToQwen(targetAccount.email, targetAccount.password);
           if (!loggedIn) {
             throw new Error('loginToQwen returned false');
           }
           console.log('[Playwright] Automated login successful.');
-        } catch (err: any) {
-          console.error('[Playwright] Automated login failed:', err.message);
         }
-      } else {
-        console.warn('[Playwright] Detected login page but QWEN_EMAIL/PASSWORD not provided in .env');
+      } catch (err: any) {
+        console.error('[Playwright] Automated login failed:', err.message);
       }
     } else {
-      const { getAccountCredentials } = await import('../core/accounts.ts');
-      const creds = getAccountCredentials(accountId);
-      if (creds && creds.email && creds.password) {
-        console.log(`[Playwright] Detected login page for account ${creds.email}. Attempting login...`);
-        const acctContext = accountContexts.get(accountId);
-        if (acctContext) {
-          await loginToQwenWithContext(acctContext, page, creds.email, creds.password);
-        }
-      }
+      console.warn('[Playwright] Detected login page but no credentials configured');
     }
   }
 
@@ -439,7 +440,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(async () => {
-      console.error(`[Playwright] Timeout waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
+      console.error(`[Playwright] Timeout (90s) waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
       try {
         const screenshotPath = path.resolve(`qwen_profiles/error_${cacheKey}.png`);
         await page.screenshot({ path: screenshotPath });
@@ -448,10 +449,14 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
         console.error('[Playwright] Failed to save error screenshot:', err.message);
       }
       reject(new Error(`Timeout waiting for Qwen headers for ${cacheKey}`));
-    }, 60000);
+    }, 90000);
+
+    let requestFired = false;
+    const markFired = () => { requestFired = true; };
 
     console.log(`[Playwright] Setting up route interception for ${cacheKey}...`);
     const routeHandler = async (route: any, request: any) => {
+      markFired();
       clearTimeout(timeout);
       
       const reqHeaders = request.headers();
@@ -509,47 +514,112 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
       console.log(`[Playwright] Triggering request for ${cacheKey}...`);
       const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
       
-      await page.focus(inputSelector);
       await page.fill(inputSelector, '');
       await page.type(inputSelector, 'a', { delay: 100 });
-      console.log(`[Playwright] Typed char for ${cacheKey}, waiting for UI to update...`);
-      await sleep(2000);
-      
-      const selectors = [
+      await sleep(1500);
+
+      const sendButtonSelectors = [
         '.message-input-right-button-send .send-button',
         '.chat-prompt-send-button',
-        'button.send-button'
+        'button.send-button',
+        '[data-testid="send-button"]',
+        'button[aria-label*="send" i]',
+        'button[aria-label*="Send" i]',
       ];
-      
-      let clicked = false;
-      for (const selector of selectors) {
-        try {
-          const btn = await page.$(selector);
-          if (btn && await btn.isVisible()) {
-            console.log(`[Playwright] Attempting click on: ${selector}`);
-            
-            await page.evaluate((sel) => {
-              const element = document.querySelector(sel) as HTMLElement;
-              if (element) {
-                element.focus();
-                element.click();
-              }
-            }, selector);
-            
-            await btn.click({ force: true, delay: 50 }).catch(() => {});
-            
-            clicked = true;
-            break;
+
+      const findSendButton = async (): Promise<string | null> => {
+        for (const sel of sendButtonSelectors) {
+          try {
+            const btn = await page.$(sel);
+            if (btn && await btn.isVisible()) {
+              const isDisabled = await btn.evaluate((el: HTMLElement) => {
+                return (el as HTMLButtonElement).disabled || el.getAttribute('aria-disabled') === 'true' || el.classList.contains('disabled');
+              });
+              if (!isDisabled) return sel;
+            }
+          } catch {}
+        }
+        return null;
+      };
+
+      const trySend = async (): Promise<boolean> => {
+        const btnSel = await findSendButton();
+        if (btnSel) {
+          console.log(`[Playwright] Found send button: ${btnSel}`);
+          try {
+            await page.click(btnSel, { force: true, timeout: 3000 });
+            await sleep(1000);
+            if (requestFired) return true;
+          } catch {}
+          try {
+            await page.evaluate((sel: string) => {
+              const el = document.querySelector(sel) as HTMLElement;
+              if (el) { el.focus(); el.click(); }
+            }, btnSel);
+            await sleep(1000);
+            if (requestFired) return true;
+          } catch {}
+        }
+
+        console.log(`[Playwright] Trying Enter key...`);
+        await page.focus(inputSelector);
+        await page.keyboard.press('Enter');
+        await sleep(1500);
+        if (requestFired) return true;
+
+        console.log(`[Playwright] Trying Shift+Enter then Enter...`);
+        await page.focus(inputSelector);
+        await page.keyboard.press('Shift+Enter');
+        await sleep(300);
+        await page.keyboard.press('Enter');
+        await sleep(1500);
+        if (requestFired) return true;
+
+        return false;
+      };
+
+      let sent = await trySend();
+
+      if (!sent) {
+        console.log(`[Playwright] First attempt failed, re-typing and retrying...`);
+        await page.fill(inputSelector, '');
+        await page.type(inputSelector, 'Test a', { delay: 80 });
+        await sleep(1000);
+        sent = await trySend();
+      }
+
+      if (!sent) {
+        console.log(`[Playwright] Second attempt failed, trying dispatchEvent approach...`);
+        await page.fill(inputSelector, 'a');
+        await page.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLElement;
+          if (el) {
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
           }
-        } catch (e) {
-          console.error(`[Playwright] Error clicking ${selector} for ${cacheKey}:`, e);
+        }, inputSelector);
+        await sleep(500);
+
+        const btnSel = await findSendButton();
+        if (btnSel) {
+          await page.evaluate((sel: string) => {
+            const el = document.querySelector(sel) as HTMLElement;
+            if (el) {
+              el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            }
+          }, btnSel);
+          await sleep(2000);
+        }
+
+        if (!requestFired) {
+          await page.focus(inputSelector);
+          await page.keyboard.press('Enter');
+          await sleep(2000);
         }
       }
 
-      if (!clicked) {
-        console.log(`[Playwright] No send button found/clicked for ${cacheKey}, fallback to Enter...`);
-        await page.focus(inputSelector);
-        await page.keyboard.press('Enter');
+      if (!requestFired) {
+        console.warn(`[Playwright] All send attempts failed for ${cacheKey}. Request may not have been triggered.`);
       }
     });
   });
