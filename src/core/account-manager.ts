@@ -1,4 +1,7 @@
 import { QwenAccount, loadAccounts } from './accounts.ts'
+import { Logger } from './logger.js'
+
+const logger = new Logger('info', 'AccountManager')
 
 let currentIndex = 0
 
@@ -16,7 +19,7 @@ export function markAccountRateLimited(accountId: string, cooldownMs?: number, r
     until: Date.now() + (cooldownMs ?? DEFAULT_COOLDOWN_MS),
     reason: reason ?? 'RateLimited',
   })
-  console.log(`[AccountManager] Account ${accountId} marked as rate-limited. Cooldown until ${new Date(Date.now() + (cooldownMs ?? DEFAULT_COOLDOWN_MS)).toISOString()}`)
+  logger.info(`Account ${accountId} marked as rate-limited. Cooldown until ${new Date(Date.now() + (cooldownMs ?? DEFAULT_COOLDOWN_MS)).toISOString()}`)
 }
 
 export function clearAccountCooldown(accountId: string): void {

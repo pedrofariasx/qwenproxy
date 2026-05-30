@@ -23,7 +23,15 @@ const envSchema = z.object({
   QWEN_BASE_URL: z.string().default('https://chat.qwen.ai'),
   QWEN_HTTP_ENDPOINT: z.string().default('https://api.qwen.ai/v1/chat'),
   QWEN_API_KEY: z.string().default(''),
+  QWEN_EMAIL: z.string().default(''),
+  QWEN_PASSWORD: z.string().default(''),
   API_KEY: z.string().default(''),
+  SHUTDOWN_TIMEOUT_MS: z.string().default('10000'),
+  CACHE_MAX_ENTRIES: z.string().default('10000'),
+  RATE_LIMIT_ENABLED: z.string().default('false'),
+  RATE_LIMIT_MAX: z.string().default('60'),
+  RATE_LIMIT_WINDOW_MS: z.string().default('60000'),
+  RATE_LIMIT_HEADER: z.string().default('x-forwarded-for'),
 })
 
 const env = envSchema.parse(process.env)
@@ -62,6 +70,10 @@ export const config = {
   cache: {
     defaultTTL: parseInt(env.CACHE_TTL),
     responseTTL: parseInt(env.RESPONSE_TTL),
+    maxEntries: parseInt(env.CACHE_MAX_ENTRIES),
+  },
+  shutdown: {
+    timeoutMs: parseInt(env.SHUTDOWN_TIMEOUT_MS),
   },
   metrics: {
     interval: parseInt(env.METRICS_INTERVAL),
@@ -79,10 +91,22 @@ export const config = {
     },
   },
   apiKey: env.API_KEY,
+  validation: {
+    MAX_MESSAGES: 200,
+    MAX_REQUEST_BODY_BYTES: 10485760,
+  },
+  rateLimiter: {
+    enabled: env.RATE_LIMIT_ENABLED === 'true',
+    max: parseInt(env.RATE_LIMIT_MAX),
+    windowMs: parseInt(env.RATE_LIMIT_WINDOW_MS),
+    headerKey: env.RATE_LIMIT_HEADER,
+  },
   qwen: {
     baseUrl: env.QWEN_BASE_URL,
     httpEndpoint: env.QWEN_HTTP_ENDPOINT,
     apiKey: env.QWEN_API_KEY,
+    email: env.QWEN_EMAIL,
+    password: env.QWEN_PASSWORD,
   },
 }
 

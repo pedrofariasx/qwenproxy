@@ -1,4 +1,7 @@
 import { performance } from 'node:perf_hooks';
+import { Logger } from '../core/logger.js';
+
+const logger = new Logger('info', 'Diagnostic')
 
 async function measurePlaywrightInit() {
   const start = performance.now();
@@ -23,35 +26,35 @@ async function measureNetworkLatency() {
 }
 
 async function runDiagnostic() {
-  console.log('=== Bottleneck Diagnostic ===\n');
-  
+  logger.info('=== Bottleneck Diagnostic ===\n');
+
   try {
     const pw = await measurePlaywrightInit();
-    console.log('Playwright:');
-    console.log(`  Browser init: ${pw.initTime}ms`);
-    console.log(`  Header fetch: ${pw.headerTime}ms`);
+    logger.info('Playwright:');
+    logger.info(`  Browser init: ${pw.initTime}ms`);
+    logger.info(`  Header fetch: ${pw.headerTime}ms`);
   } catch (e: any) {
-    console.log(`Playwright: SKIP (${e.message})`);
+    logger.info(`Playwright: SKIP (${e.message})`);
   }
-  
+
   try {
     const net = await measureNetworkLatency();
-    console.log(`\nNetwork latency to Qwen: ${net.networkLatencyMs}ms`);
+    logger.info(`\nNetwork latency to Qwen: ${net.networkLatencyMs}ms`);
   } catch (e: any) {
-    console.log(`Network: SKIP (${e.message})`);
+    logger.info(`Network: SKIP (${e.message})`);
   }
-  
-  console.log('\n=== Likely Bottlenecks ===');
-  console.log('1. getQwenHeaders() UI interactions: 2000-5000ms per call');
-  console.log('2. Global mutex (qwenChatMutex): serializes all chat requests');
-  console.log('3. No header caching between requests: re-fetches PoW each time');
-  console.log('4. Single browser context: no parallelism at browser level');
-  console.log('\nRecommendations:');
-  console.log('- Increase HEADERS_TTL in playwright.ts (currently 60min)');
-  console.log('- Pre-fetch headers on startup, not per-request');
-  console.log('- Consider request batching for concurrent users');
+
+  logger.info('\n=== Likely Bottlenecks ===');
+  logger.info('1. getQwenHeaders() UI interactions: 2000-5000ms per call');
+  logger.info('2. Global mutex (qwenChatMutex): serializes all chat requests');
+  logger.info('3. No header caching between requests: re-fetches PoW each time');
+  logger.info('4. Single browser context: no parallelism at browser level');
+  logger.info('\nRecommendations:');
+  logger.info('- Increase HEADERS_TTL in playwright.ts (currently 60min)');
+  logger.info('- Pre-fetch headers on startup, not per-request');
+  logger.info('- Consider request batching for concurrent users');
 }
 
 if (import.meta.main) {
-  runDiagnostic().catch(console.error);
+  runDiagnostic().catch(err => logger.error('Diagnostic failed: ' + err));
 }

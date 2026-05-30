@@ -2,6 +2,9 @@ import { addAccount, removeAccount, listAccounts, getAccountCredentials, QwenAcc
 import { initPlaywrightForAccount, closePlaywrightForAccount, BrowserType, launchManualLoginAccount, extractAccountInfoFromContext } from './services/playwright.ts'
 import * as readline from 'readline'
 import * as dotenv from 'dotenv'
+import { Logger } from './core/logger.js'
+
+const logger = new Logger('info', 'Login')
 
 dotenv.config()
 
@@ -34,25 +37,25 @@ async function showMenu() {
   while (true) {
     const accounts = listAccounts()
     clear()
-    console.log('=== QwenProxy Account Manager ===\n')
+    logger.info('=== QwenProxy Account Manager ===\n')
 
     if (accounts.length > 0) {
-      console.log(`Configured accounts (${accounts.length}):\n`)
+      logger.info(`Configured accounts (${accounts.length}):\n`)
       for (let i = 0; i < accounts.length; i++) {
-        console.log(`  [${i + 1}] ${accounts[i].email} (ID: ${accounts[i].id})`)
+        logger.info(`  [${i + 1}] ${accounts[i].email} (ID: ${accounts[i].id})`)
       }
     } else {
-      console.log('No accounts configured yet.\n')
+      logger.info('No accounts configured yet.\n')
     }
 
-    console.log('\nOptions:')
-    console.log('  [A] Add account (with credentials)')
-    console.log('  [M] Add account (manual browser login)')
+    logger.info('\nOptions:')
+    logger.info('  [A] Add account (with credentials)')
+    logger.info('  [M] Add account (manual browser login)')
     if (accounts.length > 0) {
-      console.log('  [R] Remove an account')
-      console.log('  [L] Login all accounts')
+      logger.info('  [R] Remove an account')
+      logger.info('  [L] Login all accounts')
     }
-    console.log('  [Q] Quit\n')
+    logger.info('  [Q] Quit\n')
 
     const choice = (await askQuestion('Select an option: ')).toUpperCase()
 
@@ -86,25 +89,25 @@ async function showMenu() {
 
 async function addAccountFlow() {
   clear()
-  console.log('=== Add New Account ===\n')
+  logger.info('=== Add New Account ===\n')
   const email = await askQuestion('Email: ')
   if (!email) {
-    console.log('Email is required.')
+    logger.info('Email is required.')
     await askQuestion('Press Enter to continue...')
     return
   }
   const password = await askQuestion('Password: ')
   if (!password) {
-    console.log('Password is required.')
+    logger.info('Password is required.')
     await askQuestion('Press Enter to continue...')
     return
   }
 
   try {
     const account = addAccount(email, password)
-    console.log(`\nAccount added: ${account.email} (${account.id})`)
+    logger.info(`\nAccount added: ${account.email} (${account.id})`)
   } catch (err: any) {
-    console.log(`\nError: ${err.message}`)
+    logger.info(`\nError: ${err.message}`)
   }
 
   await askQuestion('Press Enter to continue...')
@@ -115,17 +118,17 @@ async function removeAccountFlow() {
   if (accounts.length === 0) return
 
   clear()
-  console.log('=== Remove Account ===\n')
+  logger.info('=== Remove Account ===\n')
 
   for (let i = 0; i < accounts.length; i++) {
-    console.log(`  [${i + 1}] ${accounts[i].email} (ID: ${accounts[i].id})`)
+    logger.info(`  [${i + 1}] ${accounts[i].email} (ID: ${accounts[i].id})`)
   }
 
   const input = await askQuestion('\nSelect account number to remove (or 0 to cancel): ')
   const idx = parseInt(input) - 1
 
   if (isNaN(idx) || idx < 0 || idx >= accounts.length) {
-    console.log(input !== '0' ? 'Invalid selection.' : 'Cancelled.')
+    logger.info(input !== '0' ? 'Invalid selection.' : 'Cancelled.')
     await askQuestion('Press Enter to continue...')
     return
   }
@@ -134,12 +137,12 @@ async function removeAccountFlow() {
   const confirm = await askQuestion(`\nRemove ${account.email}? (y/N): `)
   if (confirm.toLowerCase() === 'y') {
     if (removeAccount(account.id)) {
-      console.log(`Account ${account.email} removed.`)
+      logger.info(`Account ${account.email} removed.`)
     } else {
-      console.log('Failed to remove account.')
+      logger.info('Failed to remove account.')
     }
   } else {
-    console.log('Cancelled.')
+    logger.info('Cancelled.')
   }
 
   await askQuestion('Press Enter to continue...')
@@ -150,16 +153,16 @@ async function loginAllAccounts(browserType: BrowserType) {
   if (accounts.length === 0) return
 
   clear()
-  console.log(`Logging in ${accounts.length} account(s) using ${browserType}...\n`)
+  logger.info(`Logging in ${accounts.length} account(s) using ${browserType}...\n`)
 
   for (let i = 0; i < accounts.length; i++) {
     const account = accounts[i]
     const creds = getAccountCredentials(account.id)
     if (!creds || creds.password === '***') {
-      console.log(`[Login] Skipping ${account.email} - no credentials available`)
+      logger.info(`Skipping ${account.email} - no credentials available`)
       continue
     }
-    console.log(`[Login] Processing account: ${account.email}`)
+    logger.info(`Processing account: ${account.email}`)
     try {
       const fullAccount: QwenAccount = {
         id: creds.id,
@@ -167,22 +170,22 @@ async function loginAllAccounts(browserType: BrowserType) {
         password: creds.password,
       }
       await initPlaywrightForAccount(fullAccount, true, browserType)
-      console.log(`[Login] Account ${account.email} session saved.`)
+      logger.info(`Account ${account.email} session saved.`)
       await closePlaywrightForAccount(account.id)
     } catch (err: any) {
-      console.error(`[Login] Failed to login ${account.email}: ${err.message}`)
+      logger.error(`Failed to login ${account.email}: ${err.message}`)
     }
   }
 
-  console.log('\n[Login] All accounts processed.')
+  logger.info('All accounts processed.')
   await askQuestion('Press Enter to continue...')
 }
 
 async function addAccountManualFlow(browserType: BrowserType) {
   clear()
-  console.log('=== Add Account (Manual Login) ===\n')
-  console.log('A browser window will open. Please login to Qwen manually.')
-  console.log('Once logged in, close the browser window or press Ctrl+C here.\n')
+  logger.info('=== Add Account (Manual Login) ===\n')
+  logger.info('A browser window will open. Please login to Qwen manually.')
+  logger.info('Once logged in, close the browser window or press Ctrl+C here.\n')
   await askQuestion('Press Enter to open the browser...')
 
   const crypto = await import('crypto')
@@ -190,7 +193,7 @@ async function addAccountManualFlow(browserType: BrowserType) {
 
   const { context, page } = await launchManualLoginAccount(accountId, browserType)
 
-  console.log('\nBrowser opened. Waiting for you to login...')
+  logger.info('\nBrowser opened. Waiting for you to login...')
   
   let loggedIn = false
   while (!loggedIn) {
@@ -201,11 +204,11 @@ async function addAccountManualFlow(browserType: BrowserType) {
     }
   }
 
-  console.log('\nLogin detected! Extracting account info...')
+  logger.info('\nLogin detected! Extracting account info...')
   
   const extractedEmail = await askQuestion('Enter the email for this account: ')
   if (!extractedEmail) {
-    console.log('Email is required.')
+    logger.info('Email is required.')
     await context.close()
     await askQuestion('Press Enter to continue...')
     return
@@ -213,9 +216,9 @@ async function addAccountManualFlow(browserType: BrowserType) {
 
   try {
     const account = addAccount(extractedEmail, '', accountId)
-    console.log(`\nAccount added: ${account.email} (${account.id})`)
+    logger.info(`\nAccount added: ${account.email} (${account.id})`)
   } catch (err: any) {
-    console.log(`\nError: ${err.message}`)
+    logger.info(`\nError: ${err.message}`)
   }
 
   await context.close()
@@ -223,6 +226,6 @@ async function addAccountManualFlow(browserType: BrowserType) {
 }
 
 showMenu().catch(err => {
-  console.error(err)
+  logger.error('Fatal error: ' + (err instanceof Error ? err.message : String(err)))
   process.exit(1)
 })

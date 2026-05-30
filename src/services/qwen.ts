@@ -7,6 +7,9 @@
 
 import { getQwenHeaders, getBasicHeaders } from './playwright.ts';
 import { v4 as uuidv4 } from 'uuid';
+import { Logger } from '../core/logger.js';
+
+const logger = new Logger('info', 'Qwen')
 
 export class RetryableQwenStreamError extends Error {
   readonly retryAfterMs: number;
@@ -110,7 +113,7 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
       }
     };
 
-    console.log(`[Qwen] Disabling native tools for ${cacheKey}...`);
+    logger.info(`Disabling native tools for ${cacheKey}...`);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
     const response = await fetch('https://chat.qwen.ai/api/v2/users/user/settings/update', {
@@ -135,13 +138,13 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
 
     if (!response.ok) {
       const text = await response.text();
-      console.error(`[Qwen] Failed to disable native tools for ${cacheKey}: ${response.status} - ${text}`);
+      logger.error(`Failed to disable native tools for ${cacheKey}: ${response.status} - ${text}`);
     } else {
-      console.log(`[Qwen] Native tools disabled successfully for ${cacheKey}.`);
+      logger.info(`Native tools disabled successfully for ${cacheKey}.`);
       nativeToolsDisabled.add(cacheKey);
     }
   } catch (err: any) {
-    console.error(`[Qwen] Error disabling native tools for ${cacheKey}: ${err.message}`);
+    logger.error(`Error disabling native tools for ${cacheKey}: ${err.message}`);
   } finally {
     disablingNativeToolsInProgress.delete(cacheKey);
   }

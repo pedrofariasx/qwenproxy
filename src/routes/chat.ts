@@ -19,10 +19,15 @@ import { robustParseJSON } from '../utils/json.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 import { RetryableQwenStreamError } from '../services/qwen.ts';
 import { Mutex } from '../services/playwright.ts';
+import { sanitizeError } from '../utils/error-sanitization.ts';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.ts';
 import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo } from '../core/account-manager.ts';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.ts';
+import { validateChatRequest } from '../types/validation.ts';
+import { Logger } from '../core/logger.js';
+
+const logger = new Logger('info', 'Chat')
 
 const accountMutexes = new Map<string, Mutex>();
 function getAccountMutex(accountId: string): Mutex {
@@ -103,6 +108,11 @@ function parseQwenErrorPayload(raw: string): { message: string; status: number }
 export async function chatCompletions(c: Context) {
   try {
     const body: OpenAIRequest = await c.req.json();
+    const validation = validateChatRequest(body);
+    if (!validation.success) {
+      const issues = validation.error.issues.map(i => i.message).join('; ');
+      return c.json({ error: { message: issues, type: 'invalid_request_error' } }, 400);
+    }
     const isStream = body.stream ?? false;
     
     // Extract the prompt
@@ -228,12 +238,12 @@ export async function chatCompletions(c: Context) {
 
       const cooldownInfo = getAccountCooldownInfo(accountId);
       if (cooldownInfo && accountId !== 'global') {
-        console.log(`[Chat] Skipping account ${accountEmail} (${accountId}) — on cooldown for ${Math.round(cooldownInfo.remainingMs / 1000)}s (${cooldownInfo.reason})`);
+        logger.info(`Skipping account ${accountEmail} (${accountId}) — on cooldown for ${Math.round(cooldownInfo.remainingMs / 1000)}s (${cooldownInfo.reason})`);
         account = getNextAvailableAccount(accountId);
         continue;
       }
 
-      console.log(`[Chat] Routing request to account: ${accountEmail} (${accountId})`);
+      logger.info(`Routing request to account: ${accountEmail} (${accountId})`);
 
     const accountMutex = getAccountMutex(accountId);
     releaseChatLock = await accountMutex.acquire();
@@ -271,7 +281,7 @@ export async function chatCompletions(c: Context) {
               const hourHint = err.message?.match(/Wait about (\d+) hour/);
               const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : undefined;
               markAccountRateLimited(accountId, cooldownMs, 'RateLimited');
-              console.warn(`[Chat] Account ${accountEmail} (${accountId}) rate-limited. Marked for cooldown.`);
+              logger.warn(`Account ${accountEmail} (${accountId}) rate-limited. Marked for cooldown.`);
               releaseChatLock();
               releaseChatLock = undefined;
               lastError = err;
@@ -281,7 +291,7 @@ export async function chatCompletions(c: Context) {
             if (retries === 0) {
               if (err.upstreamStatus && err.upstreamStatus >= 500) {
                 markAccountRateLimited(accountId, undefined, 'ServerError');
-                console.warn(`[Chat] Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`);
+                logger.warn(`Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`);
               }
               releaseChatLock();
               releaseChatLock = undefined;
@@ -300,7 +310,7 @@ export async function chatCompletions(c: Context) {
               lastError = err;
               break;
             }
-            console.warn(`[Chat] Qwen request failed for ${accountEmail}, retrying in ${useDelay}ms... (${retries} left)`);
+            logger.warn(`Qwen request failed for ${accountEmail}, retrying in ${useDelay}ms... (${retries} left)`);
             await new Promise(r => setTimeout(r, useDelay));
             retryDelay = Math.min(retryDelay * 2, 5000);
           }
@@ -749,9 +759,10 @@ export async function chatCompletions(c: Context) {
       }
     });
   } catch (err: any) {
-    console.error('Error in chatCompletions:', err);
-    const status = err.upstreamStatus || 500;
-    return c.json({ error: { message: err.message } }, status);
+    logger.error('Error in chatCompletions: ' + (err?.message || String(err)));
+    const isProd = process.env.NODE_ENV === 'production';
+    const sanitized = sanitizeError(err, isProd);
+    return c.json({ error: sanitized }, err.upstreamStatus || 500);
   }
 }
 
@@ -796,17 +807,17 @@ export async function chatCompletionsStop(c: Context) {
 
     if (!stopResponse.ok) {
       const errorText = await stopResponse.text();
-      console.error(`[Stop] Failed to stop generation for chat_id=${chat_id}: ${stopResponse.status} ${errorText}`);
+      logger.error(`Failed to stop generation for chat_id=${chat_id}: ${stopResponse.status} ${errorText}`);
       return c.json({ error: 'Failed to stop generation' }, stopResponse.status as any);
     }
 
     stream.abortController.abort();
     removeStream(chat_id);
 
-    console.log(`[Stop] Generation stopped for chat_id=${chat_id}`);
+    logger.info(`Generation stopped for chat_id=${chat_id}`);
     return c.json({ success: true });
   } catch (err: any) {
-    console.error('Error in chatCompletionsStop:', err);
+    logger.error('Error in chatCompletionsStop: ' + (err?.message || String(err)));
     return c.json({ error: err.message }, 500);
   }
 }

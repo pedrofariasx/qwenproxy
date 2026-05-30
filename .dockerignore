@@ -28,10 +28,8 @@ npm-debug.log*
 .git/
 .gitignore
 
-# Docs
-README.md
-LICENSE
-AGENTS.md
+# Docs — ignore all markdown files
+*.md
 
 # CI/CD
 .github/

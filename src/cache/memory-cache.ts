@@ -11,6 +11,7 @@ export type CacheKey =
 interface CacheEntry<T> {
   value: T
   expiresAt: number
+  insertedAt: number
 }
 
 export class MemoryCache {
@@ -18,10 +19,12 @@ export class MemoryCache {
   private defaultTTL: number
   private prefix: string
   private cleanupInterval: NodeJS.Timeout | null
+  private maxEntries: number
 
-  constructor(options?: { prefix?: string; defaultTTL?: number }) {
+  constructor(options?: { prefix?: string; defaultTTL?: number; maxEntries?: number }) {
     this.prefix = options?.prefix || 'qwenproxy:'
     this.defaultTTL = options?.defaultTTL || config.cache.defaultTTL
+    this.maxEntries = options?.maxEntries ?? config.cache.maxEntries
     this.store = new Map()
     this.cleanupInterval = null
 
@@ -39,6 +42,30 @@ export class MemoryCache {
     }, 60000)
   }
 
+  /** Evict entries when store exceeds maxEntries. Removes expired entries first, then oldest by insertion order. */
+  private evict(): void {
+    if (this.maxEntries <= 0) return
+    if (this.store.size <= this.maxEntries) return
+
+    const now = Date.now()
+    // First pass: remove all expired entries
+    for (const [key, entry] of this.store.entries()) {
+      if (entry.expiresAt <= now) {
+        this.store.delete(key)
+      }
+    }
+    // Second pass: if still over limit, remove oldest entries (Map iterates in insertion order)
+    if (this.store.size > this.maxEntries) {
+      const toDelete = this.store.size - this.maxEntries
+      let deleted = 0
+      for (const [key] of this.store.entries()) {
+        if (deleted >= toDelete) break
+        this.store.delete(key)
+        deleted++
+      }
+    }
+  }
+
   async connect(): Promise<void> {
     // No-op for in-memory cache
   }
@@ -47,12 +74,15 @@ export class MemoryCache {
     const serialized = JSON.stringify(value)
     const effectiveTTL = ttl || this.defaultTTL
     const fullKey = this.prefix + key
-    
+
     this.store.set(fullKey, {
       value,
-      expiresAt: Date.now() + (effectiveTTL * 1000)
+      expiresAt: Date.now() + (effectiveTTL * 1000),
+      insertedAt: Date.now(),
     })
-    
+
+    this.evict()
+
     metrics.increment('cache.set')
     metrics.histogram('cache.value.size', Buffer.byteLength(serialized))
   }
@@ -116,7 +146,8 @@ export class MemoryCache {
     
     this.store.set(fullKey, {
       value: newValue,
-      expiresAt: Date.now() + (effectiveTTL * 1000)
+      expiresAt: Date.now() + (effectiveTTL * 1000),
+      insertedAt: Date.now(),
     })
     
     return newValue

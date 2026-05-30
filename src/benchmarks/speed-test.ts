@@ -1,6 +1,9 @@
 import { performance } from 'node:perf_hooks';
 import { config } from '../core/config.ts';
 import { metrics } from '../core/metrics.ts';
+import { Logger } from '../core/logger.js';
+
+const logger = new Logger('info', 'SpeedTest')
 
 interface BenchmarkResult {
   operation: string;
@@ -42,7 +45,7 @@ async function benchmarkOperation(
 }
 
 async function runBenchmarks() {
-  console.log('=== QwenProxy Speed Benchmark ===\n');
+  logger.info('=== QwenProxy Speed Benchmark ===\n');
 
   const results: BenchmarkResult[] = [];
 
@@ -64,7 +67,7 @@ async function runBenchmarks() {
     3
   ));
 
-  console.log('Results:');
+  logger.info('Results:');
   console.table(results.map(r => ({
     Operation: r.operation,
     'Avg (ms)': r.avgMs.toFixed(2),
@@ -74,10 +77,10 @@ async function runBenchmarks() {
   })));
 
   const stats = metrics.getAll();
-  console.log('\nMetrics snapshot:');
-  console.log(JSON.stringify([...stats.entries()].map(([k, v]) => [k, Object.fromEntries(v.values)]), null, 2).slice(0, 2000));
+  logger.info('\nMetrics snapshot:');
+  logger.info(JSON.stringify([...stats.entries()].map(([k, v]) => [k, Object.fromEntries(v.values)]), null, 2).slice(0, 2000));
 }
 
 if (import.meta.main) {
-  runBenchmarks().catch(console.error);
+  runBenchmarks().catch(err => logger.error('Benchmark failed: ' + err));
 }

@@ -13,6 +13,9 @@ import path from 'path';
 import crypto from 'crypto';
 import { QwenAccount } from '../core/accounts.ts';
 import { config } from '../core/config.ts';
+import { Logger } from '../core/logger.js';
+
+const logger = new Logger('info', 'Playwright')
 
 export type BrowserType = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'edge';
 
@@ -142,7 +145,7 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
       break;
   }
 
-  console.log(`[Playwright] Launching ${browserType}...`);
+  logger.info(`Launching ${browserType}...`);
 
   context = await browserEngine.launchPersistentContext(profilePath, {
     headless,
@@ -166,7 +169,7 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
   const hasValidSession = await checkValidSession();
 
   if (!hasValidSession && !hasCredentials) {
-    console.warn('[Playwright] No valid session AND no credentials in .env. Manual login will be required.');
+    logger.warn('No valid session AND no credentials in .env. Manual login will be required.');
   }
 
   if (!hasValidSession) {
@@ -192,22 +195,22 @@ async function attemptAutoLogin(): Promise<void> {
   const email = process.env.QWEN_EMAIL;
   const password = process.env.QWEN_PASSWORD;
   if (!email || !password) return;
-  console.log('[Playwright] Attempting auto-login with credentials from .env...');
+  logger.info('Attempting auto-login with credentials from .env...');
   try {
     const success = await loginToQwen(email, password);
     if (success) {
-      console.log('[Playwright] Auto-login successful.');
+      logger.info('Auto-login successful.');
       return;
     }
-    console.warn('[Playwright] API login failed, trying UI fallback...');
+    logger.warn('API login failed, trying UI fallback...');
     const uiSuccess = await loginToQwenUI(email, password);
     if (uiSuccess) {
-      console.log('[Playwright] UI login fallback successful.');
+      logger.info('UI login fallback successful.');
     } else {
-      console.warn('[Playwright] Both API and UI login failed. Manual login may be required.');
+      logger.warn('Both API and UI login failed. Manual login may be required.');
     }
   } catch (err: any) {
-    console.error('[Playwright] Auto-login error:', err.message);
+    logger.error('Auto-login error: ' + err.message);
   }
 }
 
@@ -232,7 +235,7 @@ export async function closePlaywright() {
 export async function loginToQwen(email: string, password: string): Promise<boolean> {
   if (!activePage) throw new Error('Playwright not initialized');
 
-  console.log(`[Playwright] Attempting API login for ${email}...`);
+  logger.info(`Attempting API login for ${email}...`);
   
   await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
 
@@ -259,28 +262,28 @@ export async function loginToQwen(email: string, password: string): Promise<bool
   }, { email, password: hashedPassword });
 
   if (result.ok) {
-    console.log('[Playwright] API login request successful.');
+    logger.info('API login request successful.');
     await activePage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
     const isLogged = !(activePage.url().includes('auth') || activePage.url().includes('login'));
     if (isLogged) {
-       console.log('[Playwright] Login confirmed.');
+       logger.info('Login confirmed.');
        return true;
     }
   }
 
-  console.error('[Playwright] Login failed:', result.data || result.error);
+  logger.error('Login failed: ' + (result.data || result.error));
   return false;
 }
 
 async function loginToQwenUI(email: string, password: string): Promise<boolean> {
   if (!activePage) throw new Error('Playwright not initialized');
 
-  console.log('[Playwright] Attempting UI login...');
+  logger.info('Attempting UI login...');
   await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
   await sleep(2000);
 
   if (!activePage.url().includes('/auth')) {
-    console.log('[Playwright] Already logged in');
+    logger.info('Already logged in');
     return true;
   }
 
@@ -288,17 +291,17 @@ async function loginToQwenUI(email: string, password: string): Promise<boolean> 
     await activePage.waitForSelector('input[type="email"], input[placeholder*="Email"]', { timeout: 5000 });
   } catch {
     if (activePage.url().includes('/auth')) throw new Error('Email input not found');
-    console.log('[Playwright] Already logged in');
+    logger.info('Already logged in');
     return true;
   }
 
-  console.log('[Playwright] UI: Filling email...');
+  logger.info('UI: Filling email...');
   await activePage.fill('input[type="email"], input[placeholder*="Email"]', email);
   await activePage.keyboard.press('Enter');
   await sleep(1000);
 
   await activePage.waitForSelector('input[type="password"]', { timeout: 10000 });
-  console.log('[Playwright] UI: Filling password...');
+  logger.info('UI: Filling password...');
   await activePage.fill('input[type="password"]', password);
   await activePage.keyboard.press('Enter');
 
@@ -306,11 +309,11 @@ async function loginToQwenUI(email: string, password: string): Promise<boolean> 
 
   const isLogged = !activePage.url().includes('auth') && !activePage.url().includes('login');
   if (isLogged) {
-    console.log('[Playwright] UI login OK');
+    logger.info('UI login OK');
     return true;
   }
 
-  console.log('[Playwright] UI login failed');
+  logger.info('UI login failed');
   return false;
 }
 
@@ -380,7 +383,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
   const isOnSpecificChat = isOnQwen && /\/c\//.test(currentUrl);
 
   if (!isOnQwen || forceNew || isOnSpecificChat) {
-    console.log(`[Playwright] Navigating to Qwen home for ${cacheKey}... (Current: ${currentUrl})`);
+    logger.info(`Navigating to Qwen home for ${cacheKey}... (Current: ${currentUrl})`);
     await page.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
   }
 
@@ -391,24 +394,24 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
       const password = process.env.QWEN_PASSWORD;
       
       if (email && password) {
-        console.log('[Playwright] Detected login page. Attempting automated login...');
+        logger.info('Detected login page. Attempting automated login...');
         try {
           const loggedIn = await loginToQwen(email, password);
           if (!loggedIn) {
             throw new Error('loginToQwen returned false');
           }
-          console.log('[Playwright] Automated login successful.');
+          logger.info('Automated login successful.');
         } catch (err: any) {
-          console.error('[Playwright] Automated login failed:', err.message);
+          logger.error('Automated login failed: ' + (err as Error).message);
         }
       } else {
-        console.warn('[Playwright] Detected login page but QWEN_EMAIL/PASSWORD not provided in .env');
+        logger.warn('Detected login page but QWEN_EMAIL/PASSWORD not provided in .env');
       }
     } else {
       const { getAccountCredentials } = await import('../core/accounts.ts');
       const creds = getAccountCredentials(accountId);
       if (creds && creds.email && creds.password) {
-        console.log(`[Playwright] Detected login page for account ${creds.email}. Attempting login...`);
+        logger.info(`Detected login page for account ${creds.email}. Attempting login...`);
         const acctContext = accountContexts.get(accountId);
         if (acctContext) {
           await loginToQwenWithContext(acctContext, page, creds.email, creds.password);
@@ -417,27 +420,46 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
     }
   }
 
-  console.log(`[Playwright] Waiting for chat input for ${cacheKey}...`);
+  logger.info(`Waiting for chat input for ${cacheKey}...`);
   const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
   await page.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
-    console.error(`[Playwright] Chat input not found for ${cacheKey}. Current URL:`, page.url());
+    logger.error(`Chat input not found for ${cacheKey}. Current URL: ${page.url()}`);
     throw new Error(`Timeout waiting for chat input for ${cacheKey}. Are you logged in?`);
   });
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(async () => {
-      console.error(`[Playwright] Timeout waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
-      try {
-        const screenshotPath = path.resolve(`qwen_profiles/error_${cacheKey}.png`);
-        await page.screenshot({ path: screenshotPath });
-        console.log(`[Playwright] Error screenshot saved to ${screenshotPath}`);
-      } catch (err: any) {
-        console.error('[Playwright] Failed to save error screenshot:', err.message);
-      }
-      reject(new Error(`Timeout waiting for Qwen headers for ${cacheKey}`));
-    }, 60000);
+    let retryAttempted = false;
 
-    console.log(`[Playwright] Setting up route interception for ${cacheKey}...`);
+    const handleTimeout = async () => {
+      logger.error(`Timeout waiting for Qwen headers for ${cacheKey}. Current URL: ${page.url()}`);
+      try {
+        const screenshotPath = path.resolve(`/tmp/qwenproxy_error_${cacheKey}.png`);
+        await page.screenshot({ path: screenshotPath });
+        logger.info(`Error screenshot saved to ${screenshotPath}`);
+      } catch (err: any) {
+        logger.error('Failed to save error screenshot: ' + (err as Error).message);
+      }
+
+      if (!retryAttempted) {
+        retryAttempted = true;
+        logger.info(`Retrying ${cacheKey} with page reload...`);
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+          // Re-apply route handler after reload
+          await page.route('**/api/chat/**', routeHandler);
+          // Re-set a new timeout for the retry
+          setTimeout(handleTimeout, 60000);
+        } catch (reloadErr) {
+          reject(new Error(`Qwen UI change — header interception failed after retry for ${cacheKey}`));
+        }
+      } else {
+        reject(new Error(`Qwen UI change — header interception failed after retry for ${cacheKey}`));
+      }
+    };
+
+    const timeout = setTimeout(handleTimeout, 60000);
+
+    logger.info(`Setting up route interception for ${cacheKey}...`);
     const routeHandler = async (route: any, request: any) => {
       clearTimeout(timeout);
       
@@ -469,12 +491,12 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
       };
 
       if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-        console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}, skipping...`);
+        logger.info(`Intercepted request missing critical headers for ${cacheKey}, skipping...`);
         await route.continue();
         return;
       }
 
-      console.log(`[Playwright] Successfully intercepted headers for ${cacheKey}.`);
+      logger.info(`Successfully intercepted headers for ${cacheKey}.`);
       cache.currentHeaders = extractedHeaders;
       cache.cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };
       cache.lastHeadersTime = Date.now();
@@ -493,19 +515,23 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
     };
 
     page.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
-      console.log(`[Playwright] Triggering request for ${cacheKey}...`);
+      logger.info(`Triggering request for ${cacheKey}...`);
       const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
       
       await page.focus(inputSelector);
       await page.fill(inputSelector, '');
       await page.type(inputSelector, 'a', { delay: 100 });
-      console.log(`[Playwright] Typed char for ${cacheKey}, waiting for UI to update...`);
+      logger.info(`Typed char for ${cacheKey}, waiting for UI to update...`);
       await sleep(2000);
       
       const selectors = [
         '.message-input-right-button-send .send-button',
         '.chat-prompt-send-button',
-        'button.send-button'
+        'button.send-button',
+        'button[data-testid="send"]',
+        'button[aria-label*="send"]',
+        '.chat-footer button',
+        'button.submit'
       ];
       
       let clicked = false;
@@ -513,7 +539,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
         try {
           const btn = await page.$(selector);
           if (btn && await btn.isVisible()) {
-            console.log(`[Playwright] Attempting click on: ${selector}`);
+            logger.info(`Attempting click on: ${selector}`);
             
             await page.evaluate((sel) => {
               const element = document.querySelector(sel) as HTMLElement;
@@ -529,12 +555,12 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
             break;
           }
         } catch (e) {
-          console.error(`[Playwright] Error clicking ${selector} for ${cacheKey}:`, e);
+          logger.error(`Error clicking ${selector} for ${cacheKey}: ` + e);
         }
       }
 
       if (!clicked) {
-        console.log(`[Playwright] No send button found/clicked for ${cacheKey}, fallback to Enter...`);
+        logger.info(`No send button found/clicked for ${cacheKey}, fallback to Enter...`);
         await page.focus(inputSelector);
         await page.keyboard.press('Enter');
       }
@@ -569,7 +595,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, headless = 
       break;
   }
 
-  console.log(`[Playwright] Launching ${browserType} for account ${account.email}...`);
+  logger.info(`Launching ${browserType} for account ${account.email}...`);
 
   const acctContext = await browserEngine.launchPersistentContext(profilePath, {
     headless,
@@ -704,11 +730,11 @@ async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Pag
     await acctPage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
     const isLogged = !(acctPage.url().includes('auth') || acctPage.url().includes('login'));
     if (isLogged) {
-      console.log(`[Playwright] Login confirmed for ${email}.`);
+      logger.info(`Login confirmed for ${email}.`);
       return true;
     }
   }
 
-  console.error(`[Playwright] Login failed for ${email}:`, result.data || result.error);
+  logger.error(`Login failed for ${email}: ${result.data || result.error}`);
   return false;
 }

@@ -10,6 +10,12 @@ services:
       - ./data:/app/data
       - ./qwen_profiles:/app/qwen_profiles
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
     logging:
       driver: "json-file"
       options:

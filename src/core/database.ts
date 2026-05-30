@@ -1,6 +1,9 @@
 import Database from 'better-sqlite3'
 import path from 'path'
 import fs from 'fs'
+import { Logger } from './logger.js'
+
+const logger = new Logger('info', 'Database')
 
 const DATA_DIR = path.resolve('data')
 const DB_PATH = path.join(DATA_DIR, 'qwenproxy.db')
@@ -78,9 +81,9 @@ function migrateFromJson(db: Database.Database): void {
 
     // Rename old file to .bak to avoid re-migration
     fs.renameSync(jsonPath, jsonPath + '.bak')
-    console.log(`[Database] Migrated ${accounts.length} account(s) from accounts.json to SQLite`)
+    logger.info(`Migrated ${accounts.length} account(s) from accounts.json to SQLite`)
   } catch (err: any) {
-    console.error('[Database] Failed to migrate accounts.json:', err.message)
+    logger.error('[Database] Failed to migrate accounts.json: ' + (err as Error).message)
   }
 }
 

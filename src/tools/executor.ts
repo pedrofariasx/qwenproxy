@@ -10,6 +10,9 @@ import type { ParsedToolCall, ToolCallResult, ToolContext } from './types';
 import { SchemaValidationError } from './schema';
 import { registry } from './registry';
 import { robustParseJSON } from '../utils/json.ts';
+import { Logger } from '../core/logger.js';
+
+const logger = new Logger('info', 'Executor')
 
 export interface ExecutionLoopConfig {
   maxTurns?: number;
@@ -174,7 +177,7 @@ export async function runExecutionLoop(
 
   for (let turn = 0; turn < maxTurns; turn++) {
     if (debug) {
-      console.log(`[executor] Turn ${turn + 1}/${maxTurns}, messages: ${messages.length}`);
+      logger.info(`Turn ${turn + 1}/${maxTurns}, messages: ${messages.length}`);
     }
 
     const response = await sendToLLM(messages, tools, model);
@@ -196,7 +199,7 @@ export async function runExecutionLoop(
 
     if (effectiveToolCalls.length === 0) {
       if (debug) {
-        console.log('[executor] No tool calls, loop complete');
+        logger.info('No tool calls, loop complete');
       }
       return effectiveContent || '';
     }
@@ -208,10 +211,7 @@ export async function runExecutionLoop(
     };
 
     if (debug) {
-      console.log(
-        `[executor] Executing ${effectiveToolCalls.length} tool calls:`,
-        effectiveToolCalls.map((tc) => tc.name)
-      );
+      logger.info(`Executing ${effectiveToolCalls.length} tool calls: ${effectiveToolCalls.map((tc) => tc.name).join(', ')}`);
     }
 
     const toolResults = await executeToolCalls(effectiveToolCalls, context);
@@ -223,10 +223,7 @@ export async function runExecutionLoop(
     }
 
     if (debug) {
-      console.log(
-        `[executor] Tool results:`,
-        toolResults.map((r) => ({ name: r.name, isError: r.isError }))
-      );
+      logger.info(`Tool results: ${JSON.stringify(toolResults.map((r) => ({ name: r.name, isError: r.isError })))}`);
     }
   }
 

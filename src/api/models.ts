@@ -1,6 +1,10 @@
+import crypto from 'node:crypto'
 import { Hono } from 'hono'
 import { config } from '../core/config.js'
 import { getBasicHeaders } from '../services/playwright.js'
+import { Logger } from '../core/logger.js'
+
+const logger = new Logger('info', 'Models')
 
 const app = new Hono()
 
@@ -62,7 +66,7 @@ app.get('/v1/models', async (c) => {
     
     return c.json(formatted)
   } catch (error: any) {
-    console.error('Error fetching models:', error)
+    logger.error('Error fetching models: ' + (error instanceof Error ? error.message : String(error)))
     return c.json({ error: error.message }, 500)
   }
 })
@@ -116,7 +120,7 @@ app.get('/v1/models/:model', async (c) => {
       capabilities: model.info?.meta?.capabilities,
     })
   } catch (error: any) {
-    console.error('Error fetching model:', error)
+    logger.error('Error fetching model: ' + (error instanceof Error ? error.message : String(error)))
     return c.json({ error: error.message }, 500)
   }
 })
