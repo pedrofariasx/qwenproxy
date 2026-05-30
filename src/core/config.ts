@@ -32,6 +32,9 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.string().default('60'),
   RATE_LIMIT_WINDOW_MS: z.string().default('60000'),
   RATE_LIMIT_HEADER: z.string().default('x-forwarded-for'),
+  EXECUTOR_ENABLED: z.string().default('false'),
+  EXECUTOR_MAX_TURNS: z.string().default('10'),
+  EXECUTOR_TIMEOUT_MS: z.string().default('120000'),
 })
 
 const env = envSchema.parse(process.env)
@@ -100,6 +103,11 @@ export const config = {
     max: parseInt(env.RATE_LIMIT_MAX),
     windowMs: parseInt(env.RATE_LIMIT_WINDOW_MS),
     headerKey: env.RATE_LIMIT_HEADER,
+  },
+  executor: {
+    enabled: env.EXECUTOR_ENABLED === 'true',
+    maxTurns: parseInt(env.EXECUTOR_MAX_TURNS),
+    timeoutMs: parseInt(env.EXECUTOR_TIMEOUT_MS),
   },
   qwen: {
     baseUrl: env.QWEN_BASE_URL,

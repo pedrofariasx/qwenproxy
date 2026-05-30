@@ -8,6 +8,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { robustParseJSON } from '../utils/json.ts';
 import { logger } from '../core/logger.js';
+import { metrics } from '../core/metrics.js';
 import type { ParsedToolCall } from './types';
 import type { FunctionToolDefinition } from './types';
 
@@ -244,6 +245,7 @@ export class StreamingToolParser {
         } else {
           // Recovery failed. Restore lead-in text if no tools were emitted.
           logger.warn('[parser] Dropping unrecoverable unclosed tool call at end of stream');
+          metrics.increment('tools_parse_errors_total', 1, { reason: 'unclosed_stream' });
           if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
             result.text += this.pendingLeadIn;
           }
@@ -291,6 +293,7 @@ export class StreamingToolParser {
     if (!t) {
       // Empty tool call - malformed. Restore lead-in if possible.
       logger.warn('[parser] Dropping empty tool call block');
+      metrics.increment('tools_parse_errors_total', 1, { reason: 'empty_block' });
       if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
         result.text += this.pendingLeadIn;
       }
@@ -352,12 +355,13 @@ export class StreamingToolParser {
     // 4) Tool call is malformed and unrecoverable.
     // Never leak internal XML to user-visible content.
     // Restore lead-in text if no tools were emitted.
-    logger.warn('[parser] Dropping malformed tool call block', { 
-      contentPreview: t.substring(0, 500), 
+    logger.warn('[parser] Dropping malformed tool call block', {
+      contentPreview: t.substring(0, 500),
       hasName: t.includes('"name"') || t.includes('"tool"') || t.includes('tool_name'),
       hasArgs: t.includes('"arguments"') || t.includes('"args"') || t.includes('"parameters"') || t.includes('"input"'),
       first100Chars: t.substring(0, 100)
     });
+    metrics.increment('tools_parse_errors_total', 1, { reason: 'malformed_block' });
     if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
       result.text += this.pendingLeadIn;
     }
@@ -399,17 +403,30 @@ export class StreamingToolParser {
 
   private parseToolContent(str: string): ParsedToolCall[] {
     const calls: ParsedToolCall[] = [];
-    
+
     // Try parsing as single JSON first
     try {
       const parsed = robustParseJSON(str);
-      if (parsed && typeof parsed === 'object') {
-        const tc = this.parseToolCall(parsed);
-        if (tc) calls.push(tc);
+      if (parsed !== null && parsed !== undefined && typeof parsed === 'object') {
+        if (Array.isArray(parsed)) {
+          // Array case: each item is a tool call, SKIP line-by-line
+          for (const item of parsed) {
+            const tc = this.parseToolCall(item);
+            if (tc) calls.push(tc);
+          }
+          return calls;
+        } else {
+          // Single object case: use it, SKIP line-by-line
+          const tc = this.parseToolCall(parsed);
+          if (tc) calls.push(tc);
+          return calls;
+        }
       }
-    } catch {}
-    
-    // Always try line-by-line parsing for multi-JSON content (independent of single parse)
+    } catch {
+      // Fall through to line-by-line
+    }
+
+    // robustParseJSON failed -> try line-by-line (each line that is a JSON object)
     if (str.includes('\n')) {
       const lines = str.split('\n').map(l => l.trim()).filter(l => l.startsWith('{') && l.endsWith('}'));
       for (const line of lines) {
@@ -417,14 +434,16 @@ export class StreamingToolParser {
           const parsed = JSON.parse(line);
           if (parsed && typeof parsed === 'object') {
             const tc = this.parseToolCall(parsed);
-            if (tc && !calls.some(c => c.name === tc.name && JSON.stringify(c.arguments) === JSON.stringify(tc.arguments))) {
+            if (tc && !calls.some(c => this.isDuplicateToolCall(c, tc))) {
               calls.push(tc);
             }
           }
-        } catch {}
+        } catch {
+          // Skip lines that don't parse
+        }
       }
     }
-    
+
     return calls;
   }
 
@@ -446,5 +465,12 @@ export class StreamingToolParser {
       name,
       arguments: args,
     };
+  }
+
+  private isDuplicateToolCall(a: ParsedToolCall, b: ParsedToolCall): boolean {
+    if (a.name !== b.name) return false;
+    const aKeys = Object.keys(a.arguments).sort();
+    const bKeys = Object.keys(b.arguments).sort();
+    return JSON.stringify(aKeys) === JSON.stringify(bKeys);
   }
 }

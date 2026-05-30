@@ -36,18 +36,25 @@ export function validateAgainstSchema(
     return value;
   }
 
+  let result: unknown;
+
   switch (schema.type) {
     case 'object':
-      return validateObject(value, schema, path);
+      result = validateObject(value, schema, path);
+      break;
     case 'array':
-      return validateArray(value, schema, path);
+      result = validateArray(value, schema, path);
+      break;
     case 'string':
-      return validateString(value, schema, path);
+      result = validateString(value, schema, path);
+      break;
     case 'number':
     case 'integer':
-      return validateNumber(value, schema, path);
+      result = validateNumber(value, schema, path);
+      break;
     case 'boolean':
-      return validateBoolean(value, schema, path);
+      result = validateBoolean(value, schema, path);
+      break;
     case 'null':
       if (value !== null) {
         throw new SchemaValidationError(
@@ -56,9 +63,106 @@ export function validateAgainstSchema(
           value
         );
       }
-      return null;
+      result = null;
+      break;
     default:
-      return value;
+      result = value;
+      break;
+  }
+
+  // Validate combinators (anyOf, oneOf, allOf, not) after type validation.
+  // These are independent assertions per JSON Schema spec.
+  validateCombinators(value, schema, path);
+
+  return result;
+}
+
+/**
+ * Validates JSON Schema combinators: anyOf, oneOf, allOf, not.
+ * These are independent of the `type` keyword and are checked at every level.
+ * @throws SchemaValidationError if any combinator check fails
+ */
+function validateCombinators(
+  value: unknown,
+  schema: JsonSchema,
+  path: string
+): void {
+  // anyOf: value must match AT LEAST one sub-schema
+  if (schema.anyOf && schema.anyOf.length > 0) {
+    let passed = false;
+    for (let i = 0; i < schema.anyOf.length; i++) {
+      try {
+        validateAgainstSchema(value, schema.anyOf[i], `${path}.anyOf[${i}]`);
+        passed = true;
+        break;
+      } catch {
+        // try next sub-schema
+      }
+    }
+    if (!passed) {
+      throw new SchemaValidationError(
+        `Value at ${path} does not match any schema in anyOf (${schema.anyOf.length} alternatives tried)`,
+        path,
+        value
+      );
+    }
+  }
+
+  // oneOf: value must match EXACTLY ONE sub-schema
+  if (schema.oneOf && schema.oneOf.length > 0) {
+    let matchCount = 0;
+    for (let i = 0; i < schema.oneOf.length; i++) {
+      try {
+        validateAgainstSchema(value, schema.oneOf[i], `${path}.oneOf[${i}]`);
+        matchCount++;
+      } catch {
+        // does not match this sub-schema
+      }
+    }
+    if (matchCount !== 1) {
+      throw new SchemaValidationError(
+        `Value at ${path} matches ${matchCount} schemas in oneOf (expected exactly 1)`,
+        path,
+        value
+      );
+    }
+  }
+
+  // allOf: value must match ALL sub-schemas
+  if (schema.allOf && schema.allOf.length > 0) {
+    const errors: string[] = [];
+    for (let i = 0; i < schema.allOf.length; i++) {
+      try {
+        validateAgainstSchema(value, schema.allOf[i], `${path}.allOf[${i}]`);
+      } catch (e: any) {
+        errors.push(e.message || String(e));
+      }
+    }
+    if (errors.length > 0) {
+      throw new SchemaValidationError(
+        `Value at ${path} failed allOf: ${errors.join('; ')}`,
+        path,
+        value
+      );
+    }
+  }
+
+  // not: value must NOT match the schema
+  if (schema.not) {
+    let matched = false;
+    try {
+      validateAgainstSchema(value, schema.not, `${path}.not`);
+      matched = true;
+    } catch {
+      // value does not match the not schema — this is the expected outcome
+    }
+    if (matched) {
+      throw new SchemaValidationError(
+        `Value at ${path} must not match the schema in 'not'`,
+        path,
+        value
+      );
+    }
   }
 }
 

@@ -18,6 +18,9 @@ import type { FunctionToolDefinition } from '../tools/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 import { RetryableQwenStreamError } from '../services/qwen.ts';
+import { config } from '../core/config.js';
+import { runExecutionLoop } from '../tools/executor.ts';
+import type { LLMSendFunction } from '../tools/executor.ts';
 import { Mutex } from '../services/playwright.ts';
 import { sanitizeError } from '../utils/error-sanitization.ts';
 import { getModelContextWindow } from '../core/model-registry.js'
@@ -26,6 +29,7 @@ import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAcc
 import { registerStream, removeStream, getStream } from '../core/stream-registry.ts';
 import { validateChatRequest } from '../types/validation.ts';
 import { Logger } from '../core/logger.js';
+import { metrics } from '../core/metrics.js';
 
 const logger = new Logger('info', 'Chat')
 
@@ -177,7 +181,16 @@ export async function chatCompletions(c: Context) {
 
     // Inject tools instructions
     const bodyAny = body as any;
-    if (bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0) {
+    const hasTools = bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0;
+    const toolChoice = bodyAny.tool_choice;
+
+    // Edge case: tool_choice='required' without tools -> return 400 error
+    if (toolChoice === 'required' && !hasTools) {
+      return c.json({ error: { message: "tool_choice 'required' requires at least one tool to be provided", type: 'invalid_request_error' } }, 400);
+    }
+
+    // If no tools or empty array: don't add anything regardless of tool_choice
+    if (hasTools && toolChoice !== 'none') {
       // Better formatting for tools
       const formattedTools = bodyAny.tools.map((t: any) => {
         if (t.type === 'function') {
@@ -193,13 +206,29 @@ export async function chatCompletions(c: Context) {
       
       systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
       
-      if (bodyAny.tool_choice && typeof bodyAny.tool_choice === 'object' && bodyAny.tool_choice.function) {
-        const forcedTool = bodyAny.tool_choice.function.name;
-        systemPrompt += `CRITICAL: You MUST call the tool "${forcedTool}" in this response.\n\n`;
+      if (typeof toolChoice === 'object' && toolChoice?.type === 'function' && toolChoice?.function?.name) {
+        // Prompt injection protection: validate tool name against registered tools
+        const rawName = toolChoice.function.name;
+        const matchingTool = bodyAny.tools.find((t: any) =>
+          t.type === 'function' && t.function.name === rawName
+        );
+        if (!matchingTool) {
+          return c.json({ error: { message: "Tool name does not match any registered tool", type: 'invalid_request_error' } }, 400);
+        }
+        // Use validated name from tool definition (not raw input)
+        systemPrompt += `CRITICAL: You MUST call the tool "${matchingTool.function.name}" in this response.\n\n`;
+      } else if (toolChoice === 'required') {
+        systemPrompt += `CRITICAL: Você DEVE usar uma tool nesta resposta.\n\n`;
       }
     }
 
     const modelId = body.model.replace('-no-thinking', '');
+
+    // EXECUTOR_ENABLED + streaming is not supported (lock not acquired yet, safe to return early)
+    if (config.executor.enabled && body.stream) {
+      return c.json({ error: { message: 'EXECUTOR_ENABLED is not compatible with streaming. Use stream=false or EXECUTOR_ENABLED=false.', type: 'invalid_request_error' } }, 400);
+    }
+
     const modelContextWindow = getModelContextWindow(modelId)
     const estimatedTokens = estimateTokenCount(systemPrompt + prompt);
     
@@ -225,6 +254,7 @@ export async function chatCompletions(c: Context) {
     let stream: ReadableStream | undefined;
     let uiSessionId = '';
     let releaseChatLock: (() => void) | undefined;
+      let effectiveAccountId: string | undefined;
 
     while (account) {
       const accountId = account.id;
@@ -272,6 +302,7 @@ export async function chatCompletions(c: Context) {
               targetResponseId: '',
               headers: result.headers,
             });
+            effectiveAccountId = accountId;
             success = true;
             break;
           } catch (err: any) {
@@ -465,6 +496,90 @@ export async function chatCompletions(c: Context) {
         });
       }
 
+      // ── Task 6: Model tool-usage detection (non-streaming) ──
+      if (hasTools) {
+        const isRequired = toolChoice === 'required' ||
+          (typeof toolChoice === 'object' && toolChoice?.type === 'function');
+
+        if (toolCallsOut.length === 0) {
+          if (isRequired) {
+            logger.error('Model failed to invoke tools (tool_choice=required, no tool_calls in response)');
+            releaseChatLock?.();
+            return c.json({ error: { message: 'Model failed to invoke tools', type: 'server_error' } }, 502);
+          }
+          logger.info('Model chose not to invoke tools (tool_choice=auto, no tool_calls in response)');
+        }
+
+        // Check for refusal keywords when no tools were called
+        if (toolCallsOut.length === 0 && lastFullContent) {
+          const refusalKeywords = ['cannot assist', 'i cannot', "i'm sorry", 'i cannot fulfill', 'cannot complete', 'unable to', 'i am not able'];
+          const lowerContent = lastFullContent.toLowerCase();
+          if (refusalKeywords.some(k => lowerContent.includes(k))) {
+            logger.warn('Model response contains refusal keywords — tool call may have been refused');
+          }
+        }
+      }
+
+      // ── Task 11: Tool parse metrics (non-streaming) ──
+      if (toolCallsOut.length > 0) {
+        metrics.increment('tools_parsed_total', toolCallsOut.length, { method: 'non-streaming' });
+      }
+
+      // ── Task 4: ExecutionLoop (non-streaming only) ──
+      if (config.executor.enabled && toolCallsOut.length > 0) {
+        logger.info('[Executor] Server-side tool execution activated');
+        const body = await c.req.json();
+        if (body.stream) {
+          releaseChatLock?.();
+          return c.json({ error: { message: 'EXECUTOR_ENABLED is not compatible with streaming. Use stream=false.', type: 'invalid_request_error' } }, 400);
+        }
+        const executorSendToLLM: LLMSendFunction = async (msgs, _tools, _model) => {
+          const promptText = (msgs as any[]).map((m: any) => `[${m.role}]: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join('\n');
+          const { stream, controller } = await createQwenStream(promptText, false, modelId, null, effectiveAccountId);
+          const parser = new StreamingToolParser();
+          const reader = stream.getReader();
+          let fullContent = '';
+          let toolCalls: any[] = [];
+          let finishReason = 'stop';
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const text = new TextDecoder().decode(value);
+              fullContent += text;
+              const result = parser.feed(text);
+              if (result.toolCalls.length > 0) {
+                toolCalls = result.toolCalls;
+                finishReason = 'tool_calls';
+              }
+            }
+          } finally {
+            reader.releaseLock();
+            controller.abort();
+          }
+          return { content: fullContent || null, toolCalls: toolCalls || [], finishReason };
+        };
+        const result = await runExecutionLoop(executorSendToLLM, messages, modelId, {
+          maxTurns: config.executor.maxTurns,
+          timeoutMs: config.executor.timeoutMs,
+        });
+        const usage2 = {
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_tokens: promptTokens + completionTokens,
+          prompt_tokens_details: { cached_tokens: 0 }
+        };
+        releaseChatLock?.();
+        return c.json({
+          id: completionId,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: modelId,
+          choices: [{ index: 0, message: { role: 'assistant', content: result }, finish_reason: 'stop' }],
+          usage: usage2,
+        });
+      }
+
       const usage = {
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
@@ -473,7 +588,12 @@ export async function chatCompletions(c: Context) {
       };
       const message: any = { role: 'assistant', content: toolCallsOut.length ? null : lastFullContent };
       if (reasoningBuffer) message.reasoning_content = reasoningBuffer;
-      if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
+      if (toolCallsOut.length) {
+        let toolCallIndex = 0;
+        for (const tc of toolCallsOut) {
+          tc.index = toolCallIndex++;
+        }
+      }
       if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
       releaseChatLock?.();
@@ -543,6 +663,7 @@ export async function chatCompletions(c: Context) {
        let lastFullContent = '';
        let targetResponseId: string | null = null;
        const toolParser = new StreamingToolParser(bodyAny.tools || []);
+       let toolCallIndex = 0;
 
       let buffer = '';
       let completionTokens = 0;
@@ -645,6 +766,7 @@ export async function chatCompletions(c: Context) {
                 }
 
                 for (const tc of toolCalls) {
+                  const index = toolCallIndex++;
                   await writeEvent({
                     id: completionId,
                     object: 'chat.completion.chunk',
@@ -652,7 +774,7 @@ export async function chatCompletions(c: Context) {
                     model: body.model,
                     choices: [makeChoice({
                       tool_calls: [{
-                        index: toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc),
+                        index,
                         id: tc.id,
                         type: 'function',
                         function: {
@@ -703,6 +825,7 @@ export async function chatCompletions(c: Context) {
         });
       }
       for (const tc of remainingToolCalls) {
+        const index = toolCallIndex++;
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
@@ -710,7 +833,7 @@ export async function chatCompletions(c: Context) {
           model: body.model,
           choices: [makeChoice({
             tool_calls: [{
-              index: toolParser.getEmittedToolCallCount() - remainingToolCalls.length + remainingToolCalls.indexOf(tc),
+              index,
               id: tc.id,
               type: 'function',
               function: {
@@ -721,7 +844,36 @@ export async function chatCompletions(c: Context) {
           })]
         });
       }
-  
+
+      // ── Task 6: Model tool-usage detection (streaming) ──
+      if (hasTools) {
+        const isRequired = toolChoice === 'required' ||
+          (typeof toolChoice === 'object' && toolChoice?.type === 'function');
+        const totalToolCalls = toolParser.getEmittedToolCallCount();
+
+        if (totalToolCalls === 0) {
+          if (isRequired) {
+            logger.error('Model failed to invoke tools (tool_choice=required, no tool_calls in streaming response)');
+          } else {
+            logger.info('Model chose not to invoke tools (tool_choice=auto, no tool_calls in streaming response)');
+          }
+        }
+
+        // Check for refusal keywords when no tools were called
+        if (totalToolCalls === 0 && lastFullContent) {
+          const refusalKeywords = ['cannot assist', 'i cannot', "i'm sorry", 'i cannot fulfill', 'cannot complete', 'unable to', 'i am not able'];
+          const lowerContent = lastFullContent.toLowerCase();
+          if (refusalKeywords.some(k => lowerContent.includes(k))) {
+            logger.warn('Model streaming response contains refusal keywords — tool call may have been refused');
+          }
+        }
+      }
+
+      // ── Task 11: Tool parse metrics (streaming) ──
+      if (toolParser.getEmittedToolCallCount() > 0) {
+        metrics.increment('tools_parsed_total', toolParser.getEmittedToolCallCount(), { method: 'streaming' });
+      }
+
       // Send finish reason
       const usage = {
         prompt_tokens: promptTokens,
@@ -755,6 +907,7 @@ export async function chatCompletions(c: Context) {
 
       } finally {
         clearInterval(heartbeatInterval);
+        removeStream(completionId);
         releaseChatLock?.();
       }
     });

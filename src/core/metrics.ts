@@ -28,35 +28,50 @@ export class Metrics extends EventEmitter {
   }
 
   private registerDefaults(): void {
-    const defaults: Array<[string, MetricType, string]> = [
-      ['requests.total', 'counter', 'Total requests processed'],
-      ['requests.errors', 'counter', 'Total request errors'],
-      ['latency.request', 'histogram', 'Request latency (ms)'],
-      ['streams.active', 'gauge', 'Active SSE streams'],
-      ['streams.errors', 'counter', 'Stream errors'],
-      ['memory.heap.used', 'gauge', 'Heap memory used (bytes)'],
-      ['memory.heap.total', 'gauge', 'Heap memory total (bytes)'],
-      ['cache.set', 'counter', 'Cache set operations'],
-      ['cache.hit', 'counter', 'Cache hits'],
-      ['cache.miss', 'counter', 'Cache misses'],
-      ['cache.deleted', 'counter', 'Cache deletions'],
-      ['cache.flushed', 'counter', 'Cache flushes'],
-      ['cache.value.size', 'histogram', 'Cache value size (bytes)'],
-      ['cache.get.latency', 'histogram', 'Cache get latency (ms)'],
-      ['watchdog.ram.status', 'gauge', 'Watchdog RAM status (0=ok, 1=warning, 2=critical)'],
-      ['watchdog.overall', 'gauge', 'Watchdog overall status (0=healthy, 1=degraded, 2=unhealthy)'],
-      ['watchdog.recovery.triggered', 'counter', 'Recovery attempts triggered'],
-      ['watchdog.recovery.success', 'counter', 'Successful recoveries'],
-      ['watchdog.recovery.failed', 'counter', 'Failed recoveries'],
+    const defaultBuckets = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]
+    const toolDurationBuckets = [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10, 30]
+
+    interface MetricEntry {
+      name: string
+      type: MetricType
+      help: string
+      buckets?: number[]
+    }
+
+    const defaults: MetricEntry[] = [
+      { name: 'requests.total', type: 'counter', help: 'Total requests processed' },
+      { name: 'requests.errors', type: 'counter', help: 'Total request errors' },
+      { name: 'latency.request', type: 'histogram', help: 'Request latency (ms)' },
+      { name: 'streams.active', type: 'gauge', help: 'Active SSE streams' },
+      { name: 'streams.errors', type: 'counter', help: 'Stream errors' },
+      { name: 'memory.heap.used', type: 'gauge', help: 'Heap memory used (bytes)' },
+      { name: 'memory.heap.total', type: 'gauge', help: 'Heap memory total (bytes)' },
+      { name: 'cache.set', type: 'counter', help: 'Cache set operations' },
+      { name: 'cache.hit', type: 'counter', help: 'Cache hits' },
+      { name: 'cache.miss', type: 'counter', help: 'Cache misses' },
+      { name: 'cache.deleted', type: 'counter', help: 'Cache deletions' },
+      { name: 'cache.flushed', type: 'counter', help: 'Cache flushes' },
+      { name: 'cache.value.size', type: 'histogram', help: 'Cache value size (bytes)' },
+      { name: 'cache.get.latency', type: 'histogram', help: 'Cache get latency (ms)' },
+      { name: 'watchdog.ram.status', type: 'gauge', help: 'Watchdog RAM status (0=ok, 1=warning, 2=critical)' },
+      { name: 'watchdog.overall', type: 'gauge', help: 'Watchdog overall status (0=healthy, 1=degraded, 2=unhealthy)' },
+      { name: 'watchdog.recovery.triggered', type: 'counter', help: 'Recovery attempts triggered' },
+      { name: 'watchdog.recovery.success', type: 'counter', help: 'Successful recoveries' },
+      { name: 'watchdog.recovery.failed', type: 'counter', help: 'Failed recoveries' },
+      // Tool call metrics
+      { name: 'tools_parsed_total', type: 'counter', help: 'Total tool calls parsed (labels: method=streaming|non-streaming)' },
+      { name: 'tools_parse_errors_total', type: 'counter', help: 'Tool call parse errors' },
+      { name: 'tools_executed_total', type: 'counter', help: 'Total tool executions (labels: tool_name)' },
+      { name: 'tools_execution_duration_seconds', type: 'histogram', help: 'Tool execution duration (seconds)', buckets: toolDurationBuckets },
     ]
 
-    for (const [name, type, help] of defaults) {
+    for (const { name, type, help, buckets } of defaults) {
       this.metrics.set(name, {
         name,
         type,
         help,
         values: new Map(),
-        histogramBuckets: type === 'histogram' ? [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000] : undefined,
+        histogramBuckets: buckets || (type === 'histogram' ? defaultBuckets : undefined),
       })
     }
   }

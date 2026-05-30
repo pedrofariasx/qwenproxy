@@ -17,6 +17,8 @@ const logger = new Logger('info', 'Executor')
 export interface ExecutionLoopConfig {
   maxTurns?: number;
   debug?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 export interface LoopTurnResult {
@@ -170,17 +172,31 @@ export async function runExecutionLoop(
 ): Promise<string> {
   const maxTurns = config.maxTurns ?? 10;
   const debug = config.debug ?? false;
+  const signal = config.signal;
+  const timeoutMs = config.timeoutMs ?? 120000;
+
+  // Isolate caller messages — never mutate the original array
+  const workingMessages = [...messages];
+  const overallTimeout = AbortSignal.timeout(timeoutMs);
+  const effectiveSignal = signal
+    ? AbortSignal.any([signal, overallTimeout])
+    : overallTimeout;
 
   const tools = registry.listNames().length > 0
     ? registry.toOpenAITools()
     : undefined;
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    if (debug) {
-      logger.info(`Turn ${turn + 1}/${maxTurns}, messages: ${messages.length}`);
+    // Check for abort signal at the start of each turn
+    if (signal?.aborted) {
+      throw new Error(`Execution loop aborted: ${signal.reason || 'Signal aborted'}`);
     }
 
-    const response = await sendToLLM(messages, tools, model);
+    if (debug) {
+      logger.info(`Turn ${turn + 1}/${maxTurns}, messages: ${workingMessages.length}`);
+    }
+
+    const response = await sendToLLM(workingMessages, tools, model);
 
     const hasStructuredToolCalls = response.toolCalls && response.toolCalls.length > 0;
     let parsedFromContent: { textContent: string; toolCalls: ParsedToolCall[] } | null = null;
@@ -205,7 +221,7 @@ export async function runExecutionLoop(
     }
 
     const context: ToolContext = {
-      messages,
+      messages: workingMessages,
       turn,
       model,
     };
@@ -216,10 +232,10 @@ export async function runExecutionLoop(
 
     const toolResults = await executeToolCalls(effectiveToolCalls, context);
 
-    messages.push(buildAssistantToolCallMessage(effectiveContent, effectiveToolCalls));
+    workingMessages.push(buildAssistantToolCallMessage(effectiveContent, effectiveToolCalls));
 
     for (const result of toolResults) {
-      messages.push(buildToolMessage(result));
+      workingMessages.push(buildToolMessage(result));
     }
 
     if (debug) {

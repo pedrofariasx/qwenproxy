@@ -12,6 +12,7 @@ import type {
   ToolRegistration,
 } from './types';
 import { validateAgainstSchema, SchemaValidationError } from './schema';
+import { metrics } from '../core/metrics.js';
 
 /**
  * Central tool registry. Tools are registered at startup and looked up by name
@@ -119,6 +120,8 @@ export class ToolRegistry {
       throw new Error(`Unknown tool: '${toolName}'`);
     }
 
+    const startTime = performance.now();
+
     // Strict validation
     const validatedArgs = validateAgainstSchema(
       rawArgs,
@@ -127,6 +130,12 @@ export class ToolRegistry {
     ) as Record<string, unknown>;
 
     const result = await registration.handler(validatedArgs, context);
+
+    const durationMs = performance.now() - startTime;
+
+    // Record tool execution metrics
+    metrics.increment('tools_executed_total', 1, { tool_name: toolName });
+    metrics.histogram('tools_execution_duration_seconds', durationMs / 1000, { tool_name: toolName });
 
     // Serialize result
     if (typeof result === 'string') {
