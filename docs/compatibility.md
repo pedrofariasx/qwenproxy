@@ -28,6 +28,7 @@ Se `API_KEY` estiver configurado no `.env`, use essa mesma chave no cliente como
 - Erros de `/v1/*` usam formato OpenAI-compatible: `{ "error": { "message", "type", "param", "code" } }`.
 - `OPTIONS` em `/v1/*` retorna CORS simples para SDKs e clientes que fazem preflight.
 - `GET /v1/models` e `GET /v1/models/:model` retornam objetos `model` com `capabilities`, `context_window`, `supports_tools` e variantes `-no-thinking`.
+- Streams de `/v1/responses` enviam `event:` SSE e todo JSON em `data:` inclui `type` e `sequence_number`, por exemplo `{"type":"response.output_text.delta","sequence_number":2,...}`.
 
 ## OpenCode
 

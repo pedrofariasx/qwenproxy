@@ -283,8 +283,28 @@ function createJsonResponse(payload: unknown, status = 200): Response {
   return openAIJsonResponse(payload, status);
 }
 
-function eventPayload(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+function eventPayload(event: string, data: unknown, sequenceNumber: number): string {
+  return `event: ${event}\ndata: ${JSON.stringify(responseStreamPayload(event, data, sequenceNumber))}\n\n`;
+}
+
+function responseStreamPayload(event: string, data: unknown, sequenceNumber: number): Record<string, unknown> {
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const payload = { ...(data as Record<string, unknown>) };
+    delete payload.type;
+    delete payload.sequence_number;
+
+    return {
+      type: event,
+      sequence_number: sequenceNumber,
+      ...payload,
+    };
+  }
+
+  return {
+    type: event,
+    sequence_number: sequenceNumber,
+    data,
+  };
 }
 
 function normalizeContentPart(part: any): string {
@@ -763,6 +783,7 @@ async function handleResponses(
     targetResponseId: null,
   };
   const sseEncoder = new TextEncoder();
+  let sequenceNumber = 0;
 
   const writeRaw = (controller: ReadableStreamDefaultController, text: string) => {
     if (streamState.closed || streamState.cancelled) {
@@ -780,11 +801,12 @@ async function handleResponses(
   };
 
   const writeEvent = (controller: ReadableStreamDefaultController, event: string, payload: unknown) => {
-    writeRaw(controller, eventPayload(event, payload));
+    writeRaw(controller, eventPayload(event, payload, sequenceNumber++));
   };
 
   const writeDone = (controller: ReadableStreamDefaultController) => {
-    writeRaw(controller, 'data: [DONE]\n\n');
+    // Responses API streams are event-typed JSON streams. The final
+    // response.completed event plus closing the stream is the terminator.
   };
 
   const closeStream = (controller: ReadableStreamDefaultController) => {
@@ -829,6 +851,7 @@ async function handleResponses(
     const streamResponseOutput: any[] = [];
     let streamAssistantItemId = `msg_${uuidv4().replace(/-/g, '')}`;
     let streamAssistantItemAdded = false;
+    let streamContentPartAdded = false;
     let streamStopAfterToolCall = false;
 
     const streamBuildUsage = () => ({
@@ -916,6 +939,20 @@ async function handleResponses(
                 }
 
                 if (parsed.text) {
+                  if (!streamContentPartAdded) {
+                    streamContentPartAdded = true;
+                    writeEvent(controller, 'response.content_part.added', {
+                      response_id: responseId,
+                      item_id: streamAssistantItemId,
+                      output_index: streamResponseOutput.length,
+                      content_index: 0,
+                      part: {
+                        type: 'output_text',
+                        text: '',
+                        annotations: [],
+                      },
+                    });
+                  }
                   streamAssistantText += parsed.text;
                   debugTrace.streamDelta('answer', parsed.text);
                   writeEvent(controller, 'response.output_text.delta', {
@@ -985,6 +1022,20 @@ async function handleResponses(
               role: 'assistant',
               status: 'in_progress',
               content: [],
+            },
+          });
+        }
+        if (!streamContentPartAdded) {
+          streamContentPartAdded = true;
+          writeEvent(controller, 'response.content_part.added', {
+            response_id: responseId,
+            item_id: streamAssistantItemId,
+            output_index: 0,
+            content_index: 0,
+            part: {
+              type: 'output_text',
+              text: '',
+              annotations: [],
             },
           });
         }
