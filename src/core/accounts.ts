@@ -18,7 +18,41 @@ function isValidAccount(account: any): account is QwenAccount {
     && typeof account.password === 'string'
 }
 
+function uuidFromEmail(email: string): string {
+  const hash = crypto.createHash('sha256').update(email).digest('hex')
+  return [
+    hash.slice(0, 8),
+    hash.slice(8, 12),
+    hash.slice(12, 16),
+    hash.slice(16, 20),
+    hash.slice(20, 32),
+  ].join('-')
+}
+
+function loadAccountsFromEnv(): QwenAccount[] {
+  const accounts: QwenAccount[] = []
+  for (let i = 1; i <= 20; i++) {
+    const email = process.env[`QWEN_EMAIL_${i}`]
+    const password = process.env[`QWEN_PASSWORD_${i}`]
+    if (email && password) {
+      accounts.push({ id: uuidFromEmail(email), email, password })
+    }
+  }
+  return accounts
+}
+
 export function loadAccounts(): QwenAccount[] {
+  const envAccounts = loadAccountsFromEnv()
+  if (envAccounts.length > 0) {
+    return envAccounts
+  }
+
+  const email = process.env.QWEN_EMAIL
+  const password = process.env.QWEN_PASSWORD
+  if (email && password) {
+    return [{ id: uuidFromEmail(email), email, password }]
+  }
+
   if (!fs.existsSync(ACCOUNTS_FILE)) {
     return []
   }

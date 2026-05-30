@@ -9,3 +9,4 @@ coverage/
 .cache/
 .kilo
 qwen_profiles/
+qwen_data/
