@@ -10,13 +10,23 @@ export interface QwenAccount {
 
 const ACCOUNTS_FILE = path.resolve('accounts.json')
 
+function isValidAccount(account: any): account is QwenAccount {
+  return !!account
+    && typeof account.id === 'string'
+    && typeof account.email === 'string'
+    && account.email.trim().length > 0
+    && typeof account.password === 'string'
+}
+
 export function loadAccounts(): QwenAccount[] {
   if (!fs.existsSync(ACCOUNTS_FILE)) {
     return []
   }
   try {
     const raw = fs.readFileSync(ACCOUNTS_FILE, 'utf-8')
-    return JSON.parse(raw)
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(isValidAccount)
   } catch {
     return []
   }

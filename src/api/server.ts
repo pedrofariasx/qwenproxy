@@ -101,28 +101,7 @@ export async function startServer(): Promise<void> {
 
   if (accounts.length > 0) {
     console.log(`[Server] Pre-warming ${accounts.length} configured account(s)...`)
-    const { initPlaywrightForAccount, getQwenHeaders } = await import('../services/playwright.ts')
-    const warmAccountRoutes = async (account: { id: string; email: string }) => {
-      const startedAt = Date.now()
-      const warmTimeoutMs = 90000
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`Timeout warming routes for ${account.email || account.id}`))
-        }, warmTimeoutMs)
-      })
-
-      try {
-        await Promise.race([
-          getQwenHeaders(true, account.id),
-          timeout,
-        ])
-      } finally {
-        if (timer) clearTimeout(timer)
-      }
-
-      console.log(`[Server] Routes warmed for ${account.email} in ${Date.now() - startedAt}ms`)
-    }
+    const { initPlaywrightForAccount } = await import('../services/playwright.ts')
 
     void Promise.allSettled(
       accounts.map(async (account) => {
@@ -130,7 +109,7 @@ export async function startServer(): Promise<void> {
         try {
           await initPlaywrightForAccount(account, config.browser.headless)
           console.log(`[Server] Account ${account.email} ready in ${Date.now() - startedAt}ms`)
-          await warmAccountRoutes(account)
+          console.log(`[Server] Route capture for ${account.email} deferred until first API request`)
         } catch (err: any) {
           console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
         }

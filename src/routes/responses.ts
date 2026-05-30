@@ -473,11 +473,6 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
   const prompt = buildPrompt(inputMessages);
   const finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
 
-  const qwen = await acquireQwenStream(finalPrompt, body.model, responseId);
-  const reader = qwen.stream.getReader();
-  const decoder = new TextDecoder();
-  const toolParser = new StreamingToolParser(body.tools || []);
-
   const startedAt = Math.floor(Date.now() / 1000);
   const assistantOutputItems: any[] = [];
   let assistantText = '';
@@ -505,7 +500,338 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
     output_tokens_details: { reasoning_tokens: 0 },
   });
 
+  const runStream = async (controller: ReadableStreamDefaultController) => {
+    const qwen = await acquireQwenStream(finalPrompt, body.model, responseId);
+    const reader = qwen.stream.getReader();
+    const decoder = new TextDecoder();
+    const toolParser = new StreamingToolParser(body.tools || []);
+    let streamBuffer = '';
+    let streamCompletionTokens = 0;
+    let streamPromptTokens = Math.ceil(finalPrompt.length / 3.5);
+    let streamTargetResponseId: string | null = null;
+    let streamAssistantText = '';
+    let streamReasoningBuffer = '';
+    let streamCurrentThoughtIndex = 0;
+    const streamAssistantOutputItems: any[] = [];
+    const streamAssistantMessage: Message = { role: 'assistant', content: null };
+    const streamResponseOutput: any[] = [];
+    let streamAssistantItemId = `msg_${uuidv4().replace(/-/g, '')}`;
+    let streamAssistantItemAdded = false;
+
+    const streamBuildUsage = () => ({
+      input_tokens: streamPromptTokens,
+      output_tokens: streamCompletionTokens,
+      total_tokens: streamPromptTokens + streamCompletionTokens,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens_details: { reasoning_tokens: 0 },
+    });
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        streamBuffer += decoder.decode(value, { stream: true });
+        const lines = streamBuffer.split('\n');
+        streamBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const dataStr = trimmed.slice(6);
+          if (dataStr === '[DONE]') continue;
+
+          try {
+            const chunk = JSON.parse(dataStr) as QwenChunk;
+
+            if (chunk['response.created']?.response_id && !streamTargetResponseId) {
+              streamTargetResponseId = chunk['response.created'].response_id;
+              updateSessionParent(qwen.uiSessionId, streamTargetResponseId);
+            } else if (chunk.response_id && !streamTargetResponseId) {
+              streamTargetResponseId = chunk.response_id;
+              updateSessionParent(qwen.uiSessionId, streamTargetResponseId);
+            }
+
+            if (chunk.usage) {
+              if (chunk.usage.output_tokens) streamCompletionTokens = chunk.usage.output_tokens;
+              if (chunk.usage.input_tokens) streamPromptTokens = chunk.usage.input_tokens;
+            }
+
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta || (streamTargetResponseId && chunk.response_id && chunk.response_id !== streamTargetResponseId)) continue;
+
+            if (delta.phase === 'thinking_summary' && delta.extra?.summary_thought?.content) {
+              const thoughts = delta.extra.summary_thought.content;
+              if (thoughts.length > streamCurrentThoughtIndex) {
+                const thoughtDelta = thoughts.slice(streamCurrentThoughtIndex).join('\n');
+                streamCurrentThoughtIndex = thoughts.length;
+                streamReasoningBuffer += thoughtDelta;
+              }
+            } else if (delta.phase === 'answer' && delta.content !== undefined) {
+              const result = getIncrementalDelta(streamAssistantText, delta.content || '');
+              if (result.delta) {
+                const parsed = toolParser.feed(result.delta);
+                if (parsed.text && !streamAssistantItemAdded) {
+                  streamAssistantItemAdded = true;
+                  writeEvent(controller, 'response.output_item.added', {
+                    response_id: responseId,
+                    output_index: streamResponseOutput.length,
+                    item: {
+                      type: 'message',
+                      id: streamAssistantItemId,
+                      role: 'assistant',
+                      status: 'in_progress',
+                      content: [],
+                    },
+                  });
+                }
+
+                if (parsed.text) {
+                  streamAssistantText += parsed.text;
+                  writeEvent(controller, 'response.output_text.delta', {
+                    response_id: responseId,
+                    output_index: streamResponseOutput.length,
+                    content_index: 0,
+                    delta: parsed.text,
+                  });
+                }
+
+                for (const tc of parsed.toolCalls) {
+                  const toolItem = {
+                    type: 'function_call',
+                    id: tc.id,
+                    call_id: tc.id,
+                    status: 'in_progress',
+                    name: tc.name,
+                    arguments: '',
+                  };
+                  writeEvent(controller, 'response.output_item.added', {
+                    response_id: responseId,
+                    output_index: streamResponseOutput.length + 1,
+                    item: toolItem,
+                  });
+                  const argumentsText = JSON.stringify(tc.arguments);
+                  writeEvent(controller, 'response.function_call_arguments.delta', {
+                    response_id: responseId,
+                    item_id: tc.id,
+                    output_index: streamResponseOutput.length + 1,
+                    content_index: 0,
+                    delta: argumentsText,
+                  });
+                  writeEvent(controller, 'response.function_call_arguments.done', {
+                    response_id: responseId,
+                    item_id: tc.id,
+                    output_index: streamResponseOutput.length + 1,
+                    content_index: 0,
+                    arguments: argumentsText,
+                  });
+                  writeEvent(controller, 'response.output_item.done', {
+                    response_id: responseId,
+                    output_index: streamResponseOutput.length + 1,
+                    item: { ...toolItem, status: 'completed', arguments: argumentsText },
+                  });
+                  streamAssistantOutputItems.push({
+                    type: 'function_call',
+                    id: tc.id,
+                    call_id: tc.id,
+                    status: 'completed',
+                    name: tc.name,
+                    arguments: JSON.stringify(tc.arguments),
+                  });
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+
+      const upstreamError = parseQwenErrorPayload(streamBuffer);
+      if (upstreamError) {
+        writeEvent(controller, 'response.completed', {
+          response: {
+            id: responseId,
+            status: 'failed',
+            error: upstreamError.message,
+          },
+        });
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+        return;
+      }
+
+      const flush = toolParser.flush();
+      if (flush.text) {
+        if (!streamAssistantItemAdded) {
+          streamAssistantItemAdded = true;
+          writeEvent(controller, 'response.output_item.added', {
+            response_id: responseId,
+            output_index: 0,
+            item: {
+              type: 'message',
+              id: streamAssistantItemId,
+              role: 'assistant',
+              status: 'in_progress',
+              content: [],
+            },
+          });
+        }
+        writeEvent(controller, 'response.output_text.delta', {
+          response_id: responseId,
+          output_index: 0,
+          content_index: 0,
+          delta: flush.text,
+        });
+        streamAssistantText += flush.text;
+      }
+      for (const tc of flush.toolCalls) {
+        const toolItem = {
+          type: 'function_call',
+          id: tc.id,
+          call_id: tc.id,
+          status: 'in_progress',
+          name: tc.name,
+          arguments: '',
+        };
+        writeEvent(controller, 'response.output_item.added', {
+          response_id: responseId,
+          output_index: 1,
+          item: toolItem,
+        });
+        const argumentsText = JSON.stringify(tc.arguments);
+        writeEvent(controller, 'response.function_call_arguments.delta', {
+          response_id: responseId,
+          item_id: tc.id,
+          output_index: 1,
+          content_index: 0,
+          delta: argumentsText,
+        });
+        writeEvent(controller, 'response.function_call_arguments.done', {
+          response_id: responseId,
+          item_id: tc.id,
+          output_index: 1,
+          content_index: 0,
+          arguments: argumentsText,
+        });
+        writeEvent(controller, 'response.output_item.done', {
+          response_id: responseId,
+          output_index: 1,
+          item: { ...toolItem, status: 'completed', arguments: argumentsText },
+        });
+        streamAssistantOutputItems.push({
+          type: 'function_call',
+          id: tc.id,
+          call_id: tc.id,
+          status: 'completed',
+          name: tc.name,
+          arguments: JSON.stringify(tc.arguments),
+        });
+      }
+
+      if (streamAssistantItemAdded) {
+        writeEvent(controller, 'response.output_text.done', {
+          response_id: responseId,
+          output_index: 0,
+          content_index: 0,
+          text: streamAssistantText,
+        });
+        writeEvent(controller, 'response.content_part.done', {
+          response_id: responseId,
+          output_index: 0,
+          content_index: 0,
+          part: {
+            type: 'output_text',
+            text: streamAssistantText,
+            annotations: [],
+          },
+        });
+        writeEvent(controller, 'response.output_item.done', {
+          response_id: responseId,
+          output_index: 0,
+          item: {
+            type: 'message',
+            id: streamAssistantItemId,
+            role: 'assistant',
+            status: 'completed',
+            content: [{
+              type: 'output_text',
+              text: streamAssistantText,
+              annotations: [],
+            }],
+          },
+        });
+      }
+
+      const response = buildResponseEnvelope({
+        id: responseId,
+        createdAt: startedAt,
+        model: body.model,
+        body,
+        previousResponseId,
+        output: [
+          ...(streamAssistantItemAdded ? [{
+            type: 'message',
+            id: streamAssistantItemId,
+            role: 'assistant',
+            status: 'completed',
+            content: [{
+              type: 'output_text',
+              text: streamAssistantText,
+              annotations: [],
+            }],
+          }] : []),
+          ...streamAssistantOutputItems,
+        ],
+        outputText: streamAssistantText,
+        usage: streamBuildUsage(),
+      });
+
+      writeEvent(controller, 'response.completed', { response });
+      controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      controller.close();
+
+      if (body.store ?? true) {
+        storeResponseContext(responseId, [...inputMessages, { role: 'assistant', content: streamAssistantText }]);
+        pruneResponseContexts();
+      }
+      removeStream(responseId);
+    } catch (err: any) {
+      if (isAbortError(err)) {
+        const cancelledResponse = buildResponseEnvelope({
+          id: responseId,
+          createdAt: startedAt,
+          model: body.model,
+          body,
+          previousResponseId,
+          output: [],
+          outputText: '',
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+          status: 'cancelled',
+        });
+
+        writeEvent(controller, 'response.completed', { response: cancelledResponse });
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        controller.close();
+        removeStream(responseId);
+        return;
+      }
+
+      console.error('Error streaming responses:', err);
+      controller.error(err);
+      removeStream(responseId);
+    }
+  };
+
   if (!stream) {
+    const qwen = await acquireQwenStream(finalPrompt, body.model, responseId);
+    const reader = qwen.stream.getReader();
+    const decoder = new TextDecoder();
+    const toolParser = new StreamingToolParser(body.tools || []);
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -626,312 +952,24 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
   }
 
   const streamResponse = new ReadableStream({
-    async start(controller) {
-      try {
-        writeEvent(controller, 'response.created', {
-          response: {
-            id: responseId,
-            object: 'response',
-            created_at: startedAt,
-            status: 'in_progress',
-            model: body.model,
-            output: [],
-            previous_response_id: previousResponseId,
-          },
-        });
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith('data: ')) continue;
-            const dataStr = trimmed.slice(6);
-            if (dataStr === '[DONE]') continue;
-
-            try {
-              const chunk = JSON.parse(dataStr) as QwenChunk;
-
-              if (chunk['response.created']?.response_id && !targetResponseId) {
-                targetResponseId = chunk['response.created'].response_id;
-                updateSessionParent(qwen.uiSessionId, targetResponseId);
-              } else if (chunk.response_id && !targetResponseId) {
-                targetResponseId = chunk.response_id;
-                updateSessionParent(qwen.uiSessionId, targetResponseId);
-              }
-
-              if (chunk.usage) {
-                if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
-                if (chunk.usage.input_tokens) promptTokens = chunk.usage.input_tokens;
-              }
-
-              const delta = chunk.choices?.[0]?.delta;
-              if (!delta || (targetResponseId && chunk.response_id && chunk.response_id !== targetResponseId)) continue;
-
-              if (delta.phase === 'thinking_summary' && delta.extra?.summary_thought?.content) {
-                const thoughts = delta.extra.summary_thought.content;
-                if (thoughts.length > currentThoughtIndex) {
-                  const thoughtDelta = thoughts.slice(currentThoughtIndex).join('\n');
-                  currentThoughtIndex = thoughts.length;
-                  reasoningBuffer += thoughtDelta;
-                }
-          } else if (delta.phase === 'answer' && delta.content !== undefined) {
-            const result = getIncrementalDelta(assistantText, delta.content || '');
-            if (result.delta) {
-                  const parsed = toolParser.feed(result.delta);
-                  if (parsed.text && !assistantItemAdded) {
-                    assistantItemAdded = true;
-                    writeEvent(controller, 'response.output_item.added', {
-                      response_id: responseId,
-                      output_index: responseOutput.length,
-                      item: {
-                        type: 'message',
-                        id: assistantItemId,
-                        role: 'assistant',
-                        status: 'in_progress',
-                        content: [],
-                      },
-                    });
-                  }
-
-                  if (parsed.text) {
-                    assistantText += parsed.text;
-                    writeEvent(controller, 'response.output_text.delta', {
-                      response_id: responseId,
-                      output_index: responseOutput.length,
-                      content_index: 0,
-                      delta: parsed.text,
-                    });
-                  }
-
-                  for (const tc of parsed.toolCalls) {
-                    const toolItem = {
-                      type: 'function_call',
-                      id: tc.id,
-                      call_id: tc.id,
-                      status: 'in_progress',
-                      name: tc.name,
-                      arguments: '',
-                    };
-                    writeEvent(controller, 'response.output_item.added', {
-                      response_id: responseId,
-                      output_index: responseOutput.length + 1,
-                      item: toolItem,
-                    });
-                    const argumentsText = JSON.stringify(tc.arguments);
-                    writeEvent(controller, 'response.function_call_arguments.delta', {
-                      response_id: responseId,
-                      item_id: tc.id,
-                      output_index: responseOutput.length + 1,
-                      content_index: 0,
-                      delta: argumentsText,
-                    });
-                    writeEvent(controller, 'response.function_call_arguments.done', {
-                      response_id: responseId,
-                      item_id: tc.id,
-                      output_index: responseOutput.length + 1,
-                      content_index: 0,
-                      arguments: argumentsText,
-                    });
-                    writeEvent(controller, 'response.output_item.done', {
-                      response_id: responseId,
-                      output_index: responseOutput.length + 1,
-                      item: { ...toolItem, status: 'completed', arguments: argumentsText },
-                    });
-                    assistantOutputItems.push({
-                      type: 'function_call',
-                      id: tc.id,
-                      call_id: tc.id,
-                      status: 'completed',
-                      name: tc.name,
-                      arguments: JSON.stringify(tc.arguments),
-                    });
-                  }
-                }
-              }
-            } catch {}
-          }
-        }
-
-        const upstreamError = parseQwenErrorPayload(buffer);
-        if (upstreamError) {
-          writeEvent(controller, 'response.completed', {
-            response: {
-              id: responseId,
-              status: 'failed',
-              error: upstreamError.message,
-            },
-          });
-          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-          controller.close();
-          return;
-        }
-
-        const flush = toolParser.flush();
-        if (flush.text) {
-          if (!assistantItemAdded) {
-            assistantItemAdded = true;
-            writeEvent(controller, 'response.output_item.added', {
-              response_id: responseId,
-              output_index: 0,
-              item: {
-                type: 'message',
-                id: assistantItemId,
-                role: 'assistant',
-                status: 'in_progress',
-                content: [],
-              },
-            });
-          }
-          writeEvent(controller, 'response.output_text.delta', {
-            response_id: responseId,
-            output_index: 0,
-            content_index: 0,
-            delta: flush.text,
-          });
-          assistantText += flush.text;
-        }
-        for (const tc of flush.toolCalls) {
-          const toolItem = {
-            type: 'function_call',
-            id: tc.id,
-            call_id: tc.id,
-            status: 'in_progress',
-            name: tc.name,
-            arguments: '',
-          };
-          writeEvent(controller, 'response.output_item.added', {
-            response_id: responseId,
-            output_index: 1,
-            item: toolItem,
-          });
-          const argumentsText = JSON.stringify(tc.arguments);
-          writeEvent(controller, 'response.function_call_arguments.delta', {
-            response_id: responseId,
-            item_id: tc.id,
-            output_index: 1,
-            content_index: 0,
-            delta: argumentsText,
-          });
-          writeEvent(controller, 'response.function_call_arguments.done', {
-            response_id: responseId,
-            item_id: tc.id,
-            output_index: 1,
-            content_index: 0,
-            arguments: argumentsText,
-          });
-          writeEvent(controller, 'response.output_item.done', {
-            response_id: responseId,
-            output_index: 1,
-            item: { ...toolItem, status: 'completed', arguments: argumentsText },
-          });
-          assistantOutputItems.push({
-            type: 'function_call',
-            id: tc.id,
-            call_id: tc.id,
-            status: 'completed',
-            name: tc.name,
-            arguments: JSON.stringify(tc.arguments),
-          });
-        }
-
-        if (assistantItemAdded) {
-          writeEvent(controller, 'response.output_text.done', {
-            response_id: responseId,
-            output_index: 0,
-            content_index: 0,
-            text: assistantText,
-          });
-          writeEvent(controller, 'response.content_part.done', {
-            response_id: responseId,
-            output_index: 0,
-            content_index: 0,
-            part: {
-              type: 'output_text',
-              text: assistantText,
-              annotations: [],
-            },
-          });
-          writeEvent(controller, 'response.output_item.done', {
-            response_id: responseId,
-            output_index: 0,
-            item: {
-              type: 'message',
-              id: assistantItemId,
-              role: 'assistant',
-              status: 'completed',
-              content: [{
-                type: 'output_text',
-                text: assistantText,
-                annotations: [],
-              }],
-            },
-          });
-        }
-
-        const response = buildResponseEnvelope({
+    start(controller) {
+      writeEvent(controller, 'response.created', {
+        response: {
           id: responseId,
-          createdAt: startedAt,
+          object: 'response',
+          created_at: startedAt,
+          status: 'in_progress',
           model: body.model,
-          body,
-          previousResponseId,
-          output: [
-            ...(assistantItemAdded ? [{
-              type: 'message',
-              id: assistantItemId,
-              role: 'assistant',
-              status: 'completed',
-              content: [{
-                type: 'output_text',
-                text: assistantText,
-                annotations: [],
-              }],
-            }] : []),
-            ...assistantOutputItems,
-          ],
-          outputText: assistantText,
-          usage: buildUsage(),
-        });
+          output: [],
+          previous_response_id: previousResponseId,
+        },
+      });
 
-        writeEvent(controller, 'response.completed', { response });
-        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-        controller.close();
-
-        if (body.store ?? true) {
-          storeResponseContext(responseId, [...inputMessages, { role: 'assistant', content: assistantText }]);
-          pruneResponseContexts();
-        }
-        removeStream(responseId);
-      } catch (err: any) {
-        if (isAbortError(err)) {
-          const cancelledResponse = buildResponseEnvelope({
-            id: responseId,
-            createdAt: startedAt,
-            model: body.model,
-            body,
-            previousResponseId,
-            output: [],
-            outputText: assistantText,
-            usage: buildUsage(),
-            status: 'cancelled',
-          });
-
-          writeEvent(controller, 'response.completed', { response: cancelledResponse });
-          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-          controller.close();
-          removeStream(responseId);
-          return;
-        }
-
+      void runStream(controller).catch((err: any) => {
         console.error('Error streaming responses:', err);
         controller.error(err);
         removeStream(responseId);
-      }
+      });
     },
   });
 
