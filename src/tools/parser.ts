@@ -42,6 +42,77 @@ function coerceParameterValue(rawValue: string): unknown {
   return value;
 }
 
+function splitInlineArguments(raw: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  let escaped = false;
+
+  for (const ch of raw) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '“' || ch === '”') {
+      quote = ch === '“' ? '”' : ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ',') {
+      parts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function stripInlineQuotes(raw: string): string {
+  const value = raw.trim();
+  if (value.length < 2) return value;
+  const first = value[0];
+  const last = value[value.length - 1];
+  if ((first === '"' && last === '"') || (first === "'" && last === "'") || (first === '“' && last === '”')) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parseInlineArguments(raw: string): Record<string, unknown> {
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {}
+  }
+
+  const args: Record<string, unknown> = {};
+  for (const part of splitInlineArguments(trimmed)) {
+    const eq = part.indexOf('=');
+    if (eq <= 0) continue;
+    const key = part.slice(0, eq).trim();
+    if (!/^[A-Za-z_][\w-]*$/.test(key)) continue;
+    args[key] = coerceParameterValue(stripInlineQuotes(part.slice(eq + 1)));
+  }
+  return args;
+}
+
 /**
  * Extract tool name from the opening tag attribute or a <name> child element.
  */
@@ -65,13 +136,17 @@ function inferToolNameFromParameters(args: Record<string, unknown>, tools: Funct
   if (argKeys.length === 0 || !Array.isArray(tools)) return '';
 
   const matches = tools.filter((tool) => {
-    const fn = tool?.type === 'function' ? tool.function : (tool as any)?.function;
+    const fn = tool?.type === 'function'
+      ? ((tool as any).function || tool)
+      : (tool as any)?.function;
     const properties = fn?.parameters?.properties || {};
     return argKeys.every(k => Object.prototype.hasOwnProperty.call(properties, k));
   });
 
   if (matches.length === 1) {
-    const fn = matches[0]?.type === 'function' ? matches[0].function : (matches[0] as any)?.function;
+    const fn = matches[0]?.type === 'function'
+      ? ((matches[0] as any).function || matches[0])
+      : (matches[0] as any)?.function;
     return fn?.name || '';
   }
 
@@ -153,6 +228,17 @@ function findPartialToolOpenIndex(buffer: string): number {
   return -1;
 }
 
+function findPartialInlineToolIndex(buffer: string): number {
+  const lower = buffer.toLowerCase();
+  const idx = lower.lastIndexOf('tool:');
+  if (idx === -1) return -1;
+
+  const tail = buffer.substring(idx);
+  if (!/^tool:\s*[A-Za-z_][\w-]*(?:\s*\([^)]*)?$/i.test(tail.trim())) return -1;
+  if (tail.includes(')')) return -1;
+  return idx;
+}
+
 // ─── StreamingToolParser ───────────────────────────────────────────────────────
 
 export class StreamingToolParser {
@@ -200,12 +286,27 @@ export class StreamingToolParser {
           continue;
         } else {
           // No full open tag found. Check for partial at end.
-          const partialIdx = findPartialToolOpenIndex(this.buffer);
+          const partialCandidates = [
+            findPartialToolOpenIndex(this.buffer),
+            this.allowedToolNames.size ? findPartialInlineToolIndex(this.buffer) : -1,
+          ].filter((idx) => idx >= 0);
+          const partialIdx = partialCandidates.length ? Math.min(...partialCandidates) : -1;
           const flushIndex = partialIdx === -1 ? this.buffer.length : partialIdx;
           if (flushIndex > 0) {
             const textToEmit = this.buffer.substring(0, flushIndex);
-            result.text += textToEmit;
-            this.buffer = this.buffer.substring(flushIndex);
+            const inline = this.parseInlineToolSyntax(textToEmit);
+            if (inline && inline.calls.length > 0) {
+              if (this.emittedToolCallCount === 0 && inline.textBefore.trim()) {
+                result.text += inline.textBefore;
+              }
+              result.toolCalls.push(...inline.calls);
+              this.emittedToolCallCount += inline.calls.length;
+              this.pendingLeadIn = '';
+              this.buffer = textToEmit.substring(inline.consumedChars) + this.buffer.substring(flushIndex);
+            } else {
+              result.text += textToEmit;
+              this.buffer = this.buffer.substring(flushIndex);
+            }
           }
           break;
         }
@@ -463,10 +564,43 @@ export class StreamingToolParser {
     });
   }
 
+  private parseInlineToolSyntax(text: string): { calls: ParsedToolCall[]; consumedChars: number; textBefore: string } | null {
+    const calls: ParsedToolCall[] = [];
+    const re = /\btool\s*:\s*([A-Za-z_][\w-]*)\s*\(([^()]*)\)/gi;
+    let match: RegExpExecArray | null;
+    let firstIndex = -1;
+    let consumedChars = 0;
+
+    while ((match = re.exec(text)) !== null) {
+      const name = match[1];
+      if (!this.isAllowedToolName(name)) continue;
+      const args = parseInlineArguments(match[2]);
+      const normalized = this.normalizeParsedToolCall({
+        id: `call_${uuidv4()}`,
+        name,
+        arguments: args,
+      });
+      if (!normalized) continue;
+      if (firstIndex === -1) firstIndex = match.index;
+      calls.push(normalized);
+      consumedChars = re.lastIndex;
+    }
+
+    if (calls.length === 0 || firstIndex < 0) return null;
+    return {
+      calls,
+      consumedChars,
+      textBefore: text.substring(0, firstIndex),
+    };
+  }
+
   private refreshAllowedToolNames(): void {
     this.allowedToolNames = new Set(
       this.tools
-        .map((tool: any) => tool?.type === 'function' ? tool.function?.name : tool?.function?.name)
+        .map((tool: any) => {
+          if (tool?.type === 'function') return tool.function?.name || tool.name;
+          return tool?.function?.name || tool?.name;
+        })
         .filter((name: unknown): name is string => typeof name === 'string' && name.length > 0)
     );
   }

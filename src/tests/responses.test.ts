@@ -3,6 +3,8 @@ import assert from 'node:assert';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 process.env.API_KEY = '';
+process.env.QWEN_EMAIL = process.env.QWEN_EMAIL || 'mock@example.com';
+process.env.QWEN_PASSWORD = process.env.QWEN_PASSWORD || 'mock-password';
 
 import { app } from '../api/server.js';
 import { closePlaywright, initPlaywright } from '../services/playwright.ts';
@@ -165,6 +167,104 @@ test('responses endpoint streams SSE events and keeps tool calls', async () => {
     assert.ok(events.some((event) => event.event === 'response.created'));
     assert.ok(events.some((event) => event.event === 'response.output_item.added'));
     assert.ok(events.some((event) => event.event === 'response.completed'));
+  } finally {
+    restore();
+    await closePlaywright();
+  }
+});
+
+test('responses endpoint accepts Responses-style top-level function tools', async () => {
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\":\\"list_files\\",\\"arguments\\":{\\"path\\":\\".\\"}}</tool_call>"}}]}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      },
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  await initPlaywright(false);
+
+  try {
+    const req = new Request('http://localhost/v1/chat/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'List files',
+        tools: [{
+          type: 'function',
+          name: 'list_files',
+          description: 'List files',
+          parameters: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+          },
+        }],
+      }),
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    assert.strictEqual(body.output[0].type, 'function_call');
+    assert.strictEqual(body.output[0].name, 'list_files');
+    assert.strictEqual(body.output[0].arguments, '{"path":"."}');
+  } finally {
+    restore();
+    await closePlaywright();
+  }
+});
+
+test('responses endpoint keeps Rift apply_patch as a client-side function call', async () => {
+  const patchText = '*** Begin Patch\\n*** Add File: hello.txt\\n+Hello\\n*** End Patch';
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(`data: {"choices":[{"delta":{"phase":"answer","content":"<tool_call>{\\"name\\":\\"apply_patch\\",\\"arguments\\":{\\"patch_text\\":\\"${patchText.replace(/\\/g, '\\\\')}\\"}}</tool_call>"}}]}\n\n`));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      },
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  await initPlaywright(false);
+
+  try {
+    const req = new Request('http://localhost/v1/chat/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'qwen3.6-plus',
+        input: 'Patch the file',
+        tools: [{
+          type: 'function',
+          name: 'apply_patch',
+          description: 'Apply a patch inside the Rift workspace',
+          parameters: {
+            type: 'object',
+            properties: {
+              patch_text: { type: 'string' },
+            },
+            required: ['patch_text'],
+            additionalProperties: false,
+          },
+        }],
+      }),
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    assert.strictEqual(body.output[0].type, 'function_call');
+    assert.strictEqual(body.output[0].name, 'apply_patch');
+    assert.ok(JSON.parse(body.output[0].arguments).patch_text.includes('*** Begin Patch'));
   } finally {
     restore();
     await closePlaywright();

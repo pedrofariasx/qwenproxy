@@ -39,6 +39,46 @@ export function updateSessionParent(sessionId: string, parentId: string | null) 
   }
 }
 
+export async function stopQwenGeneration(
+  chatId: string,
+  responseId: string,
+  headers: Record<string, string>,
+): Promise<void> {
+  if (!chatId || !responseId) return;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`https://chat.qwen.ai/api/v2/chat/completions/stop?chat_id=${chatId}`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'pt-BR,pt;q=0.9',
+        'Content-Type': 'application/json',
+        'Cookie': headers.cookie,
+        'Origin': 'https://chat.qwen.ai',
+        'Referer': `https://chat.qwen.ai/c/${chatId}`,
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'User-Agent': headers['user-agent'],
+        'X-Request-Id': uuidv4(),
+        'bx-ua': headers['bx-ua'],
+        'bx-umidtoken': headers['bx-umidtoken'],
+        'bx-v': headers['bx-v'],
+      },
+      body: JSON.stringify({ chat_id: chatId, response_id: responseId }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      console.warn(`[Qwen] Failed to stop generation for ${chatId}/${responseId}: ${response.status} ${text}`);
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export interface QwenMessage {
   fid: string;
   parentId: string | null;

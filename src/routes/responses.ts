@@ -6,7 +6,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { Context } from 'hono';
-import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
+import { createQwenStream, stopQwenGeneration, updateSessionParent } from '../services/qwen.ts';
 import type { Message, OpenAIRequest, FunctionToolDefinition } from '../utils/types.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 import { getIncrementalDelta } from './chat.ts';
@@ -15,9 +15,10 @@ import { truncateMessages, estimateTokenCount } from '../utils/context-truncatio
 import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo } from '../core/account-manager.ts';
 import { registerStream, removeStream, abortStream } from '../core/stream-registry.ts';
 import { Mutex } from '../services/playwright.ts';
-import { getResponseContext, pruneResponseContexts, storeResponseContext } from '../core/response-store.ts';
+import { getResponseContext, getSessionResponseId, pruneResponseContexts, storeResponseContext } from '../core/response-store.ts';
 
 type ResponsesInputItem = string | Record<string, any>;
+type ResponsesToolDefinition = Record<string, any>;
 
 interface ResponsesRequestBody {
   model: string;
@@ -26,8 +27,8 @@ interface ResponsesRequestBody {
   previous_response_id?: string;
   stream?: boolean;
   store?: boolean;
-  tools?: FunctionToolDefinition[];
-  tool_choice?: OpenAIRequest['tool_choice'];
+  tools?: ResponsesToolDefinition[];
+  tool_choice?: OpenAIRequest['tool_choice'] | Record<string, any> | string;
   temperature?: number;
   top_p?: number;
   metadata?: Record<string, unknown>;
@@ -40,6 +41,194 @@ type QwenChunk = {
   choices?: Array<{ delta?: { phase?: string; content?: string; extra?: any } }>;
   ['response.created']?: { response_id?: string };
 };
+
+const QWEN_STREAM_IDLE_TIMEOUT_MS = 90_000;
+
+class UpstreamIdleTimeoutError extends Error {
+  upstreamStatus = 504;
+
+  constructor() {
+    super(`Qwen stream produced no data for ${Math.round(QWEN_STREAM_IDLE_TIMEOUT_MS / 1000)}s`);
+    this.name = 'UpstreamIdleTimeoutError';
+  }
+}
+
+async function readQwenChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs = QWEN_STREAM_IDLE_TIMEOUT_MS
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new UpstreamIdleTimeoutError()), timeoutMs);
+    timeoutHandle?.unref?.();
+  });
+
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+function toolName(tool: any): string {
+  if (!tool || typeof tool !== 'object') return '';
+  if (tool.type === 'function') {
+    return typeof tool.name === 'string' ? tool.name : (typeof tool.function?.name === 'string' ? tool.function.name : '');
+  }
+  if (typeof tool.name === 'string') return tool.name;
+  if (typeof tool.function?.name === 'string') return tool.function.name;
+  return '';
+}
+
+function normalizeToolDefinition(tool: any): any {
+  if (!tool || typeof tool !== 'object') return tool;
+
+  if (tool.type === 'function') {
+    const source = tool.function && typeof tool.function === 'object' ? tool.function : tool;
+    const name = typeof source.name === 'string' ? source.name : '';
+    if (!name) return tool;
+    return {
+      type: 'function',
+      name,
+      description: typeof source.description === 'string' ? source.description : '',
+      parameters: source.parameters ?? {
+        type: 'object',
+        properties: {},
+        additionalProperties: true,
+      },
+    };
+  }
+
+  return tool;
+}
+
+function toolDefinitionsForParser(tools: ResponsesToolDefinition[] | undefined): FunctionToolDefinition[] {
+  if (!Array.isArray(tools)) return [];
+
+  return tools
+    .map((tool: any) => {
+      const name = toolName(tool);
+      if (!name) return null;
+      if (tool.type === 'function') {
+        const normalized = normalizeToolDefinition(tool);
+        return {
+          type: 'function',
+          function: {
+            name: normalized.name,
+            description: normalized.description || '',
+            parameters: normalized.parameters ?? {
+              type: 'object',
+              properties: {},
+              additionalProperties: true,
+            },
+          },
+        } as FunctionToolDefinition;
+      }
+      return {
+        type: 'function',
+        function: {
+          name,
+          description: typeof tool.description === 'string' ? tool.description : '',
+          parameters: tool.parameters ?? {
+            type: 'object',
+            properties: {},
+            additionalProperties: true,
+          },
+        },
+      } as FunctionToolDefinition;
+    })
+    .filter((tool): tool is FunctionToolDefinition => Boolean(tool));
+}
+
+function getForcedToolName(toolChoice: any): string | null {
+  if (!toolChoice || toolChoice === 'auto' || toolChoice === 'none' || toolChoice === 'required') return null;
+  if (typeof toolChoice === 'string') return toolChoice;
+  if (typeof toolChoice.name === 'string') return toolChoice.name;
+  if (typeof toolChoice.function?.name === 'string') return toolChoice.function.name;
+  return null;
+}
+
+function responseSessionKey(metadata: Record<string, unknown> | undefined): string | null {
+  const sessionId = typeof metadata?.session_id === 'string' ? metadata.session_id.trim() : '';
+  if (!sessionId) return null;
+  const projectKey = typeof metadata?.project_key === 'string' ? metadata.project_key.trim() : '';
+  return projectKey ? `${projectKey}:${sessionId}` : sessionId;
+}
+
+function responseItemFromToolCall(tc: any): any {
+  return {
+    type: 'function_call',
+    id: tc.id,
+    call_id: tc.id,
+    status: 'completed',
+    name: tc.name,
+    arguments: JSON.stringify(tc.arguments),
+  };
+}
+
+function responseItemToMessageToolCall(item: any) {
+  const args = typeof item.arguments === 'string'
+    ? item.arguments
+    : JSON.stringify(item.arguments ?? {});
+
+  return {
+    id: item.call_id || item.id || `call_${uuidv4()}`,
+    type: 'function' as const,
+    function: {
+      name: item.name || 'tool',
+      arguments: args,
+    },
+  };
+}
+
+function assistantContextMessage(content: string, toolItems: any[]): Message {
+  const message: Message = {
+    role: 'assistant',
+    content: content || null,
+  };
+
+  if (toolItems.length > 0) {
+    message.tool_calls = toolItems
+      .filter((item) => item?.type === 'function_call')
+      .map(responseItemToMessageToolCall);
+  }
+
+  return message;
+}
+
+function writeToolCallEvents(
+  controller: ReadableStreamDefaultController,
+  responseId: string,
+  outputIndex: number,
+  item: any,
+  writeEvent: (controller: ReadableStreamDefaultController, event: string, payload: unknown) => void
+) {
+  const pendingItem = { ...item, status: 'in_progress', arguments: '' };
+  writeEvent(controller, 'response.output_item.added', {
+    response_id: responseId,
+    output_index: outputIndex,
+    item: pendingItem,
+  });
+  writeEvent(controller, 'response.function_call_arguments.delta', {
+    response_id: responseId,
+    item_id: item.id,
+    output_index: outputIndex,
+    content_index: 0,
+    delta: item.arguments,
+  });
+  writeEvent(controller, 'response.function_call_arguments.done', {
+    response_id: responseId,
+    item_id: item.id,
+    output_index: outputIndex,
+    content_index: 0,
+    arguments: item.arguments,
+  });
+  writeEvent(controller, 'response.output_item.done', {
+    response_id: responseId,
+    output_index: outputIndex,
+    item,
+  });
+}
 
 const accountMutexes = new Map<string, Mutex>();
 
@@ -68,6 +257,9 @@ function eventPayload(event: string, data: unknown): string {
 function normalizeContentPart(part: any): string {
   if (part == null) return '';
   if (typeof part === 'string') return part;
+  if (part.type === 'input_text' && typeof part.text === 'string') return part.text;
+  if (part.type === 'output_text' && typeof part.text === 'string') return part.text;
+  if (part.type === 'input_image') return '[Image input]';
   if (typeof part.text === 'string') return part.text;
   if (typeof part.output_text === 'string') return part.output_text;
   if (typeof part.output === 'string') return part.output;
@@ -106,7 +298,9 @@ function normalizeInputItem(item: ResponsesInputItem): Message[] {
       return [message];
     }
 
-    if (item.type === 'function_call') {
+    if (item.type === 'function_call' || item.type === 'custom_tool_call') {
+      const name = item.name || item.function?.name || 'tool';
+      const args = item.arguments ?? item.input ?? item.function?.arguments ?? {};
       return [{
         role: 'assistant',
         content: null,
@@ -114,19 +308,23 @@ function normalizeInputItem(item: ResponsesInputItem): Message[] {
           id: item.id || item.call_id || `call_${uuidv4()}`,
           type: 'function',
           function: {
-            name: item.name || item.function?.name || 'tool',
-            arguments: typeof item.arguments === 'string'
-              ? item.arguments
-              : JSON.stringify(item.arguments ?? {}),
+            name,
+            arguments: typeof args === 'string'
+              ? args
+              : JSON.stringify(args),
           },
         }],
       }];
     }
 
-    if (item.type === 'function_call_output' || item.type === 'tool_result') {
+    if (
+      item.type === 'function_call_output'
+      || item.type === 'custom_tool_call_output'
+      || item.type === 'tool_result'
+    ) {
       return [{
         role: 'tool',
-        content: normalizeContentPart(item.output ?? item.content ?? ''),
+        content: normalizeContentPart(item.output ?? item.content ?? item.status ?? ''),
         tool_call_id: item.call_id || item.tool_call_id || item.id,
         name: item.name,
       }];
@@ -227,22 +425,14 @@ function buildPrompt(messages: Message[]): string {
 function injectToolInstructions(systemPrompt: string, body: ResponsesRequestBody): string {
   if (!body.tools || !Array.isArray(body.tools) || body.tools.length === 0) return systemPrompt;
 
-  const formattedTools = body.tools.map((t: any) => {
-    if (t.type === 'function') {
-      return {
-        name: t.function.name,
-        description: t.function.description || '',
-        parameters: t.function.parameters,
-      };
-    }
-    return t;
-  });
+  const formattedTools = body.tools.map(normalizeToolDefinition);
 
   const toolsJson = JSON.stringify(formattedTools, null, 2);
-  let next = `${systemPrompt}\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text after your <tool_call> blocks.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n`;
+  let next = `${systemPrompt}\n\n# TOOLS AVAILABLE\nYou have access to the following client-side tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo request a tool, output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nCRITICAL RULES:\n1. The client executes tools; you only request them.\n2. You may request multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. When requesting tools, do not add explanatory text after the tool call blocks.\n4. The JSON inside the tags must be valid and include the "name" and "arguments" fields.\n`;
 
-  if (body.tool_choice && typeof body.tool_choice === 'object' && body.tool_choice.function) {
-    next += `\nCRITICAL: You MUST call the tool "${body.tool_choice.function.name}" in this response.\n`;
+  const forcedTool = getForcedToolName(body.tool_choice);
+  if (forcedTool) {
+    next += `\nCRITICAL: You MUST call the tool "${forcedTool}" in this response.\n`;
   }
 
   return next;
@@ -282,13 +472,14 @@ function buildResponseEnvelope(params: {
   outputText: string;
   usage?: any;
   status?: 'completed' | 'cancelled' | 'failed' | 'incomplete';
+  error?: any;
 }) {
   return {
     id: params.id,
     object: 'response',
     created_at: params.createdAt,
     status: params.status ?? 'completed',
-    error: null,
+    error: params.error ?? null,
     incomplete_details: null,
     instructions: params.body.instructions ?? null,
     model: params.model,
@@ -403,6 +594,7 @@ async function acquireQwenStream(prompt: string, model: string, streamKey: strin
             targetResponseId: '',
             headers: result.headers,
           });
+          release();
           return { ...result, accountId: result.accountId };
         } catch (err: any) {
           retries--;
@@ -455,8 +647,22 @@ function isAbortError(err: any): boolean {
     || /abort|cancel/i.test(String(err?.message || ''));
 }
 
+async function stopQwenStreamIfKnown(qwen: {
+  uiSessionId: string;
+  headers: Record<string, string>;
+  controller: AbortController;
+}, responseId: string | null): Promise<void> {
+  if (qwen.uiSessionId && responseId) {
+    await stopQwenGeneration(qwen.uiSessionId, responseId, qwen.headers).catch((err: any) => {
+      console.warn(`[Responses] Failed to stop upstream generation cleanly: ${err.message}`);
+    });
+  }
+  qwen.controller.abort();
+}
+
 async function handleResponses(body: ResponsesRequestBody, stream: boolean, responseId: string): Promise<Response> {
-  const previousResponseId = body.previous_response_id ?? null;
+  const sessionKey = responseSessionKey(body.metadata);
+  const previousResponseId = body.previous_response_id ?? getSessionResponseId(sessionKey) ?? null;
   const history = getResponseContext(previousResponseId);
   const inputMessages: Message[] = [];
   if (body.instructions) {
@@ -504,7 +710,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
     const qwen = await acquireQwenStream(finalPrompt, body.model, responseId);
     const reader = qwen.stream.getReader();
     const decoder = new TextDecoder();
-    const toolParser = new StreamingToolParser(body.tools || []);
+    const toolParser = new StreamingToolParser(toolDefinitionsForParser(body.tools));
     let streamBuffer = '';
     let streamCompletionTokens = 0;
     let streamPromptTokens = Math.ceil(finalPrompt.length / 3.5);
@@ -517,6 +723,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
     const streamResponseOutput: any[] = [];
     let streamAssistantItemId = `msg_${uuidv4().replace(/-/g, '')}`;
     let streamAssistantItemAdded = false;
+    let streamStopAfterToolCall = false;
 
     const streamBuildUsage = () => ({
       input_tokens: streamPromptTokens,
@@ -528,7 +735,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readQwenChunk(reader);
         if (done) break;
 
         streamBuffer += decoder.decode(value, { stream: true });
@@ -566,6 +773,19 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
                 const thoughtDelta = thoughts.slice(streamCurrentThoughtIndex).join('\n');
                 streamCurrentThoughtIndex = thoughts.length;
                 streamReasoningBuffer += thoughtDelta;
+                const parsed = toolParser.feed(thoughtDelta);
+                for (const tc of parsed.toolCalls) {
+                  const toolItem = responseItemFromToolCall(tc);
+                  writeToolCallEvents(
+                    controller,
+                    responseId,
+                    streamResponseOutput.length + streamAssistantOutputItems.length + 1,
+                    toolItem,
+                    writeEvent
+                  );
+                  streamAssistantOutputItems.push(toolItem);
+                  streamStopAfterToolCall = true;
+                }
               }
             } else if (delta.phase === 'answer' && delta.content !== undefined) {
               const result = getIncrementalDelta(streamAssistantText, delta.content || '');
@@ -597,55 +817,31 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
                 }
 
                 for (const tc of parsed.toolCalls) {
-                  const toolItem = {
-                    type: 'function_call',
-                    id: tc.id,
-                    call_id: tc.id,
-                    status: 'in_progress',
-                    name: tc.name,
-                    arguments: '',
-                  };
-                  writeEvent(controller, 'response.output_item.added', {
-                    response_id: responseId,
-                    output_index: streamResponseOutput.length + 1,
-                    item: toolItem,
-                  });
-                  const argumentsText = JSON.stringify(tc.arguments);
-                  writeEvent(controller, 'response.function_call_arguments.delta', {
-                    response_id: responseId,
-                    item_id: tc.id,
-                    output_index: streamResponseOutput.length + 1,
-                    content_index: 0,
-                    delta: argumentsText,
-                  });
-                  writeEvent(controller, 'response.function_call_arguments.done', {
-                    response_id: responseId,
-                    item_id: tc.id,
-                    output_index: streamResponseOutput.length + 1,
-                    content_index: 0,
-                    arguments: argumentsText,
-                  });
-                  writeEvent(controller, 'response.output_item.done', {
-                    response_id: responseId,
-                    output_index: streamResponseOutput.length + 1,
-                    item: { ...toolItem, status: 'completed', arguments: argumentsText },
-                  });
-                  streamAssistantOutputItems.push({
-                    type: 'function_call',
-                    id: tc.id,
-                    call_id: tc.id,
-                    status: 'completed',
-                    name: tc.name,
-                    arguments: JSON.stringify(tc.arguments),
-                  });
+                  const toolItem = responseItemFromToolCall(tc);
+                  writeToolCallEvents(
+                    controller,
+                    responseId,
+                    streamResponseOutput.length + streamAssistantOutputItems.length + 1,
+                    toolItem,
+                    writeEvent
+                  );
+                  streamAssistantOutputItems.push(toolItem);
+                  streamStopAfterToolCall = true;
                 }
               }
             }
           } catch {}
+          if (streamStopAfterToolCall) break;
         }
+        if (streamStopAfterToolCall) break;
       }
 
-      const upstreamError = parseQwenErrorPayload(streamBuffer);
+      if (streamStopAfterToolCall) {
+        await stopQwenStreamIfKnown(qwen, streamTargetResponseId);
+        await reader.cancel().catch(() => {});
+      }
+
+      const upstreamError = streamStopAfterToolCall ? null : parseQwenErrorPayload(streamBuffer);
       if (upstreamError) {
         writeEvent(controller, 'response.completed', {
           response: {
@@ -684,47 +880,15 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
         streamAssistantText += flush.text;
       }
       for (const tc of flush.toolCalls) {
-        const toolItem = {
-          type: 'function_call',
-          id: tc.id,
-          call_id: tc.id,
-          status: 'in_progress',
-          name: tc.name,
-          arguments: '',
-        };
-        writeEvent(controller, 'response.output_item.added', {
-          response_id: responseId,
-          output_index: 1,
-          item: toolItem,
-        });
-        const argumentsText = JSON.stringify(tc.arguments);
-        writeEvent(controller, 'response.function_call_arguments.delta', {
-          response_id: responseId,
-          item_id: tc.id,
-          output_index: 1,
-          content_index: 0,
-          delta: argumentsText,
-        });
-        writeEvent(controller, 'response.function_call_arguments.done', {
-          response_id: responseId,
-          item_id: tc.id,
-          output_index: 1,
-          content_index: 0,
-          arguments: argumentsText,
-        });
-        writeEvent(controller, 'response.output_item.done', {
-          response_id: responseId,
-          output_index: 1,
-          item: { ...toolItem, status: 'completed', arguments: argumentsText },
-        });
-        streamAssistantOutputItems.push({
-          type: 'function_call',
-          id: tc.id,
-          call_id: tc.id,
-          status: 'completed',
-          name: tc.name,
-          arguments: JSON.stringify(tc.arguments),
-        });
+        const toolItem = responseItemFromToolCall(tc);
+        writeToolCallEvents(
+          controller,
+          responseId,
+          (streamAssistantItemAdded ? 1 : 0) + streamAssistantOutputItems.length,
+          toolItem,
+          writeEvent
+        );
+        streamAssistantOutputItems.push(toolItem);
       }
 
       if (streamAssistantItemAdded) {
@@ -790,11 +954,15 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
       controller.close();
 
       if (body.store ?? true) {
-        storeResponseContext(responseId, [...inputMessages, { role: 'assistant', content: streamAssistantText }]);
+        storeResponseContext(responseId, [
+          ...inputMessages,
+          assistantContextMessage(streamAssistantText, streamAssistantOutputItems),
+        ], sessionKey);
         pruneResponseContexts();
       }
       removeStream(responseId);
     } catch (err: any) {
+      await reader.cancel().catch(() => {});
       if (isAbortError(err)) {
         const cancelledResponse = buildResponseEnvelope({
           id: responseId,
@@ -822,7 +990,27 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
       }
 
       console.error('Error streaming responses:', err);
-      controller.error(err);
+      const failedResponse = buildResponseEnvelope({
+        id: responseId,
+        createdAt: startedAt,
+        model: body.model,
+        body,
+        previousResponseId,
+        output: [],
+        outputText: '',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens_details: { reasoning_tokens: 0 },
+        },
+        status: 'failed',
+        error: { message: err.message || 'responses stream failed' },
+      });
+      writeEvent(controller, 'response.completed', { response: failedResponse });
+      controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      controller.close();
       removeStream(responseId);
     }
   };
@@ -831,69 +1019,82 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
     const qwen = await acquireQwenStream(finalPrompt, body.model, responseId);
     const reader = qwen.stream.getReader();
     const decoder = new TextDecoder();
-    const toolParser = new StreamingToolParser(body.tools || []);
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const toolParser = new StreamingToolParser(toolDefinitionsForParser(body.tools));
+    let stopAfterToolCall = false;
+    try {
+      while (true) {
+        const { done, value } = await readQwenChunk(reader);
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        const dataStr = trimmed.slice(6);
-        if (dataStr === '[DONE]') continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const dataStr = trimmed.slice(6);
+          if (dataStr === '[DONE]') continue;
 
-        try {
-          const chunk = JSON.parse(dataStr) as QwenChunk;
-          if (chunk['response.created']?.response_id && !targetResponseId) {
-            targetResponseId = chunk['response.created'].response_id;
-            updateSessionParent(qwen.uiSessionId, targetResponseId);
-          } else if (chunk.response_id && !targetResponseId) {
-            targetResponseId = chunk.response_id;
-            updateSessionParent(qwen.uiSessionId, targetResponseId);
-          }
-          if (chunk.usage) {
-            if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
-            if (chunk.usage.input_tokens) promptTokens = chunk.usage.input_tokens;
-          }
-
-          const delta = chunk.choices?.[0]?.delta;
-          if (!delta || (targetResponseId && chunk.response_id && chunk.response_id !== targetResponseId)) continue;
-
-          if (delta.phase === 'thinking_summary' && delta.extra?.summary_thought?.content) {
-            const thoughts = delta.extra.summary_thought.content;
-            if (thoughts.length > currentThoughtIndex) {
-              reasoningBuffer += thoughts.slice(currentThoughtIndex).join('\n');
-              currentThoughtIndex = thoughts.length;
+          try {
+            const chunk = JSON.parse(dataStr) as QwenChunk;
+            if (chunk['response.created']?.response_id && !targetResponseId) {
+              targetResponseId = chunk['response.created'].response_id;
+              updateSessionParent(qwen.uiSessionId, targetResponseId);
+            } else if (chunk.response_id && !targetResponseId) {
+              targetResponseId = chunk.response_id;
+              updateSessionParent(qwen.uiSessionId, targetResponseId);
             }
-          } else if (delta.phase === 'answer' && delta.content !== undefined) {
-            const result = getIncrementalDelta(assistantText, delta.content || '');
-            if (result.delta) {
-              const parsed = toolParser.feed(result.delta);
-              if (parsed.text) assistantText += parsed.text;
-              for (const tc of parsed.toolCalls) {
-                assistantOutputItems.push({
-                  type: 'function_call',
-                  id: tc.id,
-                  call_id: tc.id,
-                  status: 'completed',
-                  name: tc.name,
-                  arguments: JSON.stringify(tc.arguments),
-                });
+            if (chunk.usage) {
+              if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
+              if (chunk.usage.input_tokens) promptTokens = chunk.usage.input_tokens;
+            }
+
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta || (targetResponseId && chunk.response_id && chunk.response_id !== targetResponseId)) continue;
+
+            if (delta.phase === 'thinking_summary' && delta.extra?.summary_thought?.content) {
+              const thoughts = delta.extra.summary_thought.content;
+              if (thoughts.length > currentThoughtIndex) {
+                const thoughtDelta = thoughts.slice(currentThoughtIndex).join('\n');
+                reasoningBuffer += thoughtDelta;
+                currentThoughtIndex = thoughts.length;
+                const parsed = toolParser.feed(thoughtDelta);
+                for (const tc of parsed.toolCalls) {
+                  assistantOutputItems.push(responseItemFromToolCall(tc));
+                  stopAfterToolCall = true;
+                }
               }
-              if (parsed.text) {
-                assistantMessage.content = (assistantMessage.content || '') + parsed.text;
+            } else if (delta.phase === 'answer' && delta.content !== undefined) {
+              const result = getIncrementalDelta(assistantText, delta.content || '');
+              if (result.delta) {
+                const parsed = toolParser.feed(result.delta);
+                if (parsed.text) assistantText += parsed.text;
+                for (const tc of parsed.toolCalls) {
+                  assistantOutputItems.push(responseItemFromToolCall(tc));
+                  stopAfterToolCall = true;
+                }
+                if (parsed.text) {
+                  assistantMessage.content = (assistantMessage.content || '') + parsed.text;
+                }
               }
             }
-          }
-        } catch {}
+          } catch {}
+          if (stopAfterToolCall) break;
+        }
+        if (stopAfterToolCall) break;
       }
+    } catch (err) {
+      await reader.cancel().catch(() => {});
+      throw err;
     }
 
-    const upstreamError = parseQwenErrorPayload(buffer);
+    if (stopAfterToolCall) {
+      await stopQwenStreamIfKnown(qwen, targetResponseId);
+      await reader.cancel().catch(() => {});
+    }
+
+    const upstreamError = stopAfterToolCall ? null : parseQwenErrorPayload(buffer);
     if (upstreamError) {
       return createJsonResponse({ error: { message: upstreamError.message } }, upstreamError.status);
     }
@@ -904,14 +1105,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
       assistantMessage.content = (assistantMessage.content || '') + flush.text;
     }
     for (const tc of flush.toolCalls) {
-      assistantOutputItems.push({
-        type: 'function_call',
-        id: tc.id,
-        call_id: tc.id,
-        status: 'completed',
-        name: tc.name,
-        arguments: JSON.stringify(tc.arguments),
-      });
+      assistantOutputItems.push(responseItemFromToolCall(tc));
     }
 
     if (assistantText) {
@@ -930,6 +1124,11 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
     responseOutput.push(...assistantOutputItems);
 
     assistantMessage.content = assistantText || null;
+    if (assistantOutputItems.length > 0) {
+      assistantMessage.tool_calls = assistantOutputItems
+        .filter((item) => item?.type === 'function_call')
+        .map(responseItemToMessageToolCall);
+    }
 
     const response = buildResponseEnvelope({
       id: responseId,
@@ -943,7 +1142,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
     });
 
     if (body.store ?? true) {
-      storeResponseContext(responseId, [...inputMessages, assistantMessage]);
+      storeResponseContext(responseId, [...inputMessages, assistantMessage], sessionKey);
       pruneResponseContexts();
     }
 

@@ -10,3 +10,5 @@ coverage/
 .kilo
 qwen_profiles/
 qwen_data/
+.data/
+accounts.json
