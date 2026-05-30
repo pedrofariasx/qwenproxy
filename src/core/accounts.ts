@@ -1,6 +1,5 @@
-import fs from 'fs'
-import path from 'path'
 import crypto from 'crypto'
+import { getDatabase } from './database.ts'
 
 export interface QwenAccount {
   id: string
@@ -8,48 +7,43 @@ export interface QwenAccount {
   password: string
 }
 
-const ACCOUNTS_FILE = path.resolve('accounts.json')
-
 export function loadAccounts(): QwenAccount[] {
-  if (!fs.existsSync(ACCOUNTS_FILE)) {
-    return []
-  }
-  try {
-    const raw = fs.readFileSync(ACCOUNTS_FILE, 'utf-8')
-    return JSON.parse(raw)
-  } catch {
-    return []
-  }
-}
-
-function saveAccounts(accounts: QwenAccount[]): void {
-  fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2))
+  const db = getDatabase()
+  const rows = db.prepare('SELECT id, email, password FROM accounts ORDER BY created_at ASC').all()
+  return rows as QwenAccount[]
 }
 
 export function addAccount(email: string, password: string, id?: string): QwenAccount {
-  const accounts = loadAccounts()
-  const existing = accounts.find(a => a.email === email)
+  if (!email || typeof email !== 'string' || email.trim().length === 0) {
+    throw new Error('Email is required')
+  }
+
+  const db = getDatabase()
+
+  const existing = db.prepare('SELECT id FROM accounts WHERE email = ?').get(email.trim())
   if (existing) {
     throw new Error(`Account with email ${email} already exists`)
   }
+
   const newAccount: QwenAccount = {
     id: id || crypto.randomUUID(),
-    email,
+    email: email.trim(),
     password,
   }
-  accounts.push(newAccount)
-  saveAccounts(accounts)
+
+  db.prepare('INSERT INTO accounts (id, email, password) VALUES (?, ?, ?)').run(
+    newAccount.id,
+    newAccount.email,
+    newAccount.password,
+  )
+
   return newAccount
 }
 
 export function removeAccount(id: string): boolean {
-  const accounts = loadAccounts()
-  const filtered = accounts.filter(a => a.id !== id)
-  if (filtered.length === accounts.length) {
-    return false
-  }
-  saveAccounts(filtered)
-  return true
+  const db = getDatabase()
+  const result = db.prepare('DELETE FROM accounts WHERE id = ?').run(id)
+  return result.changes > 0
 }
 
 export function listAccounts(): QwenAccount[] {
@@ -57,5 +51,7 @@ export function listAccounts(): QwenAccount[] {
 }
 
 export function getAccountCredentials(id: string): QwenAccount | undefined {
-  return loadAccounts().find(a => a.id === id)
+  const db = getDatabase()
+  const row = db.prepare('SELECT id, email, password FROM accounts WHERE id = ?').get(id)
+  return row as QwenAccount | undefined
 }

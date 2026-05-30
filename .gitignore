@@ -1,11 +1,40 @@
+# Dependencies
 node_modules/
+
+# Build
 dist/
-qwen_profile/
+
+# Environment
 .env
 .env.local
+.env.production
+
+# Database
+data/
+*.db
+*.db-wal
+*.db-shm
+accounts.json
+accounts.json.bak
+
+# Browser profiles (session data)
+qwen_profile/
+qwen_profiles/
+
+# Logs
 *.log
-.DS_Store
+
+# Coverage & cache
 coverage/
 .cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / Editor
 .kilo
-qwen_profiles/
+
+# Legacy
+/core/
+

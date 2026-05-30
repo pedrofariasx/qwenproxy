@@ -7,7 +7,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./qwen_profile:/app/qwen_profile
+      - ./data:/app/data
+      - ./qwen_profiles:/app/qwen_profiles
     restart: unless-stopped
     logging:
       driver: "json-file"

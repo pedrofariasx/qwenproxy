@@ -25,7 +25,7 @@ app.use('*', async (c, next) => {
 })
 
 app.use('/v1/*', async (c, next) => {
-  const apiKey = config.apiKey
+  const apiKey = process.env.API_KEY || config.apiKey
   if (apiKey) {
     const auth = c.req.header('Authorization')
     if (!auth?.startsWith('Bearer ')) {
@@ -106,6 +106,8 @@ export async function startServer(): Promise<void> {
     await cache.close()
     const { closePlaywright } = await import('../services/playwright.js')
     await closePlaywright()
+    const { closeDatabase } = await import('../core/database.ts')
+    closeDatabase()
     server?.close()
     process.exit(0)
   }
