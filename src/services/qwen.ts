@@ -30,6 +30,16 @@ export class QwenUpstreamError extends Error {
   }
 }
 
+export class QwenSessionExpiredError extends Error {
+  readonly accountId: string;
+
+  constructor(message: string, accountId: string) {
+    super(message);
+    this.name = 'QwenSessionExpiredError';
+    this.accountId = accountId;
+  }
+}
+
 const sessionStates: Record<string, string | null> = (globalThis as any)._sessionStates || {};
 (globalThis as any)._sessionStates = sessionStates;
 
@@ -309,6 +319,14 @@ export async function createQwenStream(
         if (errorJson?.success === false) {
           const code = errorJson.data?.code || errorJson.code || 'UpstreamError';
           const details = errorJson.data?.details || errorJson.message || 'Qwen returned an error';
+          
+          if (response.status === 401 || code === 'Unauthorized' || details.includes('login') || details.includes('session')) {
+            throw new QwenSessionExpiredError(
+              `Session expired: ${details}`,
+              accountId || 'global'
+            );
+          }
+          
           const wait = errorJson.data?.num !== undefined
             ? ` Wait about ${errorJson.data.num} hour(s) before trying again.`
             : '';

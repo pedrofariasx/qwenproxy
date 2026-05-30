@@ -11,11 +11,8 @@
 import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
-import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
-import { registry } from '../tools/registry.ts';
-import type { FunctionToolDefinition } from '../tools/types.ts';
-import { robustParseJSON } from '../utils/json.ts';
+import { createQwenStream, updateSessionParent, QwenSessionExpiredError } from '../services/qwen.ts';
+import { OpenAIRequest } from '../utils/types.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
 import { RetryableQwenStreamError } from '../services/qwen.ts';
 import { Mutex } from '../services/playwright.ts';
@@ -215,6 +212,7 @@ export async function chatCompletions(c: Context) {
     let stream: ReadableStream | undefined;
     let uiSessionId = '';
     let releaseChatLock: (() => void) | undefined;
+    const completionId = 'chatcmpl-' + uuidv4();
 
     while (account) {
       const accountId = account.id;
@@ -237,7 +235,6 @@ export async function chatCompletions(c: Context) {
 
     const accountMutex = getAccountMutex(accountId);
     releaseChatLock = await accountMutex.acquire();
-    const completionId = 'chatcmpl-' + uuidv4();
 
     try {
         let retries = 3;
@@ -266,6 +263,26 @@ export async function chatCompletions(c: Context) {
             break;
           } catch (err: any) {
             retries--;
+
+            if (err.name === 'QwenSessionExpiredError') {
+              console.warn(`[Chat] Session expired for ${accountEmail} (${accountId}). Attempting re-login...`);
+              try {
+                const { initPlaywrightForAccount } = await import('../services/playwright.ts');
+                const { getAccountCredentials } = await import('../core/accounts.ts');
+                const creds = getAccountCredentials(accountId);
+                if (creds) {
+                  await initPlaywrightForAccount(creds, true);
+                  console.log(`[Chat] Re-login successful for ${accountEmail}. Retrying...`);
+                  continue;
+                }
+              } catch (reLoginErr: any) {
+                console.error(`[Chat] Re-login failed for ${accountEmail}: ${reLoginErr.message}`);
+              }
+              releaseChatLock();
+              releaseChatLock = undefined;
+              lastError = err;
+              break;
+            }
 
             if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
               const hourHint = err.message?.match(/Wait about (\d+) hour/);
@@ -320,8 +337,6 @@ export async function chatCompletions(c: Context) {
         account = getNextAvailableAccount(accountId);
       }
     }
-
-    const completionId = 'chatcmpl-' + uuidv4();
 
     if (!stream) {
       throw lastError || new Error('All accounts failed');
@@ -467,6 +482,7 @@ export async function chatCompletions(c: Context) {
       if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
       releaseChatLock?.();
+      removeStream(completionId);
       return c.json({
         id: completionId,
         object: 'chat.completion',
@@ -745,6 +761,7 @@ export async function chatCompletions(c: Context) {
 
       } finally {
         clearInterval(heartbeatInterval);
+        removeStream(completionId);
         releaseChatLock?.();
       }
     });

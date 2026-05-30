@@ -1,25 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import fs from 'fs';
-import path from 'path';
+import { getDatabase } from '../core/database.ts';
+import { invalidateAccountsCache } from '../core/accounts.ts';
 import { getNextAccount } from '../core/account-manager.ts';
 
 test('Account Rotation: Round-Robin rotation cycle', async () => {
-  const ACCOUNTS_FILE = path.resolve('accounts.json');
-  let originalContent: string | null = null;
-  if (fs.existsSync(ACCOUNTS_FILE)) {
-    originalContent = fs.readFileSync(ACCOUNTS_FILE, 'utf-8');
-  }
+  const originalEnv = process.env.QWEN_ACCOUNTS;
+  delete process.env.QWEN_ACCOUNTS;
+
+  const db = getDatabase();
+  const existing = db.prepare('SELECT id, email, password FROM accounts').all();
+  db.prepare('DELETE FROM accounts').run();
+  invalidateAccountsCache();
 
   try {
-    const mockAccounts = [
-      { id: 'acc1', email: 'account1@test.com', password: 'password1' },
-      { id: 'acc2', email: 'account2@test.com', password: 'password2' },
-      { id: 'acc3', email: 'account3@test.com', password: 'password3' },
-    ];
-    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(mockAccounts, null, 2));
+    const insert = db.prepare('INSERT INTO accounts (id, email, password) VALUES (?, ?, ?)');
+    insert.run('acc1', 'account1@test.com', 'password1');
+    insert.run('acc2', 'account2@test.com', 'password2');
+    insert.run('acc3', 'account3@test.com', 'password3');
+    invalidateAccountsCache();
 
-    // Force current index restart or just verify consecutive selections
     const first = getNextAccount();
     const second = getNextAccount();
     const third = getNextAccount();
@@ -30,17 +30,20 @@ test('Account Rotation: Round-Robin rotation cycle', async () => {
     assert.ok(third);
     assert.ok(fourth);
 
-    // Verify it cycles in order
-    assert.strictEqual(first.email, 'account1@test.com');
-    assert.strictEqual(second.email, 'account2@test.com');
-    assert.strictEqual(third.email, 'account3@test.com');
-    assert.strictEqual(fourth.email, 'account1@test.com'); // should rotate back to the start
+    assert.strictEqual(first!.email, 'account1@test.com');
+    assert.strictEqual(second!.email, 'account2@test.com');
+    assert.strictEqual(third!.email, 'account3@test.com');
+    assert.strictEqual(fourth!.email, 'account1@test.com');
 
   } finally {
-    if (originalContent !== null) {
-      fs.writeFileSync(ACCOUNTS_FILE, originalContent);
-    } else if (fs.existsSync(ACCOUNTS_FILE)) {
-      fs.unlinkSync(ACCOUNTS_FILE);
+    db.prepare('DELETE FROM accounts').run();
+    const insert = db.prepare('INSERT INTO accounts (id, email, password) VALUES (?, ?, ?)');
+    for (const row of existing as any[]) {
+      insert.run(row.id, row.email, row.password);
+    }
+    invalidateAccountsCache();
+    if (originalEnv !== undefined) {
+      process.env.QWEN_ACCOUNTS = originalEnv;
     }
   }
 });

@@ -4,7 +4,7 @@ const envSchema = z.object({
   PORT: z.string().default('3000'),
   HOST: z.string().default('0.0.0.0'),
   HEADLESS: z.string().default('true'),
-  USER_DATA_DIR: z.string().default('./qwen_profile'),
+  USER_DATA_DIR: z.string().default('./qwen_profiles'),
   USER_AGENT: z.string().default('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
   LOG_CONSOLE: z.string().default('false'),
   NAVIGATION_TIMEOUT: z.string().default('30000'),

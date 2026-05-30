@@ -16,6 +16,22 @@ import { config } from '../core/config.ts';
 
 export type BrowserType = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'edge';
 
+function getBrowserEngine(browserType: BrowserType) {
+  switch (browserType) {
+    case 'firefox':
+      return { engine: firefox, channel: undefined };
+    case 'webkit':
+      return { engine: webkit, channel: undefined };
+    case 'chrome':
+      return { engine: chromium, channel: 'chrome' };
+    case 'edge':
+      return { engine: chromium, channel: 'msedge' };
+    case 'chromium':
+    default:
+      return { engine: chromium, channel: undefined };
+  }
+}
+
 let context: BrowserContext | null = null;
 export let activePage: Page | null = null;
 const accountContexts = new Map<string, BrowserContext>();
@@ -116,31 +132,8 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
     return;
   }
 
-  const profilePath = path.resolve('qwen_profile');
-  
-  let browserEngine;
-  let channel: string | undefined;
-
-  switch (browserType) {
-    case 'firefox':
-      browserEngine = firefox;
-      break;
-    case 'webkit':
-      browserEngine = webkit;
-      break;
-    case 'chrome':
-      browserEngine = chromium;
-      channel = 'chrome';
-      break;
-    case 'edge':
-      browserEngine = chromium;
-      channel = 'msedge';
-      break;
-    case 'chromium':
-    default:
-      browserEngine = chromium;
-      break;
-  }
+  const profilePath = path.resolve('qwen_profiles', 'default');
+  const { engine: browserEngine, channel } = getBrowserEngine(browserType);
 
   console.log(`[Playwright] Launching ${browserType}...`);
 
@@ -314,13 +307,18 @@ async function loginToQwenUI(email: string, password: string): Promise<boolean> 
   return false;
 }
 
-export async function getQwenHeaders(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
+export async function getQwenHeaders(forceNew = false, accountId?: string, _skipMutex = false): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
   const cacheKey = accountId || 'global';
   const cache = getAccountHeaderCache(cacheKey);
 
   if (!forceNew && cache.cachedQwenHeaders && (Date.now() - cache.lastHeadersTime < HEADERS_TTL * REFRESH_THRESHOLD)) {
     return cache.cachedQwenHeaders;
   }
+
+  if (_skipMutex) {
+    return await _getQwenHeadersInternal(forceNew, accountId);
+  }
+
   const release = await uiMutex.acquire();
   try {
     if (!forceNew && cache.cachedQwenHeaders && (Date.now() - cache.lastHeadersTime < HEADERS_TTL)) {
@@ -356,7 +354,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
     if (age > HEADERS_TTL * REFRESH_THRESHOLD && !cache.refreshTimeout) {
       cache.refreshTimeout = setTimeout(() => {
         cache.refreshTimeout = null;
-        getQwenHeaders(true, accountId).catch(() => {});
+        getQwenHeaders(true, accountId, true).catch(() => {});
       }, HEADERS_TTL - age);
     }
     return cache.cachedQwenHeaders;
@@ -425,6 +423,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
   });
 
   return new Promise((resolve, reject) => {
+    const routePattern = '**/api/v2/chat/completions*';
     const timeout = setTimeout(async () => {
       console.error(`[Playwright] Timeout waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
       try {
@@ -434,6 +433,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
       } catch (err: any) {
         console.error('[Playwright] Failed to save error screenshot:', err.message);
       }
+      await page.unroute(routePattern).catch(() => {});
       reject(new Error(`Timeout waiting for Qwen headers for ${cacheKey}`));
     }, 60000);
 
@@ -469,7 +469,33 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
       };
 
       if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-        console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}, skipping...`);
+        console.warn(`[Playwright] Missing critical headers for ${cacheKey}:`, {
+          hasCookie: !!extractedHeaders.cookie,
+          hasBxUa: !!extractedHeaders['bx-ua'],
+          url: request.url(),
+          method: request.method()
+        });
+        
+        if (accountId) {
+          const { getAccountCredentials } = await import('../core/accounts.ts');
+          const creds = getAccountCredentials(accountId);
+          if (creds && creds.email && creds.password) {
+            console.log(`[Playwright] Attempting re-login for ${cacheKey}...`);
+            const acctContext = accountContexts.get(accountId);
+            if (acctContext) {
+              const loginSuccess = await loginToQwenWithContext(acctContext, page, creds.email, creds.password);
+              if (loginSuccess) {
+                console.log(`[Playwright] Re-login successful for ${cacheKey}, retrying...`);
+                await route.abort('aborted');
+                await page.unroute(routePattern, routeHandler);
+                resolve(await getQwenHeaders(true, accountId, true));
+                return;
+              }
+            }
+          }
+        }
+        
+        console.warn(`[Playwright] Failed to get headers for ${cacheKey}. Delete qwen_profiles/${accountId || 'default'} and restart.`);
         await route.continue();
         return;
       }
@@ -487,12 +513,12 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
 
       await route.abort('aborted');
       
-      await page.unroute('**/api/v2/chat/completions*', routeHandler);
+      await page.unroute(routePattern, routeHandler);
 
       resolve(cache.cachedQwenHeaders);
     };
 
-    page.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
+    page.route(routePattern, routeHandler).then(async () => {
       console.log(`[Playwright] Triggering request for ${cacheKey}...`);
       const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
       
@@ -544,30 +570,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
 
 export async function initPlaywrightForAccount(account: QwenAccount, headless = true, browserType: BrowserType = 'chromium') {
   const profilePath = path.resolve('qwen_profiles', account.id);
-  
-  let browserEngine;
-  let channel: string | undefined;
-
-  switch (browserType) {
-    case 'firefox':
-      browserEngine = firefox;
-      break;
-    case 'webkit':
-      browserEngine = webkit;
-      break;
-    case 'chrome':
-      browserEngine = chromium;
-      channel = 'chrome';
-      break;
-    case 'edge':
-      browserEngine = chromium;
-      channel = 'msedge';
-      break;
-    case 'chromium':
-    default:
-      browserEngine = chromium;
-      break;
-  }
+  const { engine: browserEngine, channel } = getBrowserEngine(browserType);
 
   console.log(`[Playwright] Launching ${browserType} for account ${account.email}...`);
 
@@ -601,30 +604,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, headless = 
 
 export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = 'chromium'): Promise<{ context: BrowserContext, page: Page }> {
   const profilePath = path.resolve('qwen_profiles', accountId);
-  
-  let browserEngine;
-  let channel: string | undefined;
-
-  switch (browserType) {
-    case 'firefox':
-      browserEngine = firefox;
-      break;
-    case 'webkit':
-      browserEngine = webkit;
-      break;
-    case 'chrome':
-      browserEngine = chromium;
-      channel = 'chrome';
-      break;
-    case 'edge':
-      browserEngine = chromium;
-      channel = 'msedge';
-      break;
-    case 'chromium':
-    default:
-      browserEngine = chromium;
-      break;
-  }
+  const { engine: browserEngine, channel } = getBrowserEngine(browserType);
 
   const acctContext = await browserEngine.launchPersistentContext(profilePath, {
     headless: false,
