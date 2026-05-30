@@ -17,7 +17,7 @@ import { registry } from '../tools/registry.ts';
 import type { FunctionToolDefinition } from '../tools/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
 import { StreamingToolParser } from '../tools/parser.ts';
-import { RetryableQwenStreamError } from '../services/qwen.ts';
+import { RetryableQwenStreamError, QwenUpstreamError } from '../services/qwen.ts';
 import { config } from '../core/config.js';
 import { runExecutionLoop } from '../tools/executor.ts';
 import type { LLMSendFunction } from '../tools/executor.ts';
@@ -34,12 +34,32 @@ import { metrics } from '../core/metrics.js';
 const logger = new Logger('info', 'Chat')
 
 const accountMutexes = new Map<string, Mutex>();
+const accountMutexLastUsed = new Map<string, number>();
+
+function removeAccountMutex(accountId: string): void {
+  accountMutexes.delete(accountId);
+  accountMutexLastUsed.delete(accountId);
+}
+
+function sweepOrphanedAccountMutexes(): void {
+  if (accountMutexes.size <= 100) return;
+  const now = Date.now();
+  const ORPHAN_THRESHOLD_MS = 5 * 60 * 1000;
+  for (const [accountId, lastUsed] of accountMutexLastUsed) {
+    if (now - lastUsed > ORPHAN_THRESHOLD_MS) {
+      removeAccountMutex(accountId);
+    }
+  }
+}
+
 function getAccountMutex(accountId: string): Mutex {
   let mutex = accountMutexes.get(accountId);
   if (!mutex) {
     mutex = new Mutex();
     accountMutexes.set(accountId, mutex);
+    sweepOrphanedAccountMutexes();
   }
+  accountMutexLastUsed.set(accountId, Date.now());
   return mutex;
 }
 
@@ -141,14 +161,14 @@ export async function chatCompletions(c: Context) {
         prompt += `User: ${contentStr || ''}\n\n`;
       } else if (msg.role === 'assistant') {
         let assistantContent = contentStr || '';
-        const reasoning = (msg as any).reasoning_content;
+        const reasoning = msg.reasoning_content;
         if (reasoning) {
           assistantContent = `<think>\n${reasoning}\n</think>\n${assistantContent}`;
         }
         if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
            for (const tc of msg.tool_calls) {
              const args = tc.function?.arguments;
-             let parsedArgs: any = {};
+             let parsedArgs: Record<string, unknown> = {};
              if (typeof args === 'string') {
                try { parsedArgs = JSON.parse(args); } catch { parsedArgs = {}; }
              } else if (args && typeof args === 'object') {
@@ -180,9 +200,8 @@ export async function chatCompletions(c: Context) {
     }
 
     // Inject tools instructions
-    const bodyAny = body as any;
-    const hasTools = bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0;
-    const toolChoice = bodyAny.tool_choice;
+    const hasTools = body.tools && Array.isArray(body.tools) && body.tools.length > 0;
+    const toolChoice = body.tool_choice;
 
     // Edge case: tool_choice='required' without tools -> return 400 error
     if (toolChoice === 'required' && !hasTools) {
@@ -192,7 +211,7 @@ export async function chatCompletions(c: Context) {
     // If no tools or empty array: don't add anything regardless of tool_choice
     if (hasTools && toolChoice !== 'none') {
       // Better formatting for tools
-      const formattedTools = bodyAny.tools.map((t: any) => {
+      const formattedTools = (body.tools || []).map(t => {
         if (t.type === 'function') {
           return {
             name: t.function.name,
@@ -209,7 +228,7 @@ export async function chatCompletions(c: Context) {
       if (typeof toolChoice === 'object' && toolChoice?.type === 'function' && toolChoice?.function?.name) {
         // Prompt injection protection: validate tool name against registered tools
         const rawName = toolChoice.function.name;
-        const matchingTool = bodyAny.tools.find((t: any) =>
+        const matchingTool = (body.tools || []).find(t =>
           t.type === 'function' && t.function.name === rawName
         );
         if (!matchingTool) {
@@ -249,12 +268,13 @@ export async function chatCompletions(c: Context) {
     // Account selection with fallback on rate-limit/failure
     let account = getNextAccount();
     let triedAccountIds = new Set<string>();
-    let lastError: any = null;
+    let lastError: unknown = null;
 
     let stream: ReadableStream | undefined;
     let uiSessionId = '';
     let releaseChatLock: (() => void) | undefined;
       let effectiveAccountId: string | undefined;
+    let completionId = '';
 
     while (account) {
       const accountId = account.id;
@@ -277,7 +297,7 @@ export async function chatCompletions(c: Context) {
 
     const accountMutex = getAccountMutex(accountId);
     releaseChatLock = await accountMutex.acquire();
-    const completionId = 'chatcmpl-' + uuidv4();
+    completionId = 'chatcmpl-' + uuidv4();
 
     try {
         let retries = 3;
@@ -305,11 +325,12 @@ export async function chatCompletions(c: Context) {
             effectiveAccountId = accountId;
             success = true;
             break;
-          } catch (err: any) {
+          } catch (err: unknown) {
             retries--;
+            const qwenErr = err as { upstreamCode?: string; upstreamStatus?: number; message?: string };
 
-            if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
-              const hourHint = err.message?.match(/Wait about (\d+) hour/);
+            if (qwenErr.upstreamCode === 'RateLimited' || qwenErr.upstreamStatus === 429) {
+              const hourHint = qwenErr.message?.match(/Wait about (\d+) hour/);
               const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : undefined;
               markAccountRateLimited(accountId, cooldownMs, 'RateLimited');
               logger.warn(`Account ${accountEmail} (${accountId}) rate-limited. Marked for cooldown.`);
@@ -320,7 +341,7 @@ export async function chatCompletions(c: Context) {
             }
 
             if (retries === 0) {
-              if (err.upstreamStatus && err.upstreamStatus >= 500) {
+              if (qwenErr.upstreamStatus && qwenErr.upstreamStatus >= 500) {
                 markAccountRateLimited(accountId, undefined, 'ServerError');
                 logger.warn(`Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`);
               }
@@ -334,7 +355,7 @@ export async function chatCompletions(c: Context) {
             if (err instanceof RetryableQwenStreamError && err.retryAfterMs !== undefined) {
               useDelay = err.retryAfterMs;
             }
-            const isRetryable = err instanceof RetryableQwenStreamError || err.message?.includes('in progress') || err.message?.includes('Bad_Request');
+            const isRetryable = err instanceof RetryableQwenStreamError || qwenErr.message?.includes('in progress') || qwenErr.message?.includes('Bad_Request');
             if (!isRetryable) {
               releaseChatLock();
               releaseChatLock = undefined;
@@ -354,15 +375,13 @@ export async function chatCompletions(c: Context) {
         releaseChatLock = undefined;
         account = getNextAvailableAccount(accountId);
         continue;
-      } catch (err: any) {
+      } catch (err: unknown) {
         releaseChatLock?.();
         releaseChatLock = undefined;
         lastError = err;
         account = getNextAvailableAccount(accountId);
       }
     }
-
-    const completionId = 'chatcmpl-' + uuidv4();
 
     if (!stream) {
       throw lastError || new Error('All accounts failed');
@@ -376,7 +395,7 @@ export async function chatCompletions(c: Context) {
       let reasoningBuffer = '';
       let lastFullContent = '';
       let targetResponseId: string | null = null;
-      const toolParser = new StreamingToolParser(bodyAny.tools || []);
+      const toolParser = new StreamingToolParser(body.tools || []);
       const toolCallsOut: any[] = [];
       let buffer = '';
       let completionTokens = 0;
@@ -625,7 +644,7 @@ export async function chatCompletions(c: Context) {
       // Set up a periodic heartbeat to keep the connection alive during long thinking phases
       heartbeatInterval = setInterval(async () => {
         try {
-          await streamWriter.write(': keep-alive\n\n');
+          await streamWriter.write(': keep-alive\n\n').catch(() => {});
         } catch (e) {
           clearInterval(heartbeatInterval);
         }
@@ -662,7 +681,7 @@ export async function chatCompletions(c: Context) {
        let reasoningBuffer = '';
        let lastFullContent = '';
        let targetResponseId: string | null = null;
-       const toolParser = new StreamingToolParser(bodyAny.tools || []);
+       const toolParser = new StreamingToolParser(body.tools || []);
        let toolCallIndex = 0;
 
       let buffer = '';
@@ -907,15 +926,17 @@ export async function chatCompletions(c: Context) {
 
       } finally {
         clearInterval(heartbeatInterval);
-        removeStream(completionId);
+        await removeStream(completionId);
         releaseChatLock?.();
       }
     });
-  } catch (err: any) {
-    logger.error('Error in chatCompletions: ' + (err?.message || String(err)));
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('Error in chatCompletions: ' + msg);
     const isProd = process.env.NODE_ENV === 'production';
     const sanitized = sanitizeError(err, isProd);
-    return c.json({ error: sanitized }, err.upstreamStatus || 500);
+    const statusCode = err instanceof QwenUpstreamError ? err.upstreamStatus : 500;
+    return c.json({ error: sanitized }, statusCode as any);
   }
 }
 
@@ -928,7 +949,7 @@ export async function chatCompletionsStop(c: Context) {
       return c.json({ error: 'chat_id and response_id are required' }, 400);
     }
 
-    const stream = getStream(chat_id);
+    const stream = await getStream(chat_id);
     if (!stream) {
       return c.json({ error: 'Stream not found' }, 404);
     }
@@ -965,12 +986,13 @@ export async function chatCompletionsStop(c: Context) {
     }
 
     stream.abortController.abort();
-    removeStream(chat_id);
+    await removeStream(chat_id);
 
     logger.info(`Generation stopped for chat_id=${chat_id}`);
     return c.json({ success: true });
-  } catch (err: any) {
-    logger.error('Error in chatCompletionsStop: ' + (err?.message || String(err)));
-    return c.json({ error: err.message }, 500);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('Error in chatCompletionsStop: ' + msg);
+    return c.json({ error: msg }, 500);
   }
 }

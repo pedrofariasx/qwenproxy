@@ -3,8 +3,17 @@ export interface TruncatedMessage {
   content: string;
 }
 
+/**
+ * Best-effort token count estimation for Qwen models.
+ *
+ * Qwen does not publish an official tokenizer, so this uses a rough heuristic:
+ * `ceil(bytes * 0.40)` approximating ~2.5 characters per token for mixed
+ * Chinese/English text. This is not exact — use only for context window
+ * budgeting, not for billing or precise token accounting.
+ */
 export function estimateTokenCount(text: string): number {
-  return Math.ceil(text.length / 3.5);
+  const bytes = new TextEncoder().encode(text).length;
+  return Math.ceil(bytes * 0.40);
 }
 
 export function truncateMessages(
@@ -44,7 +53,7 @@ export function truncateMessages(
     } else {
       const remainingTokens = availableTokens - usedTokens;
       if (remainingTokens > 100) {
-        const truncatedContent = msg.content.slice(0, remainingTokens * 3.5);
+        const truncatedContent = msg.content.slice(0, remainingTokens * 2.5);
         result.unshift({ role: msg.role, content: `[Truncated] ${truncatedContent}...` });
       }
       break;
@@ -53,7 +62,7 @@ export function truncateMessages(
   
   if (result.length === 0 && normalizedMessages.length > 0) {
     const lastMsg = normalizedMessages[normalizedMessages.length - 1];
-    const truncatedContent = lastMsg.content.slice(0, Math.max(200, availableTokens * 3.5));
+    const truncatedContent = lastMsg.content.slice(0, Math.max(200, availableTokens * 2.5));
     result.push({ role: lastMsg.role, content: `[Truncated] ${truncatedContent}...` });
   }
   

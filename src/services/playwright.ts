@@ -17,6 +17,18 @@ import { Logger } from '../core/logger.js';
 
 const logger = new Logger('info', 'Playwright')
 
+let testOptions = {
+  mockMode: process.env.TEST_MOCK_PLAYWRIGHT === 'true',
+  mockSessionId: process.env.TEST_SESSION_ID,
+};
+
+export function setTestOptions(opts: { mockMode: boolean; mockSessionId?: string }): void {
+  testOptions.mockMode = opts.mockMode;
+  if (opts.mockSessionId !== undefined) {
+    testOptions.mockSessionId = opts.mockSessionId;
+  }
+}
+
 export type BrowserType = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'edge';
 
 let context: BrowserContext | null = null;
@@ -81,7 +93,7 @@ export class Mutex {
 const uiMutex = new Mutex();
 
 export async function getCookies(accountId?: string): Promise<string> {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
+  if (testOptions.mockMode) return 'token=mock';
   const page = accountId ? accountPages.get(accountId) : activePage;
   if (!page) return '';
   const cookies = await page.context().cookies();
@@ -89,7 +101,7 @@ export async function getCookies(accountId?: string): Promise<string> {
 }
 
 export async function getBasicHeaders(accountId?: string): Promise<{ cookie: string, userAgent: string, bxV: string }> {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) return { cookie: 'token=mock', userAgent: 'mock', bxV: '2.5.36' };
+  if (testOptions.mockMode) return { cookie: 'token=mock', userAgent: 'mock', bxV: '2.5.36' };
   
   let page = accountId ? accountPages.get(accountId) : activePage;
   if (accountId && !page) {
@@ -114,7 +126,7 @@ export async function getBasicHeaders(accountId?: string): Promise<{ cookie: str
 }
 
 export async function initPlaywright(headless = true, browserType: BrowserType = 'chromium') {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) return;
+  if (testOptions.mockMode) return;
   if (context) {
     return;
   }
@@ -215,7 +227,7 @@ async function attemptAutoLogin(): Promise<void> {
 }
 
 export async function closePlaywright() {
-  if (process.env.TEST_MOCK_PLAYWRIGHT) return;
+  if (testOptions.mockMode) return;
   for (const cache of accountHeaderCaches.values()) {
     if (cache.refreshTimeout) {
       clearTimeout(cache.refreshTimeout);
@@ -340,8 +352,8 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
   const cacheKey = accountId || 'global';
   const cache = getAccountHeaderCache(cacheKey);
 
-  if (process.env.TEST_MOCK_PLAYWRIGHT) {
-    const mockSessionId = process.env.TEST_SESSION_ID || 'mock-session';
+  if (testOptions.mockMode) {
+    const mockSessionId = testOptions.mockSessionId || 'mock-session';
     return { 
       headers: { 
         'authorization': 'Bearer MOCK', 

@@ -27,6 +27,7 @@ export class Watchdog extends EventEmitter {
   }
 
   private async performHealthCheck(): Promise<void> {
+    if (this.recoveryInProgress) return;
     const status: HealthStatus = {
       ram: this.checkRAM(),
       websocket: this.checkWebSocket(),

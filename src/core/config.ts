@@ -35,6 +35,7 @@ const envSchema = z.object({
   EXECUTOR_ENABLED: z.string().default('false'),
   EXECUTOR_MAX_TURNS: z.string().default('10'),
   EXECUTOR_TIMEOUT_MS: z.string().default('120000'),
+  LOG_FORMAT: z.enum(['text', 'json']).default('text'),
 })
 
 const env = envSchema.parse(process.env)
@@ -116,6 +117,7 @@ export const config = {
     email: env.QWEN_EMAIL,
     password: env.QWEN_PASSWORD,
   },
+  logFormat: env.LOG_FORMAT,
 }
 
 export type Config = typeof config

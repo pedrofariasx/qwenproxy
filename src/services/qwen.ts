@@ -8,6 +8,7 @@
 import { getQwenHeaders, getBasicHeaders } from './playwright.ts';
 import { v4 as uuidv4 } from 'uuid';
 import { Logger } from '../core/logger.js';
+import { syncModelContextWindows } from '../core/model-registry.js';
 
 const logger = new Logger('info', 'Qwen')
 
@@ -33,13 +34,47 @@ export class QwenUpstreamError extends Error {
   }
 }
 
-const sessionStates: Record<string, string | null> = (globalThis as any)._sessionStates || {};
-(globalThis as any)._sessionStates = sessionStates;
+const MAX_SESSION_STATES = 1000;
+const insertionOrder: string[] = [];
+
+const sessionStates = new Map<string, string | null>();
+
+function evictOldestIfNeeded(): void {
+  while (sessionStates.size > MAX_SESSION_STATES) {
+    const oldest = insertionOrder.shift();
+    if (oldest !== undefined) {
+      sessionStates.delete(oldest);
+    } else {
+      break;
+    }
+  }
+}
 
 export function updateSessionParent(sessionId: string, parentId: string | null) {
   if (sessionId) {
-    sessionStates[sessionId] = parentId;
+    if (!sessionStates.has(sessionId)) {
+      insertionOrder.push(sessionId);
+    }
+    sessionStates.set(sessionId, parentId);
+    evictOldestIfNeeded();
   }
+}
+
+export function getSessionParent(sessionId: string): string | null | undefined {
+  return sessionStates.get(sessionId);
+}
+
+export function clearSessionState(sessionId: string): void {
+  sessionStates.delete(sessionId);
+  const idx = insertionOrder.indexOf(sessionId);
+  if (idx !== -1) {
+    insertionOrder.splice(idx, 1);
+  }
+}
+
+export function clearAllSessionStates(): void {
+  sessionStates.clear();
+  insertionOrder.length = 0;
 }
 
 export interface QwenMessage {
@@ -195,6 +230,11 @@ export async function fetchQwenModels(accountId?: string): Promise<any[]> {
 
     cachedModels = extendedModels;
     lastModelsFetch = now;
+    try {
+      syncModelContextWindows(json.data);
+    } catch (syncErr) {
+      logger.error(`Failed to sync model context windows: ${(syncErr as Error).message}`);
+    }
     return extendedModels;
   }
 
@@ -214,8 +254,11 @@ export async function createQwenStream(
   
   if (forcedParentId !== undefined) {
     actualParentId = forcedParentId;
-  } else if (chatSessionId && sessionStates[chatSessionId] !== undefined) {
-    actualParentId = sessionStates[chatSessionId];
+  } else if (chatSessionId) {
+    const parent = getSessionParent(chatSessionId);
+    if (parent !== undefined) {
+      actualParentId = parent;
+    }
   }
 
   const timestamp = Math.floor(Date.now() / 1000);

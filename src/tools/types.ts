@@ -2,52 +2,31 @@
  * File: types.ts
  * Project: qwenproxy
  * Tool system types
+ *
+ * Re-exports base types from src/types/openai.ts (single source of truth).
+ * Keeps ONLY tool-execution-specific types defined locally.
  */
 
-/**
- * JSON Schema definition following the OpenAI function calling spec.
- */
-export interface JsonSchema {
-  type: string;
-  properties?: Record<string, JsonSchema>;
-  items?: JsonSchema;
-  required?: string[];
-  enum?: unknown[];
-  const?: unknown;
-  default?: unknown;
-  description?: string;
-  additionalProperties?: boolean | JsonSchema;
-  anyOf?: JsonSchema[];
-  oneOf?: JsonSchema[];
-  allOf?: JsonSchema[];
-  not?: JsonSchema;
-  if?: JsonSchema;
-  then?: JsonSchema;
-  else?: JsonSchema;
-  minimum?: number;
-  maximum?: number;
-  minLength?: number;
-  maxLength?: number;
-  pattern?: string;
-  format?: string;
-  minItems?: number;
-  maxItems?: number;
-  uniqueItems?: boolean;
-  nullable?: boolean;
-}
+// ─── Re-export base types from openai.ts ─────────────────────────────────
+export type { JsonSchema, FunctionToolDefinition } from '../types/openai.ts';
+// Local import for use in local type definitions below
+import type { JsonSchema } from '../types/openai.ts';
 
-/**
- * OpenAI-compatible function tool definition.
- */
-export interface FunctionToolDefinition {
-  type: 'function';
-  function: {
-    name: string;
-    description?: string;
-    parameters?: JsonSchema;
-    strict?: boolean;
-  };
-}
+// ─── Type re-exports for convenience ─────────────────────────────────────
+export type {
+  ToolChoice,
+  ToolCallFunction,
+  MessageToolCall,
+  Message,
+  OpenAIRequest,
+  ToolCallDelta,
+  ChoiceDelta,
+  Choice,
+  Usage,
+  ChatCompletionChunk,
+} from '../types/openai.ts';
+
+// ─── Tool-specific types (NOT re-exported from openai.ts) ─────────────────
 
 /**
  * Internal tool registration entry.
@@ -63,9 +42,9 @@ export interface ToolRegistration {
 /**
  * Handler function signature for a registered tool.
  * Receives the parsed and validated arguments.
- * Returns the result as a string (or object that will be JSON-stringified).
+ * Returns the result.
  */
-export type ToolHandler<TArgs = any, TResult = any> = (
+export type ToolHandler<TArgs = Record<string, unknown>, TResult = unknown> = (
   args: TArgs,
   context: ToolContext
 ) => Promise<TResult>;

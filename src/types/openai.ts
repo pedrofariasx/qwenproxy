@@ -86,6 +86,9 @@ export interface OpenAIRequest {
   stream?: boolean;
   tools?: FunctionToolDefinition[];
   tool_choice?: ToolChoice;
+  stream_options?: {
+    include_usage?: boolean;
+  };
 }
 
 // ─── Streaming Response ────────────────────────────────────────────────────────
@@ -132,35 +135,19 @@ export interface ChatCompletionChunk {
   usage?: Usage;
 }
 
-// ─── Parsed Tool Call (from LLM) ───────────────────────────────────────────────
-
-export interface ParsedToolCall {
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-// ─── Tool Call Result ──────────────────────────────────────────────────────────
-
-export interface ToolCallResult {
-  toolCallId: string;
-  name: string;
-  result: string;
-  isError: boolean;
-}
-
 // ─── Tool Handler ──────────────────────────────────────────────────────────────
 
-export type ToolHandler = (
-  args: Record<string, unknown>,
-  context: ToolExecutionContext
-) => Promise<unknown>;
+export type ToolHandler<TArgs = Record<string, unknown>, TResult = unknown> = (
+  args: TArgs,
+  context: ToolContext
+) => Promise<TResult>;
 
-export interface ToolExecutionContext {
+export interface ToolContext {
   messages: Message[];
   turn: number;
   model: string;
   state: Record<string, unknown>;
+  [key: string]: any;
 }
 
 // ─── Tool Registration ─────────────────────────────────────────────────────────
