@@ -1,6 +1,6 @@
 # QwenProxy
 
-Proxy API local compatível com OpenAI que roteia requisições para os modelos do **Qwen (chat.qwen.ai)** via automação de navegador com Playwright. Oferece suporte a execução de ferramentas, modo de pensamento (reasoning) e persistência de sessão.
+Proxy API local compativel com OpenAI que roteia chamadas para o **Qwen (chat.qwen.ai)** via Playwright. O projeto suporta Chat Completions, Responses, streaming, tools, reasoning, multi-conta com rotacao, persistencia em SQLite/WAL e debug legivel no terminal.
 
 [![CI](https://github.com/pedrofariasx/qwenproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/pedrofariasx/qwenproxy/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue)](https://www.typescriptlang.org/)
@@ -8,212 +8,175 @@ Proxy API local compatível com OpenAI que roteia requisições para os modelos 
 [![Playwright](https://img.shields.io/badge/Playwright-1.60-blueviolet)](https://playwright.dev/)
 [![License: ISC](https://img.shields.io/badge/License-ISC-yellow.svg)](LICENSE)
 
----
+## Features
 
-## ✨ Features
+- **OpenAI compatible**: `/v1/chat/completions`, `/v1/responses`, `/v1/models` e erros no formato OpenAI.
+- **Compatibilidade com agentes**: presets e ajustes para OpenCode, Zed, Codex, Pi, Kilo e `@ai-sdk/openai-compatible`.
+- **Multi-conta**: contas Qwen em SQLite com round-robin, cooldown por rate limit e fallback para contas em `.env`.
+- **SQLite WAL**: banco em `data/qwenproxy.db`, migracao automatica de `accounts.json` e shutdown fechando conexao.
+- **Debug legivel**: modos `off`, `basic`, `full` e `raw` para ver request, modelo, tools, conta, resposta e erro traduzido.
+- **Tools e reasoning**: suporte a tool calls locais e modelos com pensamento quando disponivel.
+- **Docker ready**: volumes separados para banco (`data/`) e perfis do navegador (`qwen_profiles/`).
 
-- **OpenAI API Compatible**: Interface compatível com `/v1/chat/completions` e `/v1/models`.
-- **Reasoning Support**: Suporte completo ao modo de pensamento (thinking) dos modelos Qwen.
-- **Tool Execution**: Sistema de execução de ferramentas locais integrado ao fluxo do chat.
-- **Session Persistence**: Login persistente com armazenamento de perfil do navegador em `qwen_profile/`.
-- **Network Visibility**: Exibe URLs local e de rede (IP) ao iniciar o servidor.
-- **Browser Selection**: Escolha entre Chrome, Firefox, Edge ou Chromium para execução.
-- **Docker Ready**: Deploy simplificado com suporte a Docker e Docker Compose.
-- **Auto-Login**: Login automático via credenciais `.env` com recuperação de sessão.
-- **Stream Options**: Suporte a `include_usage` em streaming responses.
-
----
-
-## 🏗️ Arquitetura
-
-```mermaid
-graph TD
-    Client[Cliente OpenAI/SDK] -->|HTTP| Proxy[QwenProxy]
-    Proxy -->|/v1/chat/completions| Handler[Chat Handler]
-    Handler --> Qwen[chat.qwen.ai]
-    Handler --> Playwright[Playwright Service]
-    Playwright --> Browser[Browser Instance]
-    Handler --> Tools[Tools Executor]
-    Tools --> Registry[Tool Registry]
-    
-    subgraph "Configuração"
-        Env[.env] --> Proxy
-        Profile[qwen_profile/] --> Playwright
-    end
-```
-
----
-
-## 📋 Pré-requisitos
-
-| Dependência | Versão Mínima | Instalação |
-|------------|--------------|-----------|
-| Node.js | v20.x | [nvm](https://github.com/nvm-sh/nvm) |
-| npm | v9.x | Incluído com Node.js |
-| Playwright | - | `npx playwright install` |
-| Docker (opcional) | v24.x | [Docker Docs](https://docs.docker.com/get-docker/) |
-
----
-
-## 🚀 Instalação
-
-### Via npm
+## Instalacao
 
 ```bash
-# Clonar repositório
 git clone https://github.com/pedrofariasx/qwenproxy.git
 cd qwenproxy
-
-# Instalar dependências
 npm install
-
-# Instalar browsers do Playwright
 npx playwright install
 ```
 
-### Via Docker
+Com Docker:
 
 ```bash
-# Iniciar containers
 docker-compose up -d
 ```
 
----
+## Configuracao
 
-## ⚙️ Configuração
-
-Crie o arquivo `.env` na raiz do projeto:
+Crie um `.env` baseado em `.env.example`:
 
 ```env
-# Porta do servidor (default: 3000)
 PORT=3000
+API_KEY=sua-chave-local
 
-# Chave de API para proteger os endpoints (opcional)
-API_KEY=sua-chave-secreta-aqui
+# Conta unica via .env, opcional.
+QWEN_EMAIL=seu-email@example.com
+QWEN_PASSWORD=sua-senha
 
-# Credenciais Qwen (para login automático)
-QWEN_EMAIL=seu-email@exemplo.com
-QWEN_PASSWORD=sua-senha-aqui
+# Persistencia
+QWENPROXY_DATA_DIR=./data
+USER_DATA_DIR=./qwen_profiles/global
+QWENPROXY_PROFILES_DIR=./qwen_profiles
 
-# Navegador padrão (chromium, firefox, chrome, edge)
-BROWSER=chromium
+# Debug
+QWENPROXY_DEBUG=off
+QWENPROXY_DEBUG_MAX_CHARS=1200
+QWENPROXY_DEBUG_SHOW_PROMPT=false
 ```
 
----
+## Contas
 
-## 📡 Uso e Comandos
-
-### Inicialização do Servidor
+As contas adicionadas pelo CLI ficam em SQLite (`data/qwenproxy.db`). Se existir um `accounts.json` antigo, ele e migrado na primeira abertura do banco e renomeado para `accounts.json.bak`.
 
 ```bash
-# Iniciar com o navegador padrão (Chromium)
-npm start
+npm run login
+npm run login:chrome
+npm run login:firefox
+npm run login:edge
+```
 
-# Iniciar com navegadores específicos
+O menu permite adicionar conta com credenciais, adicionar via login manual no navegador, remover contas salvas no SQLite e iniciar login em todas.
+
+Tambem da para usar contas por `.env`:
+
+```env
+QWEN_EMAIL_1=primeira@example.com
+QWEN_PASSWORD_1=senha1
+QWEN_EMAIL_2=segunda@example.com
+QWEN_PASSWORD_2=senha2
+```
+
+Contas de `.env` aparecem como `env` no gerenciador e nao sao removidas pelo CLI; remova do `.env`.
+
+## Uso
+
+```bash
+npm start
 npm run start:chrome
 npm run start:firefox
 npm run start:edge
 ```
 
-Ao iniciar, o console exibirá:
-```txt
-🚀 QwenProxy started!
-- Local:   http://localhost:3000
-- Network: http://192.168.1.10:3000
+Rotas publicadas:
 
-Available Routes:
-- [GET] /health
-- [POST] /v1/chat/completions
-- [GET] /v1/models
-```
+| Metodo | Rota | Descricao |
+|---|---|---|
+| GET | `/health` | Health check |
+| GET | `/metrics` | Metricas Prometheus |
+| GET | `/v1/models` | Lista modelos no formato OpenAI |
+| GET | `/v1/models/:model` | Detalhe de um modelo |
+| POST | `/v1/chat/completions` | Chat Completions |
+| POST | `/v1/responses` | Responses API |
+| POST | `/v1/chat/responses` | Alias de Responses |
+| POST | `/v1/responses/stop` | Cancela stream ativo |
+| POST | `/v1/chat/responses/stop` | Alias de cancelamento |
 
-### Autenticação de Sessão (Login)
+## Debug
 
-Se não usar credenciais no `.env`, realize o login manual:
+Para diagnostico humano, suba com:
+
 ```bash
-npm run login
-# Ou com browser específico
-npm run login:firefox
+npm run start:debug
 ```
 
----
+Isso mostra cliente detectado, rota, modelo, stream, quantidade de mensagens, tools, conta escolhida, resposta final e erro traduzido com proximo passo pratico.
 
-## 📡 API Reference
+Para ver preview da entrada e do prompt enviado ao Qwen:
 
-### Chat Completions
-
-```http
-POST /v1/chat/completions
-Content-Type: application/json
-Authorization: Bearer sua-chave
+```bash
+QWENPROXY_DEBUG=full QWENPROXY_DEBUG_SHOW_PROMPT=true npm start
 ```
 
-**Modelos Suportados**:
-- `qwen-plus`: Modelo padrão com raciocínio habilitado.
-- `qwen-plus-no-thinking`: Versão sem o bloco de pensamento.
-- `qwen-max`, `qwen-turbo`, etc. (conforme disponibilidade na conta).
+| Modo | O que mostra |
+|---|---|
+| `off` | Sem debug extra |
+| `basic` | Resumo limpo de request, resposta e erro |
+| `full` | Inclui preview de entrada, prompt e deltas parciais |
+| `raw` | Mais verboso, para investigacao curta |
 
----
+Presets reais de OpenCode, Zed, Codex, Pi, Kilo e AI SDK ficam em [`docs/compatibility.md`](docs/compatibility.md).
 
-## 💻 Exemplos de Integração
+## Docker
 
-### OpenAI SDK (Node.js)
+`docker-compose.yml` persiste o banco e as sessoes:
 
-```typescript
-import OpenAI from 'openai';
-
-const openai = new OpenAI({
-  baseURL: 'http://localhost:3000/v1',
-  apiKey: process.env.API_KEY || 'sk-no-key-required'
-});
-
-const completion = await openai.chat.completions.create({
-  model: 'qwen-plus',
-  messages: [{ role: 'user', content: 'Explique como funciona o Playwright.' }]
-});
-
-console.log(completion.choices[0].message.content);
+```yaml
+services:
+  qwenproxy:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./qwen_profiles:/app/qwen_profiles
 ```
 
----
+| Volume | Conteudo |
+|---|---|
+| `./data` | SQLite (`qwenproxy.db`, `-wal`, `-shm`) |
+| `./qwen_profiles` | Cookies e sessoes do Playwright |
 
-## 📁 Estrutura do Projeto
+## Estrutura
 
-```
-qwenproxy/
-├── src/
-│   ├── index.ts              # Entry point e servidor Hono
-│   ├── routes/
-│   │   └── chat.ts          # Handler compatível com OpenAI
-│   ├── services/
-│   │   ├── qwen.ts          # Integração com a API do Qwen
-│   │   └── playwright.ts    # Automação de navegador
-│   ├── tools/
-│   │   ├── executor.ts      # Execução de ferramentas
-│   │   └── registry.ts      # Registro de tools
-│   └── login.ts             # Script de autenticação
-├── qwen_profile/            # Armazenamento da sessão (gitignored)
-├── Dockerfile                # Configuração Docker
-└── package.json             # Scripts e dependências
+```txt
+src/
+  api/                 servidor Hono e modelos
+  routes/              Chat Completions e Responses
+  core/
+    accounts.ts        CRUD e merge env/SQLite
+    database.ts        SQLite, WAL e migracao accounts.json
+    debug-console.ts   debug legivel
+    openai-compat.ts   normalizacao e erros OpenAI
+  services/            Playwright e chamadas Qwen
+  tools/               parser, registry e executor
 ```
 
----
+## Troubleshooting
 
-## 🔍 Troubleshooting
+| Problema | O que fazer |
+|---|---|
+| `Missing or invalid Authorization header` | Defina `Authorization: Bearer <API_KEY>` ou deixe `API_KEY` vazio no `.env` |
+| Porta 3000 em uso | Troque `PORT` no `.env` |
+| Navegador nao abre | Rode `npx playwright install` |
+| Sessao expirada | Rode `npm run login` e refaca login |
+| Rate limit | Adicione mais contas pelo CLI ou espere o cooldown |
+| Banco antigo nao aparece | Verifique `data/qwenproxy.db` e se `accounts.json.bak` foi criado |
+| Debug insuficiente | Rode `QWENPROXY_DEBUG=full QWENPROXY_DEBUG_SHOW_PROMPT=true npm start` |
 
-- **Endereço em uso**: Verifique se a porta `3000` está livre ou altere o `PORT` no `.env`.
-- **Erro de Navegador**: Se um navegador não abrir, certifique-se de que ele está instalado (`npx playwright install`).
-- **Sessão Expirada**: Execute `npm run login` novamente para renovar os cookies.
+## Disclaimer
 
----
-
-## ⚠️ Disclaimer
-
-> Este projeto é fornecido estritamente para fins educacionais e de pesquisa.
-
-Os autores não incentivam ou endossam:
-- Violação dos Termos de Serviço da plataforma Qwen.
-- Automação não autorizada em larga escala.
-- Uso para atividades maliciosas.
-
-**Use por sua conta e risco.**
+Este projeto e fornecido para fins educacionais e de pesquisa. Use por sua conta e risco e respeite os termos da plataforma Qwen.

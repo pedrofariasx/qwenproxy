@@ -1,14 +1,40 @@
+# Dependencies
 node_modules/
+
+# Build
 dist/
-qwen_profile/
+
+# Environment
 .env
-.env.local
-*.log
-.DS_Store
-coverage/
-.cache/
-.kilo
-qwen_profiles/
+.env.*
+!.env.example
+
+# Database and persistent data
+data/
 qwen_data/
 .data/
+*.db
+*.db-wal
+*.db-shm
 accounts.json
+accounts.json.bak
+accounts.json.*.bak
+
+# Browser profiles
+qwen_profile/
+qwen_profiles/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage and cache
+coverage/
+.cache/
+
+# IDE / editor
+.kilo/
+
+# OS
+.DS_Store
+Thumbs.db

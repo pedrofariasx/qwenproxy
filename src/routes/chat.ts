@@ -23,6 +23,15 @@ import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.ts';
 import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo } from '../core/account-manager.ts';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.ts';
+import { createDebugTrace, detectClientName } from '../core/debug-console.ts';
+import { terminal } from '../core/terminal.ts';
+import {
+  getForcedToolName,
+  normalizeChatRequest,
+  openAIErrorBody,
+  openAIErrorFrom,
+  parseJsonBody,
+} from '../core/openai-compat.ts';
 
 const accountMutexes = new Map<string, Mutex>();
 function getAccountMutex(accountId: string): Mutex {
@@ -101,14 +110,26 @@ function parseQwenErrorPayload(raw: string): { message: string; status: number }
 }
 
 export async function chatCompletions(c: Context) {
+  let debugTrace: ReturnType<typeof createDebugTrace> | null = null;
   try {
-    const body: OpenAIRequest = await c.req.json();
+    const body = normalizeChatRequest(await parseJsonBody(c.req.raw));
     const isStream = body.stream ?? false;
+    const bodyAny = body as any;
     
     // Extract the prompt
     let prompt = '';
     const messages = body.messages || [];
     let systemPrompt = '';
+    debugTrace = createDebugTrace({
+      id: `chat-${uuidv4().slice(0, 8)}`,
+      route: 'chat.completions',
+      client: detectClientName(c.req.header('user-agent'), c.req.header('x-qwenproxy-client')),
+      model: body.model,
+      stream: isStream,
+      messages,
+      tools: bodyAny.tools,
+    });
+    c.header('X-QwenProxy-Debug-Id', debugTrace.id);
     
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
@@ -166,7 +187,6 @@ export async function chatCompletions(c: Context) {
     }
 
     // Inject tools instructions
-    const bodyAny = body as any;
     if (bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0) {
       // Better formatting for tools
       const formattedTools = bodyAny.tools.map((t: any) => {
@@ -183,8 +203,8 @@ export async function chatCompletions(c: Context) {
       
       systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
       
-      if (bodyAny.tool_choice && typeof bodyAny.tool_choice === 'object' && bodyAny.tool_choice.function) {
-        const forcedTool = bodyAny.tool_choice.function.name;
+      const forcedTool = getForcedToolName(bodyAny.tool_choice);
+      if (forcedTool) {
         systemPrompt += `CRITICAL: You MUST call the tool "${forcedTool}" in this response.\n\n`;
       }
     }
@@ -200,6 +220,7 @@ export async function chatCompletions(c: Context) {
     } else {
       finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
     }
+    debugTrace.prompt(finalPrompt, { estimatedTokens, contextWindow: modelContextWindow });
 
     const isThinkingModel = !body.model.includes('no-thinking');
     
@@ -228,12 +249,16 @@ export async function chatCompletions(c: Context) {
 
       const cooldownInfo = getAccountCooldownInfo(accountId);
       if (cooldownInfo && accountId !== 'global') {
-        console.log(`[Chat] Skipping account ${accountEmail} (${accountId}) — on cooldown for ${Math.round(cooldownInfo.remainingMs / 1000)}s (${cooldownInfo.reason})`);
+        terminal.warn('Chat', `Skipping ${accountEmail}; account on cooldown`, [
+          `remaining: ${Math.round(cooldownInfo.remainingMs / 1000)}s`,
+          `reason: ${cooldownInfo.reason}`,
+        ]);
         account = getNextAvailableAccount(accountId);
         continue;
       }
 
-      console.log(`[Chat] Routing request to account: ${accountEmail} (${accountId})`);
+      terminal.info('Chat', `Routing request to ${accountEmail}`, [`id: ${accountId}`]);
+      debugTrace.account(accountEmail, accountId);
 
     const accountMutex = getAccountMutex(accountId);
     releaseChatLock = await accountMutex.acquire();
@@ -271,7 +296,7 @@ export async function chatCompletions(c: Context) {
               const hourHint = err.message?.match(/Wait about (\d+) hour/);
               const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : undefined;
               markAccountRateLimited(accountId, cooldownMs, 'RateLimited');
-              console.warn(`[Chat] Account ${accountEmail} (${accountId}) rate-limited. Marked for cooldown.`);
+              terminal.warn('Chat', `${accountEmail} hit Qwen rate limit`, [`id: ${accountId}`]);
               releaseChatLock();
               releaseChatLock = undefined;
               lastError = err;
@@ -281,7 +306,7 @@ export async function chatCompletions(c: Context) {
             if (retries === 0) {
               if (err.upstreamStatus && err.upstreamStatus >= 500) {
                 markAccountRateLimited(accountId, undefined, 'ServerError');
-                console.warn(`[Chat] Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`);
+                terminal.warn('Chat', `${accountEmail} returned upstream server error`, [`id: ${accountId}`]);
               }
               releaseChatLock();
               releaseChatLock = undefined;
@@ -300,7 +325,11 @@ export async function chatCompletions(c: Context) {
               lastError = err;
               break;
             }
-            console.warn(`[Chat] Qwen request failed for ${accountEmail}, retrying in ${useDelay}ms... (${retries} left)`);
+            terminal.warn('Chat', `Retrying Qwen request for ${accountEmail}`, [
+              `delay: ${useDelay}ms`,
+              `left: ${retries}`,
+            ]);
+            debugTrace.retry(err.message || 'Qwen request failed');
             await new Promise(r => setTimeout(r, useDelay));
             retryDelay = Math.min(retryDelay * 2, 5000);
           }
@@ -417,14 +446,16 @@ export async function chatCompletions(c: Context) {
                 // invokes tools. The lead-in is preserved in the parser and
                 // will be recovered only if the tool call fails to parse.
                 for (const tc of toolCalls) {
-                  toolCallsOut.push({
+                  const toolCall = {
                     id: tc.id,
                     type: 'function',
                     function: {
                       name: tc.name,
                       arguments: JSON.stringify(tc.arguments)
                     }
-                  });
+                  };
+                  toolCallsOut.push(toolCall);
+                  debugTrace.toolCall(toolCall);
                 }
               }
             }
@@ -437,7 +468,10 @@ export async function chatCompletions(c: Context) {
       const upstreamError = parseQwenErrorPayload(buffer);
       if (upstreamError) {
         releaseChatLock?.();
-        return c.json({ error: { message: upstreamError.message } }, upstreamError.status as any);
+        debugTrace.failed(upstreamError.message);
+        return c.json(openAIErrorBody(upstreamError.message, upstreamError.status, {
+          code: upstreamError.status === 429 ? 'rate_limited' : 'upstream_error',
+        }), upstreamError.status as any);
       }
 
       const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
@@ -445,14 +479,16 @@ export async function chatCompletions(c: Context) {
         lastFullContent += remainingText;
       }
       for (const tc of remainingToolCalls) {
-        toolCallsOut.push({
+        const toolCall = {
           id: tc.id,
           type: 'function',
           function: {
             name: tc.name,
             arguments: JSON.stringify(tc.arguments)
           }
-        });
+        };
+        toolCallsOut.push(toolCall);
+        debugTrace.toolCall(toolCall);
       }
 
       const usage = {
@@ -467,6 +503,14 @@ export async function chatCompletions(c: Context) {
       if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
       releaseChatLock?.();
+      const finishReason = toolCallsOut.length ? 'tool_calls' : 'stop';
+      debugTrace.completed({
+        outputText: lastFullContent,
+        reasoningText: reasoningBuffer,
+        toolCalls: toolCallsOut,
+        usage,
+        finishReason,
+      });
       return c.json({
         id: completionId,
         object: 'chat.completion',
@@ -476,7 +520,7 @@ export async function chatCompletions(c: Context) {
           index: 0,
           message,
           logprobs: null,
-          finish_reason: toolCallsOut.length ? 'tool_calls' : 'stop'
+          finish_reason: finishReason
         }],
         usage
       });
@@ -533,6 +577,8 @@ export async function chatCompletions(c: Context) {
        let lastFullContent = '';
        let targetResponseId: string | null = null;
        const toolParser = new StreamingToolParser(bodyAny.tools || []);
+       let streamedAnswer = '';
+       const streamedToolCalls: any[] = [];
 
       let buffer = '';
       let completionTokens = 0;
@@ -613,6 +659,7 @@ export async function chatCompletions(c: Context) {
               if (isThinkingChunk) {
                 inThinkingState = true;
                 reasoningBuffer += vStr;
+                debugTrace?.streamDelta('reasoning', vStr);
                 await writeEvent({
                   id: completionId,
                   object: 'chat.completion.chunk',
@@ -625,6 +672,8 @@ export async function chatCompletions(c: Context) {
                 const { text, toolCalls } = toolParser.feed(vStr);
 
                 if (text) {
+                  streamedAnswer += text;
+                  debugTrace?.streamDelta('answer', text);
                   await writeEvent({
                     id: completionId,
                     object: 'chat.completion.chunk',
@@ -635,21 +684,24 @@ export async function chatCompletions(c: Context) {
                 }
 
                 for (const tc of toolCalls) {
+                  const toolCall = {
+                    index: toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc),
+                    id: tc.id,
+                    type: 'function',
+                    function: {
+                      name: tc.name,
+                      arguments: JSON.stringify(tc.arguments)
+                    }
+                  };
+                  streamedToolCalls.push(toolCall);
+                  debugTrace?.toolCall(toolCall);
                   await writeEvent({
                     id: completionId,
                     object: 'chat.completion.chunk',
                     created: Math.floor(Date.now() / 1000),
                     model: body.model,
                     choices: [makeChoice({
-                      tool_calls: [{
-                        index: toolParser.getEmittedToolCallCount() - toolCalls.length + toolCalls.indexOf(tc),
-                        id: tc.id,
-                        type: 'function',
-                        function: {
-                          name: tc.name,
-                          arguments: JSON.stringify(tc.arguments)
-                        }
-                      }]
+                      tool_calls: [toolCall]
                     })]
                   });
                 }
@@ -663,6 +715,7 @@ export async function chatCompletions(c: Context) {
 
       const upstreamError = parseQwenErrorPayload(buffer);
       if (upstreamError) {
+        debugTrace?.failed(upstreamError.message);
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
@@ -684,6 +737,8 @@ export async function chatCompletions(c: Context) {
       // Flush tool parser
       const { text: remainingText, toolCalls: remainingToolCalls } = toolParser.flush();
       if (remainingText) {
+        streamedAnswer += remainingText;
+        debugTrace?.streamDelta('answer', remainingText);
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
@@ -693,21 +748,24 @@ export async function chatCompletions(c: Context) {
         });
       }
       for (const tc of remainingToolCalls) {
+        const toolCall = {
+          index: toolParser.getEmittedToolCallCount() - remainingToolCalls.length + remainingToolCalls.indexOf(tc),
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.arguments)
+          }
+        };
+        streamedToolCalls.push(toolCall);
+        debugTrace?.toolCall(toolCall);
         await writeEvent({
           id: completionId,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
           model: body.model,
           choices: [makeChoice({
-            tool_calls: [{
-              index: toolParser.getEmittedToolCallCount() - remainingToolCalls.length + remainingToolCalls.indexOf(tc),
-              id: tc.id,
-              type: 'function',
-              function: {
-                name: tc.name,
-                arguments: JSON.stringify(tc.arguments)
-              }
-            }]
+            tool_calls: [toolCall]
           })]
         });
       }
@@ -721,6 +779,13 @@ export async function chatCompletions(c: Context) {
       };
   
       const finalFinishReason = toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : 'stop';
+      debugTrace?.completed({
+        outputText: streamedAnswer,
+        reasoningText: reasoningBuffer,
+        toolCalls: streamedToolCalls,
+        usage,
+        finishReason: finalFinishReason,
+      });
   
       await writeEvent({
         id: completionId,
@@ -749,9 +814,10 @@ export async function chatCompletions(c: Context) {
       }
     });
   } catch (err: any) {
-    console.error('Error in chatCompletions:', err);
-    const status = err.upstreamStatus || 500;
-    return c.json({ error: { message: err.message } }, status);
+    debugTrace?.failed(err);
+    const { status, body } = openAIErrorFrom(err);
+    console.error(`[Chat] ${status} ${body.error.code || body.error.type}: ${body.error.message}`);
+    return c.json(body, status as any);
   }
 }
 
@@ -761,16 +827,18 @@ export async function chatCompletionsStop(c: Context) {
     const { chat_id, response_id } = body;
 
     if (!chat_id || !response_id) {
-      return c.json({ error: 'chat_id and response_id are required' }, 400);
+      return c.json(openAIErrorBody('chat_id and response_id are required', 400, {
+        code: 'missing_required_parameter',
+      }), 400);
     }
 
     const stream = getStream(chat_id);
     if (!stream) {
-      return c.json({ error: 'Stream not found' }, 404);
+      return c.json(openAIErrorBody('Stream not found', 404, { code: 'stream_not_found' }), 404);
     }
 
     if (stream.targetResponseId && stream.targetResponseId !== response_id) {
-      return c.json({ error: 'response_id mismatch' }, 400);
+      return c.json(openAIErrorBody('response_id mismatch', 400, { code: 'response_id_mismatch' }), 400);
     }
 
     const stopResponse = await fetch(`https://chat.qwen.ai/api/v2/chat/completions/stop?chat_id=${chat_id}`, {
@@ -797,7 +865,9 @@ export async function chatCompletionsStop(c: Context) {
     if (!stopResponse.ok) {
       const errorText = await stopResponse.text();
       console.error(`[Stop] Failed to stop generation for chat_id=${chat_id}: ${stopResponse.status} ${errorText}`);
-      return c.json({ error: 'Failed to stop generation' }, stopResponse.status as any);
+      return c.json(openAIErrorBody('Failed to stop generation', stopResponse.status, {
+        code: 'upstream_stop_failed',
+      }), stopResponse.status as any);
     }
 
     stream.abortController.abort();
@@ -807,6 +877,7 @@ export async function chatCompletionsStop(c: Context) {
     return c.json({ success: true });
   } catch (err: any) {
     console.error('Error in chatCompletionsStop:', err);
-    return c.json({ error: err.message }, 500);
+    const { status, body } = openAIErrorFrom(err);
+    return c.json(body, status as any);
   }
 }

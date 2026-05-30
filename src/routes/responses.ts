@@ -16,6 +16,15 @@ import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAcc
 import { registerStream, removeStream, abortStream } from '../core/stream-registry.ts';
 import { Mutex } from '../services/playwright.ts';
 import { getResponseContext, getSessionResponseId, pruneResponseContexts, storeResponseContext } from '../core/response-store.ts';
+import { createDebugTrace, detectClientName } from '../core/debug-console.ts';
+import { terminal } from '../core/terminal.ts';
+import {
+  normalizeResponsesRequest,
+  openAIErrorBody,
+  openAIErrorFrom,
+  openAIJsonResponse,
+  parseJsonBody,
+} from '../core/openai-compat.ts';
 
 type ResponsesInputItem = string | Record<string, any>;
 type ResponsesToolDefinition = Record<string, any>;
@@ -51,6 +60,35 @@ class UpstreamIdleTimeoutError extends Error {
     super(`Qwen stream produced no data for ${Math.round(QWEN_STREAM_IDLE_TIMEOUT_MS / 1000)}s`);
     this.name = 'UpstreamIdleTimeoutError';
   }
+}
+
+class ClientStreamClosedError extends Error {
+  constructor() {
+    super('Responses stream was closed by the client');
+    this.name = 'ClientStreamClosedError';
+  }
+}
+
+function isStreamClosedError(err: any): boolean {
+  return err instanceof ClientStreamClosedError
+    || err?.code === 'ERR_INVALID_STATE'
+    || /Controller is already closed/i.test(String(err?.message || ''));
+}
+
+function responseErrorPayload(err: any, fallbackMessage = 'responses stream failed') {
+  const status = typeof err?.upstreamStatus === 'number'
+    ? err.upstreamStatus
+    : (err instanceof UpstreamIdleTimeoutError ? err.upstreamStatus : 500);
+  const code = typeof err?.upstreamCode === 'string'
+    ? err.upstreamCode
+    : (err instanceof UpstreamIdleTimeoutError ? 'upstream_idle_timeout' : 'internal_error');
+
+  return {
+    message: err?.message || fallbackMessage,
+    type: status >= 500 ? 'server_error' : 'invalid_request_error',
+    code,
+    param: null,
+  };
 }
 
 async function readQwenChunk(
@@ -242,12 +280,7 @@ function getAccountMutex(accountId: string): Mutex {
 }
 
 function createJsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-    },
-  });
+  return openAIJsonResponse(payload, status);
 }
 
 function eventPayload(event: string, data: unknown): string {
@@ -565,12 +598,15 @@ async function acquireQwenStream(prompt: string, model: string, streamKey: strin
 
     const cooldownInfo = getAccountCooldownInfo(accountId);
     if (cooldownInfo && accountId !== 'global') {
-      console.log(`[Responses] Skipping account ${accountEmail} (${accountId}) — on cooldown for ${Math.round(cooldownInfo.remainingMs / 1000)}s (${cooldownInfo.reason})`);
+      terminal.warn('Responses', `Skipping ${accountEmail}; account on cooldown`, [
+        `remaining: ${Math.round(cooldownInfo.remainingMs / 1000)}s`,
+        `reason: ${cooldownInfo.reason}`,
+      ]);
       account = getNextAvailableAccount(accountId);
       continue;
     }
 
-    console.log(`[Responses] Routing request to account: ${accountEmail} (${accountId})`);
+    terminal.info('Responses', `Routing request to ${accountEmail}`, [`id: ${accountId}`]);
 
     const accountMutex = getAccountMutex(accountId);
     const release = await accountMutex.acquire();
@@ -654,15 +690,31 @@ async function stopQwenStreamIfKnown(qwen: {
 }, responseId: string | null): Promise<void> {
   if (qwen.uiSessionId && responseId) {
     await stopQwenGeneration(qwen.uiSessionId, responseId, qwen.headers).catch((err: any) => {
-      console.warn(`[Responses] Failed to stop upstream generation cleanly: ${err.message}`);
+      terminal.warn('Responses', 'Failed to stop upstream generation cleanly', [err.message]);
     });
   }
   qwen.controller.abort();
 }
 
-async function handleResponses(body: ResponsesRequestBody, stream: boolean, responseId: string): Promise<Response> {
+async function handleResponses(
+  body: ResponsesRequestBody,
+  stream: boolean,
+  responseId: string,
+  clientName = 'cliente desconhecido'
+): Promise<Response> {
   const sessionKey = responseSessionKey(body.metadata);
   const previousResponseId = body.previous_response_id ?? getSessionResponseId(sessionKey) ?? null;
+  const debugTrace = createDebugTrace({
+    id: responseId,
+    route: 'responses',
+    client: clientName,
+    model: body.model,
+    stream,
+    input: body.input,
+    tools: body.tools,
+    previousResponseId,
+    sessionKey,
+  });
   const history = getResponseContext(previousResponseId);
   const inputMessages: Message[] = [];
   if (body.instructions) {
@@ -678,6 +730,8 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
   const systemPrompt = injectToolInstructions('', body);
   const prompt = buildPrompt(inputMessages);
   const finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
+  const promptTokenEstimate = Math.ceil(finalPrompt.length / 3.5);
+  debugTrace.prompt(finalPrompt, { estimatedTokens: promptTokenEstimate });
 
   const startedAt = Math.floor(Date.now() / 1000);
   const assistantOutputItems: any[] = [];
@@ -686,7 +740,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
   let currentThoughtIndex = 0;
   let buffer = '';
   let completionTokens = 0;
-  let promptTokens = Math.ceil(finalPrompt.length / 3.5);
+  let promptTokens = promptTokenEstimate;
   let targetResponseId: string | null = null;
 
   const assistantMessage: Message = { role: 'assistant', content: null };
@@ -694,8 +748,53 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
   let assistantItemId = `msg_${uuidv4().replace(/-/g, '')}`;
   let assistantItemAdded = false;
 
+  type ActiveQwenStream = Awaited<ReturnType<typeof acquireQwenStream>>;
+  const streamState: {
+    closed: boolean;
+    cancelled: boolean;
+    qwen: ActiveQwenStream | null;
+    reader: ReadableStreamDefaultReader<Uint8Array> | null;
+    targetResponseId: string | null;
+  } = {
+    closed: false,
+    cancelled: false,
+    qwen: null,
+    reader: null,
+    targetResponseId: null,
+  };
+  const sseEncoder = new TextEncoder();
+
+  const writeRaw = (controller: ReadableStreamDefaultController, text: string) => {
+    if (streamState.closed || streamState.cancelled) {
+      throw new ClientStreamClosedError();
+    }
+    try {
+      controller.enqueue(sseEncoder.encode(text));
+    } catch (err: any) {
+      if (isStreamClosedError(err)) {
+        streamState.closed = true;
+        throw new ClientStreamClosedError();
+      }
+      throw err;
+    }
+  };
+
   const writeEvent = (controller: ReadableStreamDefaultController, event: string, payload: unknown) => {
-    controller.enqueue(new TextEncoder().encode(eventPayload(event, payload)));
+    writeRaw(controller, eventPayload(event, payload));
+  };
+
+  const writeDone = (controller: ReadableStreamDefaultController) => {
+    writeRaw(controller, 'data: [DONE]\n\n');
+  };
+
+  const closeStream = (controller: ReadableStreamDefaultController) => {
+    if (streamState.closed) return;
+    streamState.closed = true;
+    try {
+      controller.close();
+    } catch (err: any) {
+      if (!isStreamClosedError(err)) throw err;
+    }
   };
 
   const buildUsage = () => ({
@@ -708,7 +807,14 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
 
   const runStream = async (controller: ReadableStreamDefaultController) => {
     const qwen = await acquireQwenStream(finalPrompt, body.model, responseId);
+    streamState.qwen = qwen;
+    if (streamState.cancelled) {
+      await stopQwenStreamIfKnown(qwen, null);
+      removeStream(responseId);
+      return;
+    }
     const reader = qwen.stream.getReader();
+    streamState.reader = reader;
     const decoder = new TextDecoder();
     const toolParser = new StreamingToolParser(toolDefinitionsForParser(body.tools));
     let streamBuffer = '';
@@ -753,9 +859,11 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
 
             if (chunk['response.created']?.response_id && !streamTargetResponseId) {
               streamTargetResponseId = chunk['response.created'].response_id;
+              streamState.targetResponseId = streamTargetResponseId;
               updateSessionParent(qwen.uiSessionId, streamTargetResponseId);
             } else if (chunk.response_id && !streamTargetResponseId) {
               streamTargetResponseId = chunk.response_id;
+              streamState.targetResponseId = streamTargetResponseId;
               updateSessionParent(qwen.uiSessionId, streamTargetResponseId);
             }
 
@@ -784,6 +892,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
                     writeEvent
                   );
                   streamAssistantOutputItems.push(toolItem);
+                  debugTrace.toolCall(toolItem);
                   streamStopAfterToolCall = true;
                 }
               }
@@ -808,6 +917,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
 
                 if (parsed.text) {
                   streamAssistantText += parsed.text;
+                  debugTrace.streamDelta('answer', parsed.text);
                   writeEvent(controller, 'response.output_text.delta', {
                     response_id: responseId,
                     output_index: streamResponseOutput.length,
@@ -826,6 +936,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
                     writeEvent
                   );
                   streamAssistantOutputItems.push(toolItem);
+                  debugTrace.toolCall(toolItem);
                   streamStopAfterToolCall = true;
                 }
               }
@@ -843,15 +954,21 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
 
       const upstreamError = streamStopAfterToolCall ? null : parseQwenErrorPayload(streamBuffer);
       if (upstreamError) {
+        debugTrace.failed(upstreamError.message);
         writeEvent(controller, 'response.completed', {
           response: {
             id: responseId,
             status: 'failed',
-            error: upstreamError.message,
+            error: {
+              message: upstreamError.message,
+              type: upstreamError.status >= 500 ? 'server_error' : 'invalid_request_error',
+              code: upstreamError.status === 429 ? 'rate_limited' : 'upstream_error',
+              param: null,
+            },
           },
         });
-        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-        controller.close();
+        writeDone(controller);
+        closeStream(controller);
         return;
       }
 
@@ -878,6 +995,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
           delta: flush.text,
         });
         streamAssistantText += flush.text;
+        debugTrace.streamDelta('answer', flush.text);
       }
       for (const tc of flush.toolCalls) {
         const toolItem = responseItemFromToolCall(tc);
@@ -889,6 +1007,7 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
           writeEvent
         );
         streamAssistantOutputItems.push(toolItem);
+        debugTrace.toolCall(toolItem);
       }
 
       if (streamAssistantItemAdded) {
@@ -950,8 +1069,14 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
       });
 
       writeEvent(controller, 'response.completed', { response });
-      controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-      controller.close();
+      writeDone(controller);
+      closeStream(controller);
+      debugTrace.completed({
+        outputText: streamAssistantText,
+        toolCalls: streamAssistantOutputItems,
+        usage: streamBuildUsage(),
+        status: response.status,
+      });
 
       if (body.store ?? true) {
         storeResponseContext(responseId, [
@@ -982,14 +1107,23 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
           status: 'cancelled',
         });
 
-        writeEvent(controller, 'response.completed', { response: cancelledResponse });
-        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-        controller.close();
+        if (!streamState.cancelled) {
+          writeEvent(controller, 'response.completed', { response: cancelledResponse });
+          writeDone(controller);
+          closeStream(controller);
+        }
         removeStream(responseId);
         return;
       }
 
-      console.error('Error streaming responses:', err);
+      if (isStreamClosedError(err) || streamState.cancelled) {
+        removeStream(responseId);
+        return;
+      }
+
+      const error = responseErrorPayload(err);
+      debugTrace.failed(error.message);
+      console.error(`[Responses] Stream ${responseId} failed: ${error.code}: ${error.message}`);
       const failedResponse = buildResponseEnvelope({
         id: responseId,
         createdAt: startedAt,
@@ -1006,11 +1140,11 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
           output_tokens_details: { reasoning_tokens: 0 },
         },
         status: 'failed',
-        error: { message: err.message || 'responses stream failed' },
+        error,
       });
       writeEvent(controller, 'response.completed', { response: failedResponse });
-      controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-      controller.close();
+      writeDone(controller);
+      closeStream(controller);
       removeStream(responseId);
     }
   };
@@ -1061,7 +1195,9 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
                 currentThoughtIndex = thoughts.length;
                 const parsed = toolParser.feed(thoughtDelta);
                 for (const tc of parsed.toolCalls) {
-                  assistantOutputItems.push(responseItemFromToolCall(tc));
+                  const toolItem = responseItemFromToolCall(tc);
+                  assistantOutputItems.push(toolItem);
+                  debugTrace.toolCall(toolItem);
                   stopAfterToolCall = true;
                 }
               }
@@ -1071,7 +1207,9 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
                 const parsed = toolParser.feed(result.delta);
                 if (parsed.text) assistantText += parsed.text;
                 for (const tc of parsed.toolCalls) {
-                  assistantOutputItems.push(responseItemFromToolCall(tc));
+                  const toolItem = responseItemFromToolCall(tc);
+                  assistantOutputItems.push(toolItem);
+                  debugTrace.toolCall(toolItem);
                   stopAfterToolCall = true;
                 }
                 if (parsed.text) {
@@ -1096,7 +1234,10 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
 
     const upstreamError = stopAfterToolCall ? null : parseQwenErrorPayload(buffer);
     if (upstreamError) {
-      return createJsonResponse({ error: { message: upstreamError.message } }, upstreamError.status);
+      debugTrace.failed(upstreamError.message);
+      return createJsonResponse(openAIErrorBody(upstreamError.message, upstreamError.status, {
+        code: upstreamError.status === 429 ? 'rate_limited' : 'upstream_error',
+      }), upstreamError.status);
     }
 
     const flush = toolParser.flush();
@@ -1105,7 +1246,9 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
       assistantMessage.content = (assistantMessage.content || '') + flush.text;
     }
     for (const tc of flush.toolCalls) {
-      assistantOutputItems.push(responseItemFromToolCall(tc));
+      const toolItem = responseItemFromToolCall(tc);
+      assistantOutputItems.push(toolItem);
+      debugTrace.toolCall(toolItem);
     }
 
     if (assistantText) {
@@ -1147,6 +1290,12 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
     }
 
     removeStream(responseId);
+    debugTrace.completed({
+      outputText: assistantText,
+      toolCalls: assistantOutputItems,
+      usage: buildUsage(),
+      status: response.status,
+    });
     return createJsonResponse(response);
   }
 
@@ -1165,10 +1314,33 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
       });
 
       void runStream(controller).catch((err: any) => {
-        console.error('Error streaming responses:', err);
-        controller.error(err);
+        if (!isStreamClosedError(err) && !streamState.cancelled) {
+          const error = responseErrorPayload(err);
+          console.error(`[Responses] Stream ${responseId} failed before recovery: ${error.code}: ${error.message}`);
+          try {
+            controller.error(err);
+          } catch (controllerErr: any) {
+            if (!isStreamClosedError(controllerErr)) throw controllerErr;
+          }
+        }
         removeStream(responseId);
       });
+    },
+    cancel() {
+      streamState.cancelled = true;
+      streamState.closed = true;
+      const reader = streamState.reader;
+      const qwen = streamState.qwen;
+      if (reader) {
+        void reader.cancel().catch(() => {});
+      }
+      if (qwen) {
+        void stopQwenStreamIfKnown(qwen, streamState.targetResponseId).finally(() => {
+          removeStream(responseId);
+        });
+      } else {
+        removeStream(responseId);
+      }
     },
   });
 
@@ -1185,13 +1357,20 @@ async function handleResponses(body: ResponsesRequestBody, stream: boolean, resp
 // #==========# Public handlers
 export async function chatResponses(c: Context) {
   try {
-    const body = await c.req.json() as ResponsesRequestBody;
+    const body = normalizeResponsesRequest(await parseJsonBody(c.req.raw)) as ResponsesRequestBody;
     const responseId = `resp-${uuidv4()}`;
-    return await handleResponses(body, !!body.stream, responseId);
+    const response = await handleResponses(
+      body,
+      !!body.stream,
+      responseId,
+      detectClientName(c.req.header('user-agent'), c.req.header('x-qwenproxy-client'))
+    );
+    response.headers.set('X-QwenProxy-Debug-Id', responseId);
+    return response;
   } catch (err: any) {
-    console.error('Error in chatResponses:', err);
-    const status = err.upstreamStatus || 500;
-    return createJsonResponse({ error: { message: err.message } }, status);
+    const { status, body } = openAIErrorFrom(err);
+    console.error(`[Responses] ${status} ${body.error.code || body.error.type}: ${body.error.message}`);
+    return createJsonResponse(body, status);
   }
 }
 
@@ -1201,7 +1380,10 @@ export async function responsesStop(c: Context) {
     const responseId = c.req.param('response_id') || body.response_id || body.id;
 
     if (!responseId) {
-      return c.json({ error: 'response_id is required' }, 400);
+      return c.json(openAIErrorBody('response_id is required', 400, {
+        code: 'missing_required_parameter',
+        param: 'response_id',
+      }), 400);
     }
 
     const aborted = abortStream(responseId);
@@ -1210,6 +1392,7 @@ export async function responsesStop(c: Context) {
     return createJsonResponse(buildMinimalCancelledResponse(responseId), aborted ? 200 : 404);
   } catch (err: any) {
     console.error('Error in responsesStop:', err);
-    return c.json({ error: err.message }, 500);
+    const { status, body } = openAIErrorFrom(err);
+    return c.json(body, status as any);
   }
 }

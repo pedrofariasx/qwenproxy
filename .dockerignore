@@ -1,7 +1,46 @@
-node_modules
-npm-debug.log
-qwen_profile
-dist
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Environment
 .env
-.git
-README.md
+.env.*
+
+# Database and persistent data
+data/
+qwen_data/
+.data/
+*.db
+*.db-wal
+*.db-shm
+accounts.json
+accounts.json.bak
+accounts.json.*.bak
+
+# Browser profiles
+qwen_profile/
+qwen_profiles/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Git
+.git/
+.gitignore
+
+# CI and local tooling
+.github/
+coverage/
+.cache/
+.kilo/
+
+# Tests and development-only fixtures
+src/tests/
+src/benchmarks/
+
+# OS
+.DS_Store
+Thumbs.db

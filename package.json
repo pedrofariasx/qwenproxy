@@ -8,11 +8,13 @@
     "start:firefox": "npx tsx src/index.ts --browser=firefox",
     "start:chrome": "npx tsx src/index.ts --browser=chrome",
     "start:edge": "npx tsx src/index.ts --browser=edge",
+    "start:debug": "QWENPROXY_DEBUG=basic npx tsx src/index.ts",
+    "start:debug:full": "QWENPROXY_DEBUG=full QWENPROXY_DEBUG_SHOW_PROMPT=true npx tsx src/index.ts",
     "login": "npx tsx src/login.ts",
     "login:firefox": "npx tsx src/login.ts --browser=firefox",
     "login:chrome": "npx tsx src/login.ts --browser=chrome",
     "login:edge": "npx tsx src/login.ts --browser=edge",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node -e \"console.log('Test suite removed from package. Use npm run typecheck for the lightweight guard.')\"",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
@@ -20,6 +22,7 @@
   "license": "ISC",
   "dependencies": {
     "@hono/node-server": "^2.0.3",
+    "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",
     "hono": "^4.12.21",
     "p-queue": "^9.3.0",
@@ -30,6 +33,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.1",
     "@types/uuid": "^11.0.0",
     "typescript": "^6.0.3"

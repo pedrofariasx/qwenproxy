@@ -62,6 +62,10 @@ const REFRESH_THRESHOLD = 0.7;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+function resolveAccountProfilePath(accountId: string): string {
+  return path.resolve(config.browser.profilesDir, accountId);
+}
+
 export class Mutex {
   private queue: (() => void)[] = [];
   private locked = false;
@@ -129,7 +133,7 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
     return;
   }
 
-  const profilePath = path.resolve('qwen_profile');
+  const profilePath = path.resolve(config.browser.userDataDir);
   
   let browserEngine;
   let channel: string | undefined;
@@ -442,7 +446,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
     const timeout = setTimeout(async () => {
       console.error(`[Playwright] Timeout (90s) waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
       try {
-        const screenshotPath = path.resolve(`qwen_profiles/error_${cacheKey}.png`);
+        const screenshotPath = path.resolve(config.browser.profilesDir, `error_${cacheKey}.png`);
         await page.screenshot({ path: screenshotPath });
         console.log(`[Playwright] Error screenshot saved to ${screenshotPath}`);
       } catch (err: any) {
@@ -626,7 +630,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
 }
 
 export async function initPlaywrightForAccount(account: QwenAccount, headless = true, browserType: BrowserType = 'chromium') {
-  const profilePath = path.resolve('qwen_profiles', account.id);
+  const profilePath = resolveAccountProfilePath(account.id);
   
   let browserEngine;
   let channel: string | undefined;
@@ -683,7 +687,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, headless = 
 }
 
 export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = 'chromium'): Promise<{ context: BrowserContext, page: Page }> {
-  const profilePath = path.resolve('qwen_profiles', accountId);
+  const profilePath = resolveAccountProfilePath(accountId);
   
   let browserEngine;
   let channel: string | undefined;

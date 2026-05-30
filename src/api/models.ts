@@ -1,6 +1,12 @@
 import { Hono } from 'hono'
 import { config } from '../core/config.js'
 import { getBasicHeaders } from '../services/playwright.js'
+import {
+  normalizeModelList,
+  normalizeModelObject,
+  openAIErrorBody,
+} from '../core/openai-compat.js'
+import { syncModelContextWindows } from '../core/model-registry.js'
 
 const app = new Hono()
 
@@ -34,36 +40,13 @@ app.get('/v1/models', async (c) => {
     
     const data = await response.json()
     
-    const models = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : []
-    
-    const formatted = {
-      object: 'list',
-      data: [
-        ...models.map((model: any) => ({
-          id: model.id,
-          name: model.name,
-          object: 'model',
-          owned_by: model.owned_by,
-          created: model.info?.created_at || Date.now(),
-          context_window: model.info?.meta?.max_context_length,
-          capabilities: model.info?.meta?.capabilities,
-        })),
-        ...models.map((model: any) => ({
-          id: `${model.id}-no-thinking`,
-          name: `${model.name} (No Thinking)`,
-          object: 'model',
-          owned_by: model.owned_by,
-          created: model.info?.created_at || Date.now(),
-          context_window: model.info?.meta?.max_context_length,
-          capabilities: model.info?.meta?.capabilities,
-        })),
-      ],
-    }
+    const formatted = normalizeModelList(data)
+    syncModelContextWindows(formatted.data)
     
     return c.json(formatted)
   } catch (error: any) {
     console.error('Error fetching models:', error)
-    return c.json({ error: error.message }, 500)
+    return c.json(openAIErrorBody(error.message, 500, { code: 'models_fetch_failed' }), 500)
   }
 })
 
@@ -102,22 +85,16 @@ app.get('/v1/models/:model', async (c) => {
     const model = models.find((m: any) => m.id === baseModelId)
     
     if (!model) {
-      return c.json({ error: 'Model not found' }, 404)
+      return c.json(openAIErrorBody(`Model not found: ${modelId}`, 404, {
+        code: 'model_not_found',
+        param: 'model',
+      }), 404)
     }
     
-    const isNoThinking = modelId.endsWith('-no-thinking')
-    return c.json({
-      id: modelId,
-      name: isNoThinking ? `${model.name} (No Thinking)` : model.name,
-      object: 'model',
-      owned_by: model.owned_by,
-      created: model.info?.created_at || Date.now(),
-      context_window: model.info?.meta?.max_context_length,
-      capabilities: model.info?.meta?.capabilities,
-    })
+    return c.json(normalizeModelObject(model, modelId))
   } catch (error: any) {
     console.error('Error fetching model:', error)
-    return c.json({ error: error.message }, 500)
+    return c.json(openAIErrorBody(error.message, 500, { code: 'model_fetch_failed' }), 500)
   }
 })
 

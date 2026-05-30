@@ -1,4 +1,5 @@
 import { addAccount, removeAccount, listAccounts, getAccountCredentials, QwenAccount } from './core/accounts.ts'
+import { closeDatabase, getDatabasePath } from './core/database.ts'
 import { initPlaywrightForAccount, closePlaywrightForAccount, BrowserType, launchManualLoginAccount, extractAccountInfoFromContext } from './services/playwright.ts'
 import * as readline from 'readline'
 import * as dotenv from 'dotenv'
@@ -35,11 +36,13 @@ async function showMenu() {
     const accounts = listAccounts()
     clear()
     console.log('=== QwenProxy Account Manager ===\n')
+    console.log(`Storage: SQLite (${getDatabasePath()})\n`)
 
     if (accounts.length > 0) {
       console.log(`Configured accounts (${accounts.length}):\n`)
       for (let i = 0; i < accounts.length; i++) {
-        console.log(`  [${i + 1}] ${accounts[i].email} (ID: ${accounts[i].id})`)
+        const source = accounts[i].source === 'env' ? 'env' : 'sqlite'
+        console.log(`  [${i + 1}] ${accounts[i].email} (${source}, ID: ${accounts[i].id})`)
       }
     } else {
       console.log('No accounts configured yet.\n')
@@ -57,6 +60,7 @@ async function showMenu() {
     const choice = (await askQuestion('Select an option: ')).toUpperCase()
 
     if (choice === 'Q') {
+      closeDatabase()
       rl.close()
       process.exit(0)
     }
@@ -78,6 +82,7 @@ async function showMenu() {
 
     if (choice === 'L' && accounts.length > 0) {
       await loginAllAccounts(browserType)
+      closeDatabase()
       rl.close()
       return
     }
@@ -118,7 +123,8 @@ async function removeAccountFlow() {
   console.log('=== Remove Account ===\n')
 
   for (let i = 0; i < accounts.length; i++) {
-    console.log(`  [${i + 1}] ${accounts[i].email} (ID: ${accounts[i].id})`)
+    const source = accounts[i].source === 'env' ? 'env' : 'sqlite'
+    console.log(`  [${i + 1}] ${accounts[i].email} (${source}, ID: ${accounts[i].id})`)
   }
 
   const input = await askQuestion('\nSelect account number to remove (or 0 to cancel): ')
@@ -133,6 +139,11 @@ async function removeAccountFlow() {
   const account = accounts[idx]
   const confirm = await askQuestion(`\nRemove ${account.email}? (y/N): `)
   if (confirm.toLowerCase() === 'y') {
+    if (account.source === 'env') {
+      console.log('This account comes from .env. Remove it from .env instead.')
+      await askQuestion('Press Enter to continue...')
+      return
+    }
     if (removeAccount(account.id)) {
       console.log(`Account ${account.email} removed.`)
     } else {
@@ -224,5 +235,6 @@ async function addAccountManualFlow(browserType: BrowserType) {
 
 showMenu().catch(err => {
   console.error(err)
+  closeDatabase()
   process.exit(1)
 })

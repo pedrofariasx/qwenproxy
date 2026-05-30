@@ -1,21 +1,43 @@
-import fs from 'fs'
-import path from 'path'
 import crypto from 'crypto'
+import { getDatabase } from './database.ts'
 
 export interface QwenAccount {
   id: string
   email: string
   password: string
+  source?: 'database' | 'env'
 }
 
-const ACCOUNTS_FILE = path.resolve('accounts.json')
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-function isValidAccount(account: any): account is QwenAccount {
-  return !!account
-    && typeof account.id === 'string'
-    && typeof account.email === 'string'
-    && account.email.trim().length > 0
-    && typeof account.password === 'string'
+type AccountRow = {
+  id: string
+  email: string
+  password: string
+}
+
+function normalizeEmail(email: unknown): string {
+  if (typeof email !== 'string') {
+    throw new Error('Email must be a string')
+  }
+  const normalized = email.trim().toLowerCase()
+  if (!normalized) {
+    throw new Error('Email is required')
+  }
+  if (!EMAIL_RE.test(normalized)) {
+    throw new Error(`Invalid email: ${email}`)
+  }
+  return normalized
+}
+
+function normalizePassword(password: unknown, allowEmpty: boolean): string {
+  if (typeof password !== 'string') {
+    throw new Error('Password must be a string')
+  }
+  if (!allowEmpty && password.trim().length === 0) {
+    throw new Error('Password is required for credential login. Use manual browser login for session-only accounts.')
+  }
+  return password
 }
 
 function uuidFromEmail(email: string): string {
@@ -31,75 +53,164 @@ function uuidFromEmail(email: string): string {
 
 function loadAccountsFromEnv(): QwenAccount[] {
   const accounts: QwenAccount[] = []
+
+  const addEnvAccount = (emailValue?: string, passwordValue?: string) => {
+    if (!emailValue || !passwordValue) return
+    const email = normalizeEmail(emailValue)
+    accounts.push({
+      id: uuidFromEmail(email),
+      email,
+      password: passwordValue,
+      source: 'env',
+    })
+  }
+
+  addEnvAccount(process.env.QWEN_EMAIL, process.env.QWEN_PASSWORD)
+
   for (let i = 1; i <= 20; i++) {
-    const email = process.env[`QWEN_EMAIL_${i}`]
-    const password = process.env[`QWEN_PASSWORD_${i}`]
-    if (email && password) {
-      accounts.push({ id: uuidFromEmail(email), email, password })
+    addEnvAccount(process.env[`QWEN_EMAIL_${i}`], process.env[`QWEN_PASSWORD_${i}`])
+  }
+
+  return accounts
+}
+
+function loadAccountsFromDatabase(): QwenAccount[] {
+  const db = getDatabase()
+  const rows = db.prepare(`
+    SELECT id, email, password
+    FROM accounts
+    ORDER BY datetime(created_at) ASC, email ASC
+  `).all() as AccountRow[]
+
+  return rows
+    .map((row) => normalizeDatabaseRow(row))
+    .filter((account): account is QwenAccount => Boolean(account))
+}
+
+function normalizeDatabaseRow(row: AccountRow): QwenAccount | null {
+  if (!row || typeof row.id !== 'string' || !row.id.trim()) return null
+  if (typeof row.email !== 'string' || !row.email.trim()) return null
+  if (typeof row.password !== 'string') return null
+
+  try {
+    return {
+      id: row.id.trim(),
+      email: normalizeEmail(row.email),
+      password: row.password,
+      source: 'database',
+    }
+  } catch {
+    return null
+  }
+}
+
+function mergeAccounts(databaseAccounts: QwenAccount[], envAccounts: QwenAccount[]): QwenAccount[] {
+  if (envAccounts.length === 0) return databaseAccounts
+  if (databaseAccounts.length === 0) return envAccounts
+
+  const merged = databaseAccounts.map((account) => ({ ...account }))
+  const indexByEmail = new Map(merged.map((account, index) => [account.email, index]))
+
+  for (const envAccount of envAccounts) {
+    const existingIndex = indexByEmail.get(envAccount.email)
+    if (existingIndex === undefined) {
+      indexByEmail.set(envAccount.email, merged.length)
+      merged.push(envAccount)
+      continue
+    }
+
+    merged[existingIndex] = {
+      ...merged[existingIndex],
+      password: envAccount.password || merged[existingIndex].password,
     }
   }
-  return accounts
+
+  return merged
 }
 
 export function loadAccounts(): QwenAccount[] {
   const envAccounts = loadAccountsFromEnv()
-  if (envAccounts.length > 0) {
-    return envAccounts
+
+  if (process.env.TEST_MOCK_PLAYWRIGHT && !process.env.QWENPROXY_DB_PATH) {
+    return envAccounts.length > 0
+      ? envAccounts
+      : [{
+        id: uuidFromEmail('mock@example.com'),
+        email: 'mock@example.com',
+        password: 'mock-password',
+        source: 'env',
+      }]
   }
 
-  const email = process.env.QWEN_EMAIL
-  const password = process.env.QWEN_PASSWORD
-  if (email && password) {
-    return [{ id: uuidFromEmail(email), email, password }]
-  }
-
-  if (!fs.existsSync(ACCOUNTS_FILE)) {
-    return []
-  }
-  try {
-    const raw = fs.readFileSync(ACCOUNTS_FILE, 'utf-8')
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(isValidAccount)
-  } catch {
-    return []
-  }
-}
-
-function saveAccounts(accounts: QwenAccount[]): void {
-  fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2))
+  return mergeAccounts(loadAccountsFromDatabase(), envAccounts)
 }
 
 export function addAccount(email: string, password: string, id?: string): QwenAccount {
-  const accounts = loadAccounts()
-  const existing = accounts.find(a => a.email === email)
+  const normalizedEmail = normalizeEmail(email)
+  const accountId = id?.trim() || crypto.randomUUID()
+  const normalizedPassword = normalizePassword(password, Boolean(id))
+  const db = getDatabase()
+
+  const existing = db.prepare('SELECT id FROM accounts WHERE email = ?').get(normalizedEmail) as { id: string } | undefined
   if (existing) {
-    throw new Error(`Account with email ${email} already exists`)
+    throw new Error(`Account with email ${normalizedEmail} already exists`)
   }
-  const newAccount: QwenAccount = {
-    id: id || crypto.randomUUID(),
-    email,
-    password,
+
+  const account: QwenAccount = {
+    id: accountId,
+    email: normalizedEmail,
+    password: normalizedPassword,
+    source: 'database',
   }
-  accounts.push(newAccount)
-  saveAccounts(accounts)
-  return newAccount
+
+  db.prepare(`
+    INSERT INTO accounts (id, email, password)
+    VALUES (@id, @email, @password)
+  `).run(account)
+
+  return account
 }
 
 export function removeAccount(id: string): boolean {
-  const accounts = loadAccounts()
-  const filtered = accounts.filter(a => a.id !== id)
-  if (filtered.length === accounts.length) {
-    return false
-  }
-  saveAccounts(filtered)
-  return true
+  const db = getDatabase()
+  const result = db.prepare('DELETE FROM accounts WHERE id = ?').run(id)
+  return result.changes > 0
 }
 
 export function listAccounts(): QwenAccount[] {
-  return loadAccounts().map(a => ({ id: a.id, email: a.email, password: '***' }))
+  return loadAccounts().map((account) => ({
+    ...account,
+    password: account.password ? '***' : '',
+  }))
 }
 
 export function getAccountCredentials(id: string): QwenAccount | undefined {
-  return loadAccounts().find(a => a.id === id)
+  const envAccounts = loadAccountsFromEnv()
+  if (process.env.TEST_MOCK_PLAYWRIGHT && !process.env.QWENPROXY_DB_PATH) {
+    return envAccounts.find((envAccount) => envAccount.id === id)
+      ?? (id === uuidFromEmail('mock@example.com')
+        ? {
+          id,
+          email: 'mock@example.com',
+          password: 'mock-password',
+          source: 'env',
+        }
+        : undefined)
+  }
+
+  const db = getDatabase()
+  const row = db.prepare('SELECT id, email, password FROM accounts WHERE id = ?').get(id) as AccountRow | undefined
+  const account = row ? normalizeDatabaseRow(row) : undefined
+
+  if (!account) {
+    return envAccounts.find((envAccount) => envAccount.id === id)
+  }
+
+  const envMatch = envAccounts.find((envAccount) => envAccount.email === account.email)
+  if (!envMatch) return account
+
+  return {
+    ...account,
+    password: envMatch.password || account.password,
+  }
 }

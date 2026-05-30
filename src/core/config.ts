@@ -4,7 +4,10 @@ const envSchema = z.object({
   PORT: z.string().default('3000'),
   HOST: z.string().default('0.0.0.0'),
   HEADLESS: z.string().default('true'),
-  USER_DATA_DIR: z.string().default('./qwen_profile'),
+  USER_DATA_DIR: z.string().default('./qwen_profiles/global'),
+  QWENPROXY_PROFILES_DIR: z.string().default('./qwen_profiles'),
+  QWENPROXY_DATA_DIR: z.string().default('./data'),
+  QWENPROXY_DB_PATH: z.string().default(''),
   USER_AGENT: z.string().default('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
   LOG_CONSOLE: z.string().default('false'),
   NAVIGATION_TIMEOUT: z.string().default('30000'),
@@ -24,6 +27,9 @@ const envSchema = z.object({
   QWEN_HTTP_ENDPOINT: z.string().default('https://api.qwen.ai/v1/chat'),
   QWEN_API_KEY: z.string().default(''),
   API_KEY: z.string().default(''),
+  QWENPROXY_DEBUG: z.string().default('off'),
+  QWENPROXY_DEBUG_MAX_CHARS: z.string().default('1200'),
+  QWENPROXY_DEBUG_SHOW_PROMPT: z.string().default('false'),
 })
 
 const env = envSchema.parse(process.env)
@@ -36,6 +42,7 @@ export const config = {
   browser: {
     headless: env.HEADLESS !== 'false',
     userDataDir: env.USER_DATA_DIR,
+    profilesDir: env.QWENPROXY_PROFILES_DIR,
     userAgent: env.USER_AGENT,
     args: [
       '--disable-gpu',
@@ -79,10 +86,19 @@ export const config = {
     },
   },
   apiKey: env.API_KEY,
+  database: {
+    dataDir: env.QWENPROXY_DATA_DIR,
+    dbPath: env.QWENPROXY_DB_PATH || undefined,
+  },
   qwen: {
     baseUrl: env.QWEN_BASE_URL,
     httpEndpoint: env.QWEN_HTTP_ENDPOINT,
     apiKey: env.QWEN_API_KEY,
+  },
+  debug: {
+    mode: env.QWENPROXY_DEBUG.toLowerCase(),
+    maxChars: Math.max(120, parseInt(env.QWENPROXY_DEBUG_MAX_CHARS) || 1200),
+    showPrompt: env.QWENPROXY_DEBUG_SHOW_PROMPT === 'true',
   },
 }
 

@@ -7,16 +7,10 @@ import { Watchdog } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
 import { chatCompletions } from '../routes/chat.js'
 import { chatResponses, responsesStop } from '../routes/responses.js'
+import { openAIErrorBody } from '../core/openai-compat.js'
+import { terminal } from '../core/terminal.ts'
 
 const app = new Hono()
-app.route('', modelsApp)
-app.post('/v1/chat/completions', chatCompletions)
-app.post('/v1/chat/responses', chatResponses)
-app.post('/v1/responses', chatResponses)
-app.post('/v1/chat/responses/stop', responsesStop)
-app.post('/v1/responses/stop', responsesStop)
-app.post('/v1/chat/responses/:response_id/cancel', responsesStop)
-app.post('/v1/responses/:response_id/cancel', responsesStop)
 
 const routeManifest = [
   'GET /health',
@@ -33,10 +27,7 @@ const routeManifest = [
 ]
 
 function logRouteManifest(): void {
-  console.log('[Server] Public routes:')
-  for (const route of routeManifest) {
-    console.log(`  - ${route}`)
-  }
+  terminal.list('Server', 'Public routes', routeManifest)
 }
 
 let cache: MemoryCache
@@ -45,6 +36,12 @@ let server: any
 
 app.use('*', async (c, next) => {
   const start = Date.now()
+  c.header('Access-Control-Allow-Origin', '*')
+  c.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-QwenProxy-Client')
+  c.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  if (c.req.method === 'OPTIONS') {
+    return c.body(null, 204)
+  }
   await next()
   const duration = Date.now() - start
   metrics.histogram('latency.request', duration)
@@ -52,19 +49,32 @@ app.use('*', async (c, next) => {
 })
 
 app.use('/v1/*', async (c, next) => {
-  const apiKey = config.apiKey
+  const apiKey = process.env.API_KEY ?? config.apiKey
   if (apiKey) {
     const auth = c.req.header('Authorization')
     if (!auth?.startsWith('Bearer ')) {
-      return c.json({ error: 'Missing or invalid Authorization header' }, 401)
+      return c.json(openAIErrorBody('Missing or invalid Authorization header', 401, {
+        code: 'missing_api_key',
+      }), 401)
     }
     const token = auth.slice(7)
     if (token !== apiKey) {
-      return c.json({ error: 'Invalid API key' }, 401)
+      return c.json(openAIErrorBody('Invalid API key', 401, {
+        code: 'invalid_api_key',
+      }), 401)
     }
   }
   await next()
 })
+
+app.route('', modelsApp)
+app.post('/v1/chat/completions', chatCompletions)
+app.post('/v1/chat/responses', chatResponses)
+app.post('/v1/responses', chatResponses)
+app.post('/v1/chat/responses/stop', responsesStop)
+app.post('/v1/responses/stop', responsesStop)
+app.post('/v1/chat/responses/:response_id/cancel', responsesStop)
+app.post('/v1/responses/:response_id/cancel', responsesStop)
 
 app.get('/health', async (c) => {
   const status = await watchdog?.getStatus()
@@ -85,11 +95,13 @@ app.get('/metrics', (c) => {
 
 app.onError((err, c) => {
   metrics.increment('requests.errors')
-  console.error('API Error:', err)
-  return c.json({ error: err.message }, 500)
+  terminal.error('API', 'Unhandled request error', [err?.message || String(err)])
+  return c.json(openAIErrorBody(err.message, 500), 500)
 })
 
-app.notFound((c) => c.json({ error: 'Not found' }, 404))
+app.notFound((c) => c.json(openAIErrorBody(`Route not found: ${c.req.method} ${new URL(c.req.url).pathname}`, 404, {
+  code: 'route_not_found',
+}), 404))
 
 export async function startServer(): Promise<void> {
   cache = new MemoryCache()
@@ -97,10 +109,17 @@ export async function startServer(): Promise<void> {
   logRouteManifest()
 
   const { loadAccounts } = await import('../core/accounts.ts')
+  const { getDatabaseSummary } = await import('../core/database.ts')
   const accounts = loadAccounts()
+  const db = getDatabaseSummary()
+  terminal.info('Database', 'Account storage ready', [
+    `path: ${db.path}`,
+    `journal: ${db.journalMode}`,
+    `accounts: ${db.accounts}`,
+  ])
 
   if (accounts.length > 0) {
-    console.log(`[Server] Pre-warming ${accounts.length} configured account(s)...`)
+    terminal.info('Server', `Pre-warming ${accounts.length} configured account(s)`)
     const { initPlaywrightForAccount } = await import('../services/playwright.ts')
 
     void Promise.allSettled(
@@ -108,18 +127,20 @@ export async function startServer(): Promise<void> {
         const startedAt = Date.now()
         try {
           await initPlaywrightForAccount(account, config.browser.headless)
-          console.log(`[Server] Account ${account.email} ready in ${Date.now() - startedAt}ms`)
-          console.log(`[Server] Route capture for ${account.email} deferred until first API request`)
+          terminal.success('Account', `${account.email} ready`, [
+            `time: ${Date.now() - startedAt}ms`,
+            'route capture: deferred until first API request',
+          ])
         } catch (err: any) {
-          console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
+          terminal.error('Account', `Failed to initialize ${account.email}`, [err.message])
         }
       })
     ).then((results) => {
       const failed = results.filter((result) => result.status === 'rejected').length
       if (failed > 0) {
-        console.warn(`[Server] Pre-warm completed with ${failed} failure(s)`)
+        terminal.warn('Server', `Pre-warm completed with ${failed} failure(s)`)
       } else {
-        console.log('[Server] Pre-warm completed')
+        terminal.success('Server', 'Pre-warm completed')
       }
     })
   } else {
@@ -137,16 +158,18 @@ export async function startServer(): Promise<void> {
     port: config.server.port,
     hostname: config.server.host,
   }, (info) => {
-    console.log(`Server listening on http://${info.address}:${info.port}`)
+    terminal.success('Server', `Listening on http://${info.address}:${info.port}`)
   })
 
   const shutdown = async (signal: string) => {
-    console.log(`Received ${signal}, shutting down gracefully...`)
+    terminal.info('Server', `Received ${signal}; shutting down`)
     watchdog.stop()
     metrics.stopCollection()
     await cache.close()
     const { closePlaywright } = await import('../services/playwright.js')
     await closePlaywright()
+    const { closeDatabase } = await import('../core/database.ts')
+    closeDatabase()
     server?.close()
     process.exit(0)
   }
