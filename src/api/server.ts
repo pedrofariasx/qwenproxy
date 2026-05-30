@@ -161,6 +161,17 @@ export async function startServer(): Promise<void> {
     terminal.success('Server', `Listening on http://${info.address}:${info.port}`)
   })
 
+  server.on?.('clientError', (err: any, socket: any) => {
+    const firstByte = err?.rawPacket?.[0]
+    if (firstByte === 0x16) {
+      terminal.warn('Server', 'HTTPS client connected to the HTTP port', [
+        `received: TLS handshake on http://${config.server.host}:${config.server.port}`,
+        `fix: use http://127.0.0.1:${config.server.port}/v1 in Zed/OpenCode/Codex settings`,
+      ])
+    }
+    socket?.destroy?.()
+  })
+
   const shutdown = async (signal: string) => {
     terminal.info('Server', `Received ${signal}; shutting down`)
     watchdog.stop()

@@ -6,6 +6,8 @@ Base URL padrao para todos os clientes:
 http://127.0.0.1:3000/v1
 ```
 
+Nao use `https://localhost:3000/v1` a menos que voce coloque um proxy TLS na frente do QwenProxy. O servidor local padrao e HTTP; clientes Rust/Node podem mostrar isso como `InvalidContentType`, `ERR_SSL_PROTOCOL_ERROR` ou `received corrupt message`.
+
 Se `API_KEY` estiver configurado no `.env`, use essa mesma chave no cliente como API key. Se `API_KEY` estiver vazio, use qualquer valor dummy quando o cliente exigir uma chave.
 
 ## Rotas por tipo de cliente

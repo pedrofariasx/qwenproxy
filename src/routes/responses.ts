@@ -957,6 +957,7 @@ async function handleResponses(
                   debugTrace.streamDelta('answer', parsed.text);
                   writeEvent(controller, 'response.output_text.delta', {
                     response_id: responseId,
+                    item_id: streamAssistantItemId,
                     output_index: streamResponseOutput.length,
                     content_index: 0,
                     delta: parsed.text,
@@ -993,6 +994,7 @@ async function handleResponses(
       if (upstreamError) {
         debugTrace.failed(upstreamError.message);
         writeEvent(controller, 'response.completed', {
+          response_id: responseId,
           response: {
             id: responseId,
             status: 'failed',
@@ -1041,6 +1043,7 @@ async function handleResponses(
         }
         writeEvent(controller, 'response.output_text.delta', {
           response_id: responseId,
+          item_id: streamAssistantItemId,
           output_index: 0,
           content_index: 0,
           delta: flush.text,
@@ -1064,12 +1067,14 @@ async function handleResponses(
       if (streamAssistantItemAdded) {
         writeEvent(controller, 'response.output_text.done', {
           response_id: responseId,
+          item_id: streamAssistantItemId,
           output_index: 0,
           content_index: 0,
           text: streamAssistantText,
         });
         writeEvent(controller, 'response.content_part.done', {
           response_id: responseId,
+          item_id: streamAssistantItemId,
           output_index: 0,
           content_index: 0,
           part: {
@@ -1119,7 +1124,10 @@ async function handleResponses(
         usage: streamBuildUsage(),
       });
 
-      writeEvent(controller, 'response.completed', { response });
+      writeEvent(controller, 'response.completed', {
+        response_id: responseId,
+        response,
+      });
       writeDone(controller);
       closeStream(controller);
       debugTrace.completed({
@@ -1159,7 +1167,10 @@ async function handleResponses(
         });
 
         if (!streamState.cancelled) {
-          writeEvent(controller, 'response.completed', { response: cancelledResponse });
+          writeEvent(controller, 'response.completed', {
+            response_id: responseId,
+            response: cancelledResponse,
+          });
           writeDone(controller);
           closeStream(controller);
         }
@@ -1193,7 +1204,10 @@ async function handleResponses(
         status: 'failed',
         error,
       });
-      writeEvent(controller, 'response.completed', { response: failedResponse });
+      writeEvent(controller, 'response.completed', {
+        response_id: responseId,
+        response: failedResponse,
+      });
       writeDone(controller);
       closeStream(controller);
       removeStream(responseId);
@@ -1353,6 +1367,7 @@ async function handleResponses(
   const streamResponse = new ReadableStream({
     start(controller) {
       writeEvent(controller, 'response.created', {
+        response_id: responseId,
         response: {
           id: responseId,
           object: 'response',
@@ -1369,7 +1384,29 @@ async function handleResponses(
           const error = responseErrorPayload(err);
           console.error(`[Responses] Stream ${responseId} failed before recovery: ${error.code}: ${error.message}`);
           try {
-            controller.error(err);
+            const failedResponse = buildResponseEnvelope({
+              id: responseId,
+              createdAt: startedAt,
+              model: body.model,
+              body,
+              previousResponseId,
+              output: [],
+              outputText: '',
+              usage: {
+                input_tokens: promptTokenEstimate,
+                output_tokens: 0,
+                total_tokens: promptTokenEstimate,
+                input_tokens_details: { cached_tokens: 0 },
+                output_tokens_details: { reasoning_tokens: 0 },
+              },
+              status: 'failed',
+              error,
+            });
+            writeEvent(controller, 'response.completed', {
+              response_id: responseId,
+              response: failedResponse,
+            });
+            closeStream(controller);
           } catch (controllerErr: any) {
             if (!isStreamClosedError(controllerErr)) throw controllerErr;
           }
@@ -1398,7 +1435,7 @@ async function handleResponses(
   return new Response(streamResponse, {
     status: 200,
     headers: {
-      'content-type': 'text/event-stream; charset=utf-8',
+      'content-type': 'text/event-stream',
       'cache-control': 'no-cache, no-transform',
       connection: 'keep-alive',
     },
