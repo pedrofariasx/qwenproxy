@@ -5,6 +5,10 @@ const logger = new Logger('info', 'AccountManager')
 
 let currentIndex = 0
 
+export function resetAccountRotationForTests(): void {
+  currentIndex = 0
+}
+
 interface CooldownEntry {
   until: number
   reason: string

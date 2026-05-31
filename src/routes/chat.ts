@@ -223,7 +223,7 @@ export async function chatCompletions(c: Context) {
       });
       const toolsJson = JSON.stringify(formattedTools, null, 2);
       
-      systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n\n`;
+      systemPrompt += `\n\n# 可用工具\n你可以使用以下工具：\n${toolsJson}\n\n# 工具调用格式（必须遵守）\n要使用工具，你必须严格按照以下格式输出 JSON，并用以下标签包裹：\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\n多工具调用示例：\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\n⚠️ 重要规则：\n1. 仅使用上述标签进行工具调用。切勿在没有标签的情况下直接输出原始 JSON。\n2. 可以连续输出多个 <tool_call> 块来调用多个工具。\n3. 在 <tool_call> 块之后不要输出任何其他文本（解释、对话等），等待用户提供工具的返回结果。\n4. 标签内的 JSON 必须有效，必须包含所有必需的括号和 "arguments" 字段。\n5. 如果需要使用工具，请立即执行，不要添加任何前缀说明。\n\n`;
       
       if (typeof toolChoice === 'object' && toolChoice?.type === 'function' && toolChoice?.function?.name) {
         // Prompt injection protection: validate tool name against registered tools
@@ -235,9 +235,9 @@ export async function chatCompletions(c: Context) {
           return c.json({ error: { message: "Tool name does not match any registered tool", type: 'invalid_request_error' } }, 400);
         }
         // Use validated name from tool definition (not raw input)
-        systemPrompt += `CRITICAL: You MUST call the tool "${matchingTool.function.name}" in this response.\n\n`;
+        systemPrompt += `⚠️ 你必须在此次回应中调用工具 "${matchingTool.function.name}"。\n\n`;
       } else if (toolChoice === 'required') {
-        systemPrompt += `CRITICAL: Você DEVE usar uma tool nesta resposta.\n\n`;
+        systemPrompt += `⚠️ 你必须在此次回应中调用一个工具。\n\n`;
       }
     }
 
@@ -395,7 +395,7 @@ export async function chatCompletions(c: Context) {
       let reasoningBuffer = '';
       let lastFullContent = '';
       let targetResponseId: string | null = null;
-      const toolParser = new StreamingToolParser(body.tools || []);
+      const toolParser = new StreamingToolParser(body.tools || [], config.executor.maxToolCalls);
       const toolCallsOut: any[] = [];
       let buffer = '';
       let completionTokens = 0;
@@ -555,7 +555,7 @@ export async function chatCompletions(c: Context) {
         const executorSendToLLM: LLMSendFunction = async (msgs, _tools, _model) => {
           const promptText = (msgs as any[]).map((m: any) => `[${m.role}]: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join('\n');
           const { stream, controller } = await createQwenStream(promptText, false, modelId, null, effectiveAccountId);
-          const parser = new StreamingToolParser();
+          const parser = new StreamingToolParser([], config.executor.maxToolCalls);
           const reader = stream.getReader();
           let fullContent = '';
           let toolCalls: any[] = [];
@@ -637,6 +637,7 @@ export async function chatCompletions(c: Context) {
 
     return honoStream(c, async (streamWriter: any) => {
       let heartbeatInterval: any;
+      let streamStallTimer: any;
       try {
       // Send heartbeat to prevent Cloudflare 524 timeout
       await streamWriter.write(': heartbeat\n\n');
@@ -672,25 +673,38 @@ export async function chatCompletions(c: Context) {
 
       const reader = stream.getReader();
       const decoder = new TextDecoder();
-      
+
       let inThinkingState = false;
       let thinkingFragments: Record<string, boolean> = {};
       let currentThoughtIndex = 0;
       let currentAppendPath = '';
-      
+
        let reasoningBuffer = '';
        let lastFullContent = '';
        let targetResponseId: string | null = null;
-       const toolParser = new StreamingToolParser(body.tools || []);
+       const toolParser = new StreamingToolParser(body.tools || [], config.executor.maxToolCalls);
        let toolCallIndex = 0;
 
       let buffer = '';
       let completionTokens = 0;
       let promptTokens = Math.ceil(finalPrompt.length / 3.5);
 
+      // Stream liveness: detect stalled Qwen streams (no data for STREAM_STALL_MS)
+      let lastDataTimestamp = Date.now();
+      const STREAM_STALL_MS = 120_000; // 2 minutes without data = stall
+      streamStallTimer = setInterval(() => {
+        const elapsed = Date.now() - lastDataTimestamp;
+        if (elapsed > STREAM_STALL_MS) {
+          logger.warn(`Upstream stream stalled for ${Math.round(elapsed / 1000)}s — aborting`);
+          reader.cancel('upstream stream stalled').catch(() => {});
+        }
+      }, 30_000); // Check every 30s
+      streamStallTimer.unref?.();
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        lastDataTimestamp = Date.now(); // reset liveness timer on data
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -926,6 +940,7 @@ export async function chatCompletions(c: Context) {
 
       } finally {
         clearInterval(heartbeatInterval);
+        clearInterval(streamStallTimer);
         await removeStream(completionId);
         releaseChatLock?.();
       }

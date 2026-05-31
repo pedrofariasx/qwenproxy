@@ -52,10 +52,32 @@ export class Watchdog extends EventEmitter {
 
   private checkRAM(): 'ok' | 'warning' | 'critical' {
     const mem = process.memoryUsage()
-    const usagePercent = (mem.heapUsed / mem.heapTotal) * 100
+    // Use RSS (Resident Set Size — actual physical memory) instead of heap ratio.
+    // heapUsed/heapTotal is misleading: Node.js pre-allocates heap so the ratio
+    // easily hits 80-95% even with low actual memory usage.
+    const rssMB = Math.round(mem.rss / (1024 * 1024))
+    const heapUsedMB = Math.round(mem.heapUsed / (1024 * 1024))
+    const heapTotalMB = Math.round(mem.heapTotal / (1024 * 1024))
+    const externalMB = Math.round(mem.external / (1024 * 1024))
 
-    if (usagePercent > config.watchdog.ram.criticalThreshold) return 'critical'
-    if (usagePercent > config.watchdog.ram.warningThreshold) return 'warning'
+    // Always report actual MB values on every tick, even when status is
+    // warning or critical — losing visibility at the worst time is dangerous.
+    metrics.gauge('watchdog.ram.rss_mb', rssMB)
+    metrics.gauge('watchdog.ram.heap_used_mb', heapUsedMB)
+    metrics.gauge('watchdog.ram.heap_total_mb', heapTotalMB)
+    metrics.gauge('watchdog.ram.external_mb', externalMB)
+
+    // Combined: critical if RSS exceeds threshold OR heap is near limit
+    const criticalRssMB = config.watchdog.ram.criticalThreshold
+    const warningRssMB = config.watchdog.ram.warningThreshold
+
+    // Also check heap fragmentation: if heapUsed > 90% of heapTotal AND heapTotal > 500MB
+    const heapUsageRatio = heapUsedMB / Math.max(heapTotalMB, 1)
+    const heapConstrained = heapUsageRatio > 0.90 && heapTotalMB > 500
+
+    if (rssMB > criticalRssMB || heapConstrained) return 'critical'
+    if (rssMB > warningRssMB) return 'warning'
+
     return 'ok'
   }
 

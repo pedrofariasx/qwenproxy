@@ -121,6 +121,11 @@ export interface QwenPayload {
 let cachedModels: any[] | null = null;
 let lastModelsFetch = 0;
 
+export function clearQwenModelCacheForTests(): void {
+  cachedModels = null;
+  lastModelsFetch = 0;
+}
+
 const nativeToolsDisabled = new Set<string>();
 const disablingNativeToolsInProgress = new Set<string>();
 
@@ -248,7 +253,7 @@ export async function createQwenStream(
   forcedParentId?: string | null,
   accountId?: string
 ): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string }> {
-  const { headers, chatSessionId, parentMessageId } = await getQwenHeaders(forcedParentId === null, accountId);
+  const { headers, chatSessionId, parentMessageId } = await getQwenHeaders(false, accountId);
 
   let actualParentId: string | null = parentMessageId;
   

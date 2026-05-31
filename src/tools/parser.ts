@@ -163,12 +163,15 @@ export class StreamingToolParser {
   private emittedToolCallCount = 0;
   private pendingLeadIn = '';
   private tools: FunctionToolDefinition[] = [];
+  private maxToolCalls: number;
 
   /**
    * @param tools - Optional array of tool definitions for name inference
+   * @param maxToolCalls - Maximum number of tool calls to emit (default 20)
    */
-  constructor(tools: FunctionToolDefinition[] = []) {
+  constructor(tools: FunctionToolDefinition[] = [], maxToolCalls = 20) {
     this.tools = tools;
+    this.maxToolCalls = maxToolCalls;
   }
 
   /**
@@ -202,10 +205,7 @@ export class StreamingToolParser {
           const flushIndex = partialIdx === -1 ? this.buffer.length : partialIdx;
           if (flushIndex > 0) {
             const textToEmit = this.buffer.substring(0, flushIndex);
-            // Only emit as content if no tool calls have been emitted yet
-            if (this.emittedToolCallCount === 0) {
-              result.text += textToEmit;
-            }
+            result.text += textToEmit;
             this.buffer = this.buffer.substring(flushIndex);
           }
           break;
@@ -243,12 +243,15 @@ export class StreamingToolParser {
           this.emittedToolCallCount++;
           this.pendingLeadIn = '';
         } else {
-          // Recovery failed. Restore lead-in text if no tools were emitted.
+          // Recovery failed. Restore full raw content including tags.
           logger.warn('[parser] Dropping unrecoverable unclosed tool call at end of stream');
           metrics.increment('tools_parse_errors_total', 1, { reason: 'unclosed_stream' });
           if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
             result.text += this.pendingLeadIn;
           }
+          result.text += this.currentOpenTag;
+          result.text += this.buffer;
+          result.text += TOOL_END;
           this.pendingLeadIn = '';
         }
       } else {
@@ -289,6 +292,14 @@ export class StreamingToolParser {
   // ─── Internal Methods ──────────────────────────────────────────────────────
 
   private processToolContent(content: string, result: ParserResult): void {
+    // Enforce max tool calls limit
+    if (this.emittedToolCallCount >= this.maxToolCalls) {
+      logger.warn(`[parser] Ignoring tool call — max limit reached (${this.maxToolCalls})`);
+      metrics.increment('tools_parse_errors_total', 1, { reason: 'max_limit_reached' });
+      this.pendingLeadIn = '';
+      return;
+    }
+
     const t = content.trim();
     if (!t) {
       // Empty tool call - malformed. Restore lead-in if possible.
@@ -304,6 +315,7 @@ export class StreamingToolParser {
     // 1) Try Hermes-style XML <parameter> format first
     const xmlParsed = parseXmlParameterToolCall(t, this.currentOpenTag, this.tools);
     if (xmlParsed) {
+      if (this.pendingLeadIn) result.text += this.pendingLeadIn;
       result.toolCalls.push({
         id: `call_${uuidv4()}`,
         name: xmlParsed.name,
@@ -318,6 +330,7 @@ export class StreamingToolParser {
     if (t.startsWith('[')) {
       try {
         const arr = JSON.parse(t);
+        if (this.pendingLeadIn) result.text += this.pendingLeadIn;
         for (const item of arr) {
           const tc = this.parseToolCall(item);
           if (tc) {
@@ -336,6 +349,7 @@ export class StreamingToolParser {
     if (t.startsWith('{') || t.includes('"name"')) {
       const tcs = this.parseToolContent(t);
       if (tcs.length > 0) {
+        if (this.pendingLeadIn) result.text += this.pendingLeadIn;
         for (const tc of tcs) {
           // Check for tool name from opening tag attribute
           if (!tc.name || tc.name === '') {
@@ -353,8 +367,7 @@ export class StreamingToolParser {
     }
 
     // 4) Tool call is malformed and unrecoverable.
-    // Never leak internal XML to user-visible content.
-    // Restore lead-in text if no tools were emitted.
+    // Preserve raw content (model may output fake/incomplete tool calls).
     logger.warn('[parser] Dropping malformed tool call block', {
       contentPreview: t.substring(0, 500),
       hasName: t.includes('"name"') || t.includes('"tool"') || t.includes('tool_name'),
@@ -365,6 +378,9 @@ export class StreamingToolParser {
     if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
       result.text += this.pendingLeadIn;
     }
+    result.text += this.currentOpenTag;
+    result.text += t;
+    result.text += TOOL_END;
     this.pendingLeadIn = '';
   }
 

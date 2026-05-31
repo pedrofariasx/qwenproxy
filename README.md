@@ -84,19 +84,88 @@ docker-compose up -d
 Crie o arquivo `.env` na raiz do projeto (veja `.env.example`):
 
 ```env
-# Porta do servidor (default: 3000)
 PORT=3000
+HOST=0.0.0.0
+NODE_ENV=development
+API_KEY=
+SSL_ENABLED=false
+SSL_CERT_PATH=
+SSL_KEY_PATH=
 
-# Chave de API para proteger os endpoints (opcional)
-API_KEY=sua-chave-secreta-aqui
-
-# Credenciais Qwen para login automático (modo single-account)
-QWEN_EMAIL=seu-email@exemplo.com
-QWEN_PASSWORD=sua-senha-aqui
-
-# Navegador (chromium, firefox, chrome, edge)
+BROWSER_HEADLESS=true
 BROWSER=chromium
+QWEN_PROFILES_PATH=./qwen_profile
+USER_AGENT=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+
+CACHE_TTL=3600
+RESPONSE_TTL=1800
+CACHE_MAX_ENTRIES=10000
+WATCHDOG_INTERVAL=5000
+RATE_LIMIT_MAX=60
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_HEADER=x-forwarded-for
+EXECUTOR_TIMEOUT_MS=120000
+TOOL_TIMEOUT_MS=30000
+TOOL_MAX_ARGUMENTS_BYTES=1048576
+TOOL_MAX_RESULT_BYTES=524288
+
+QWEN_BASE_URL=https://chat.qwen.ai
+QWEN_HTTP_ENDPOINT=https://api.qwen.ai/v1/chat
+QWEN_EMAIL=
+QWEN_PASSWORD=
+QWEN_ENCRYPTION_KEY=
 ```
+
+### Variáveis principais
+
+| Variável | Default | Observação |
+|----------|---------|------------|
+| `API_KEY` | vazio | Protege o proxy via `Authorization: Bearer ...`. |
+| `BROWSER_HEADLESS` | `true` | Controla o modo headless do Playwright. |
+| `BROWSER` | `chromium` | Seleciona o navegador usado no prewarm. |
+| `QWEN_PROFILES_PATH` | `./qwen_profile` | Diretório do perfil persistente do navegador. |
+| `CACHE_TTL` | `3600` | TTL do cache em segundos. |
+| `WATCHDOG_INTERVAL` | `5000` | Intervalo do watchdog em ms. |
+| `RATE_LIMIT_MAX` | `60` | Limite por janela para rate limiting. |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Janela do rate limit em ms. |
+| `RATE_LIMIT_HEADER` | `x-forwarded-for` | Cabeçalho usado para formar a chave do rate limit. |
+| `EXECUTOR_TIMEOUT_MS` | `120000` | Timeout total do executor em ms. |
+| `TOOL_TIMEOUT_MS` | `30000` | Timeout de uma execução individual de tool. |
+| `TOOL_MAX_ARGUMENTS_BYTES` | `1048576` | Tamanho máximo dos argumentos serializados. |
+| `TOOL_MAX_RESULT_BYTES` | `524288` | Tamanho máximo do resultado serializado. |
+
+### Auth, sessão upstream e readiness
+
+- **Auth do proxy**: `API_KEY` protege os endpoints `/v1/*` e `/metrics`. Se estiver vazio, o proxy aceita chamadas sem autenticação.
+- **Sessão upstream Qwen**: é separada da auth do proxy. Ela vem das credenciais `QWEN_EMAIL` / `QWEN_PASSWORD` e do perfil persistente `QWEN_PROFILES_PATH`, gerenciada pelo Playwright.
+- **Health de infraestrutura vs readiness funcional**:
+  - `unknown` = o servidor já está no ar, mas ainda não concluiu a inicialização de cache/watchdog.
+  - `degraded` = a infraestrutura subiu, porém a sessão upstream ainda não está pronta ou falhou parcialmente.
+  - `ok` = cache, watchdog e pelo menos uma sessão upstream estão saudáveis.
+
+### Startup e rotas
+
+O servidor abre o listener HTTP/HTTPS primeiro e executa o prewarm do Playwright em background. Isso evita que o boot fique preso em sessão upstream lenta.
+
+```bash
+npm start                  # Chromium (padrão)
+npm run start:chrome       # Google Chrome
+npm run start:firefox      # Firefox
+npm run start:edge         # Microsoft Edge
+```
+
+Rotas principais:
+
+| Rota | Método | Descrição |
+|------|--------|-----------|
+| `/v1/chat/completions` | POST | Chat completions (streaming + non-streaming) |
+| `/v1/chat/completions/stop` | POST | Abortar uma geração ativa |
+| `/v1/models` | GET | Lista modelos usando uma sessão upstream disponível |
+| `/v1/models/:model` | GET | Detalhes de um modelo específico |
+| `/health` | GET | Health de infraestrutura e readiness funcional |
+| `/metrics` | GET | Métricas no formato Prometheus |
+
+Se não houver sessão upstream válida disponível, `/v1/models` responde de forma controlada com erro 503.
 
 ---
 
@@ -121,30 +190,6 @@ O menu interativo permite:
 - **[L]** Login em todas as contas (inicializar sessões)
 
 > Na primeira execução, se existir um `accounts.json` antigo, as contas serão migradas automaticamente para SQLite.
-
----
-
-## Uso
-
-### Iniciar o servidor
-
-```bash
-npm start                  # Chromium (padrão)
-npm run start:chrome       # Google Chrome
-npm run start:firefox      # Firefox
-npm run start:edge         # Microsoft Edge
-```
-
-O servidor inicia em `http://localhost:3000` com as seguintes rotas:
-
-| Rota | Método | Descrição |
-|------|--------|-----------|
-| `/v1/chat/completions` | POST | Chat completions (streaming + non-streaming) |
-| `/v1/chat/completions/stop` | POST | Abortar uma geração ativa |
-| `/v1/models` | GET | Listar modelos disponíveis |
-| `/v1/models/:model` | GET | Informações de um modelo específico |
-| `/health` | GET | Health check com status do sistema |
-| `/metrics` | GET | Métricas no formato Prometheus |
 
 ---
 

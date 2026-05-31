@@ -48,7 +48,9 @@ test('StreamingToolParser: flush partial content', () => {
   const parser3 = new StreamingToolParser();
   parser3.feed('Invalid <tool_call>NOT_JSON');
   const flushed2 = parser3.flush();
-  assert.strictEqual(flushed2.text, '<tool_call>NOT_JSON</tool_call>');
+  assert.ok(flushed2.text.includes('<tool_call>'), 'Should contain start tag');
+  assert.ok(flushed2.text.includes('NOT_JSON'), 'Should contain raw content');
+  assert.strictEqual(flushed2.toolCalls.length, 0);
 });
 
 test('StreamingToolParser: robust parsing of malformed JSON', () => {

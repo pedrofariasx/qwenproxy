@@ -51,6 +51,10 @@ export async function getStream(key: string): Promise<StreamEntry | undefined> {
   });
 }
 
+export function getStreamCount(): number {
+  return activeStreams.size;
+}
+
 export async function removeStream(key: string): Promise<void> {
   return mutex.run(() => {
     activeStreams.delete(key);

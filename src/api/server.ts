@@ -64,9 +64,58 @@ app.use('*', async (c, next) => {
   await next()
 })
 
-let cache: MemoryCache
-let watchdog: Watchdog
+type StartupHealthStatus = 'unknown' | 'degraded' | 'ok'
+
+interface StartupHealthState {
+  cacheReady: boolean
+  watchdogReady: boolean
+  metricsReady: boolean
+  prewarmComplete: boolean
+  expectedSessions: number
+  readySessions: number
+  failedSessions: number
+  errors: string[]
+}
+
+let cache: MemoryCache | null = null
+let watchdog: Watchdog | null = null
 let server: any
+
+const startupHealthState: StartupHealthState = {
+  cacheReady: false,
+  watchdogReady: false,
+  metricsReady: false,
+  prewarmComplete: false,
+  expectedSessions: 0,
+  readySessions: 0,
+  failedSessions: 0,
+  errors: [],
+}
+
+function getStartupHealthStatus(state = startupHealthState): StartupHealthStatus {
+  if (state.errors.some(error => error.startsWith('cache:') || error.startsWith('watchdog:'))) {
+    return 'degraded'
+  }
+  if (!state.cacheReady || !state.watchdogReady) {
+    return 'unknown'
+  }
+  if (!state.prewarmComplete) {
+    return 'degraded'
+  }
+  // readySessions may be 0 with lazy Playwright init — not a degradation
+  return 'ok'
+}
+
+export function getStartupHealthState() {
+  return {
+    ...startupHealthState,
+    status: getStartupHealthStatus(),
+  }
+}
+
+export function __setStartupHealthStateForTests(partial: Partial<StartupHealthState>): void {
+  Object.assign(startupHealthState, partial)
+}
 
 app.use('*', async (c, next) => {
   const start = Date.now()
@@ -109,32 +158,38 @@ app.get('/health', async (c) => {
   const timeout = (ms: number): Promise<never> =>
     new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
 
+  const startupStatus = getStartupHealthStatus()
+
   // Watchdog status — 3s timeout
   let watchdogStatus: any = null
-  try {
-    watchdogStatus = await Promise.race([
-      watchdog?.getStatus() ?? Promise.resolve(null),
-      timeout(SUB_CHECK_TIMEOUT),
-    ])
-  } catch {
-    // watchdog sub-check timed out
+  if (watchdog) {
+    try {
+      watchdogStatus = await Promise.race([
+        watchdog.getStatus(),
+        timeout(SUB_CHECK_TIMEOUT),
+      ])
+    } catch {
+      // watchdog sub-check timed out
+    }
   }
 
   // Cache stats — 3s timeout
   let cacheStats: any = null
-  try {
-    cacheStats = await Promise.race([
-      cache?.getStats() ?? Promise.resolve(null),
-      timeout(SUB_CHECK_TIMEOUT),
-    ])
-  } catch {
-    // cache sub-check timed out
+  if (cache) {
+    try {
+      cacheStats = await Promise.race([
+        cache.getStats(),
+        timeout(SUB_CHECK_TIMEOUT),
+      ])
+    } catch {
+      // cache sub-check timed out
+    }
   }
 
   // Accounts info — 3s timeout
   let accountsInfo = { total: 0, inCooldown: 0 }
   try {
-    const { getAccountCount, getCooldownStatus } = await import('../core/account-manager.ts')
+    const { getAccountCount, getCooldownStatus } = await import('../core/account-manager.js')
     const info = await Promise.race([
       Promise.resolve({
         total: getAccountCount(),
@@ -147,17 +202,66 @@ app.get('/health', async (c) => {
     // accounts sub-check timed out or unavailable
   }
 
-  const isHealthy = watchdogStatus?.overall === 'healthy'
+  // Playwright status — lightweight, no timeout needed (reads module-level state)
+  let playwrightStatus = { initialized: false, activePage: false, accountPages: 0, captchaDetected: false }
+  try {
+    const { activePage: pwActivePage, isCaptchaDetected, accountPages: pwAccountPages } = await import('../services/playwright.js')
+    playwrightStatus = {
+      initialized: pwActivePage !== null,
+      activePage: pwActivePage !== null,
+      accountPages: pwAccountPages?.size ?? 0,
+      captchaDetected: isCaptchaDetected(),
+    }
+  } catch {
+    // playwright module not available
+  }
+
+  // Stream registry stats — 3s timeout
+  let streamInfo = { active: 0 }
+  try {
+    const { getStreamCount } = await import('../core/stream-registry.js')
+    const count = await Promise.race([
+      Promise.resolve(getStreamCount()),
+      timeout(SUB_CHECK_TIMEOUT),
+    ])
+    streamInfo = { active: count }
+  } catch {
+    // stream registry not available
+  }
+
+  // Memory info (instant, no async needed)
+  const mem = process.memoryUsage()
+  const memoryInfo = {
+    rssMB: Math.round(mem.rss / (1024 * 1024)),
+    heapUsedMB: Math.round(mem.heapUsed / (1024 * 1024)),
+    heapTotalMB: Math.round(mem.heapTotal / (1024 * 1024)),
+    externalMB: Math.round(mem.external / (1024 * 1024)),
+    heapUsagePercent: Math.round((mem.heapUsed / Math.max(mem.heapTotal, 1)) * 100),
+  }
 
   return c.json({
-    status: isHealthy ? 'ok' : 'degraded',
+    status: startupStatus,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     version: '1.0.0',
+    startup: {
+      status: startupStatus,
+      cacheReady: startupHealthState.cacheReady,
+      watchdogReady: startupHealthState.watchdogReady,
+      metricsReady: startupHealthState.metricsReady,
+      prewarmComplete: startupHealthState.prewarmComplete,
+      expectedSessions: startupHealthState.expectedSessions,
+      readySessions: startupHealthState.readySessions,
+      failedSessions: startupHealthState.failedSessions,
+      errors: startupHealthState.errors,
+    },
     accounts: accountsInfo,
     watchdog: {
-      healthy: isHealthy,
+      healthy: watchdogStatus?.overall === 'healthy',
       details: watchdogStatus ?? null,
     },
+    playwright: playwrightStatus,
+    streams: streamInfo,
+    memory: memoryInfo,
     timestamp: Date.now(),
     metrics: {
       cache: cacheStats,
@@ -223,31 +327,78 @@ app.onError((err, c) => {
 app.notFound((c) => c.json({ error: 'Not found' }, 404))
 
 export async function startServer(): Promise<void> {
-  cache = new MemoryCache()
-  await cache.connect()
+  const shutdown = async (signal: string) => {
+    logger.info(`Received ${signal}, shutting down gracefully...`)
 
-  const { loadAccounts } = await import('../core/accounts.ts')
-  const accounts = loadAccounts()
-
-  if (accounts.length > 0) {
-    logger.info(`Pre-warming ${accounts.length} configured account(s)...`)
-    const { initPlaywrightForAccount } = await import('../services/playwright.ts')
-    for (const account of accounts) {
-      try {
-        await initPlaywrightForAccount(account, config.browser.headless)
-      } catch (err: any) {
-        logger.error(`Failed to initialize account ${account.email}: ${(err as Error).message}`)
+    const cleanup = (async () => {
+      watchdog?.stop()
+      metrics.stopCollection()
+      if (cache) {
+        await cache.close()
       }
+      const { closePlaywright } = await import('../services/playwright.js')
+      await closePlaywright()
+      const { closeDatabase } = await import('../core/database.js')
+      closeDatabase()
+      server?.close()
+    })()
+
+    const timeout = new Promise<void>((_, reject) => {
+      setTimeout(() => reject(new Error('Shutdown timeout')), config.shutdown.timeoutMs)
+    })
+
+    try {
+      await Promise.race([cleanup, timeout])
+      process.exit(0)
+    } catch {
+      logger.error(`Shutdown timed out after ${config.shutdown.timeoutMs}ms, forcing exit`)
+      process.exit(1)
     }
-  } else {
-    const { initPlaywright } = await import('../services/playwright.ts')
-    await initPlaywright(config.browser.headless)
   }
 
-  watchdog = new Watchdog()
-  watchdog.start()
+  const bootstrap = async () => {
+    logger.info('Bootstrapping infrastructure in background...')
 
-  metrics.startCollection()
+    try {
+      cache = new MemoryCache()
+      await cache.connect()
+      startupHealthState.cacheReady = true
+      logger.info('Memory cache is ready')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      startupHealthState.errors.push(`cache: ${message}`)
+      logger.error(`Cache initialization failed: ${message}`)
+    }
+
+    try {
+      watchdog = new Watchdog()
+      watchdog.start()
+      startupHealthState.watchdogReady = true
+      logger.info('Watchdog is ready')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      startupHealthState.errors.push(`watchdog: ${message}`)
+      logger.error(`Watchdog initialization failed: ${message}`)
+    }
+
+    metrics.startCollection()
+    startupHealthState.metricsReady = true
+
+    try {
+      const { loadAccounts } = await import('../core/accounts.js')
+      const accounts = loadAccounts()
+      startupHealthState.expectedSessions = accounts.length > 0 ? accounts.length : 1
+      logger.info(`Found ${accounts.length} configured account(s) — Playwright will start lazily on first request`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      startupHealthState.errors.push(`accounts: ${message}`)
+      logger.error(`Account loading failed: ${message}`)
+    } finally {
+      startupHealthState.readySessions = 0 // sessions start lazily
+      startupHealthState.prewarmComplete = true
+      logger.info('Startup health is ok (lazy Playwright init)')
+    }
+  }
 
   if (config.ssl.enabled) {
     const sslOptions: https.ServerOptions = {
@@ -269,32 +420,11 @@ export async function startServer(): Promise<void> {
     })
   }
 
-  const shutdown = async (signal: string) => {
-    logger.info(`Received ${signal}, shutting down gracefully...`)
-
-    const cleanup = (async () => {
-      watchdog.stop()
-      metrics.stopCollection()
-      await cache.close()
-      const { closePlaywright } = await import('../services/playwright.js')
-      await closePlaywright()
-      const { closeDatabase } = await import('../core/database.ts')
-      closeDatabase()
-      server?.close()
-    })()
-
-    const timeout = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error('Shutdown timeout')), config.shutdown.timeoutMs)
-    })
-
-    try {
-      await Promise.race([cleanup, timeout])
-      process.exit(0)
-    } catch {
-      logger.error(`Shutdown timed out after ${config.shutdown.timeoutMs}ms, forcing exit`)
-      process.exit(1)
-    }
-  }
+  void bootstrap().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    startupHealthState.errors.push(`bootstrap: ${message}`)
+    logger.error(`Unexpected startup bootstrap failure: ${message}`)
+  })
 
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))
