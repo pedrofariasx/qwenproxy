@@ -1,5 +1,6 @@
 import { config } from './config.ts';
-import { paint, terminal } from './terminal.ts';
+import { debugSearch } from './debug-search.ts';
+import { maskSensitive, paint, terminal } from './terminal.ts';
 
 type DebugMode = 'off' | 'basic' | 'full' | 'raw';
 type DebugRoute = 'chat.completions' | 'responses';
@@ -65,8 +66,18 @@ class DebugTrace {
     this.id = start.id;
     this.route = start.route;
     if (!debugEnabled()) return;
+    const requestTag = debugSearch.tagForId(this.id, 'req');
+    debugSearch.startRequest({
+      id: this.id,
+      route: start.route,
+      client: start.client,
+      model: start.model,
+      stream: start.stream,
+      inputPreview: start.messages || start.input,
+    });
 
     this.section('request', [
+      kv('tag', `#${requestTag}`),
       kv('rota', start.route),
       kv('cliente', start.client || 'cliente desconhecido'),
       kv('modelo', start.model || 'nao informado'),
@@ -75,6 +86,10 @@ class DebugTrace {
       start.sessionKey ? kv('sessao', start.sessionKey) : null,
       kv('entrada', summarizeInput(start)),
       kv('tools', summarizeTools(start.tools)),
+    ], ['request', start.route, start.client || '', start.model || ''], [
+      { id: this.id, kind: 'req' },
+      ...(start.previousResponseId ? [{ id: start.previousResponseId, kind: 'resp' }] : []),
+      ...(start.sessionKey ? [{ id: start.sessionKey, kind: 'session' }] : []),
     ]);
 
     if (mode === 'full' || mode === 'raw') {
@@ -82,7 +97,7 @@ class DebugTrace {
         messages: start.messages,
         input: start.input,
         tools: start.tools,
-      }));
+      }), ['payload', 'request']);
     }
   }
 
@@ -93,26 +108,36 @@ class DebugTrace {
       meta?.estimatedTokens !== undefined ? kv('tokens estimados', String(meta.estimatedTokens)) : null,
       meta?.contextWindow !== undefined ? kv('janela do modelo', String(meta.contextWindow)) : null,
     ];
-    this.section('qwen request', lines);
+    debugSearch.updateRequest(this.id, {
+      promptPreview: truncate(clean(prompt), config.debug.maxChars),
+    });
+    this.section('qwen request', lines, ['prompt', 'qwen']);
 
     if (config.debug.showPrompt || mode === 'raw') {
-      this.block('prompt enviado', prompt);
+      this.block('prompt enviado', prompt, ['prompt', 'qwen']);
     } else if (mode === 'full') {
-      this.block('prompt enviado (preview)', prompt);
+      this.block('prompt enviado (preview)', prompt, ['prompt', 'preview']);
     }
   }
 
   account(email: string, accountId: string) {
     if (!debugEnabled()) return;
+    const accountTag = debugSearch.tagForId(accountId, 'acct');
+    debugSearch.updateRequest(this.id, {
+      account: email,
+      accountTag,
+    });
     this.section('conta', [
+      kv('tag', `#${accountTag}`),
       kv('usando', email),
       kv('id', accountId),
-    ]);
+    ], ['account'], [{ id: accountId, kind: 'acct' }]);
   }
 
   retry(message: string) {
     if (!debugEnabled()) return;
-    this.section('retry', [translateError(message).summary, translateError(message).hint]);
+    debugSearch.appendRequestEvent(this.id, `retry: ${translateError(message).summary}`);
+    this.section('retry', [translateError(message).summary, translateError(message).hint], ['retry', 'error']);
   }
 
   streamDelta(kind: 'answer' | 'reasoning', text: string) {
@@ -125,7 +150,9 @@ class DebugTrace {
     const preview = truncate(clean(text), remaining);
     if (!preview) return;
     this.liveCharsPrinted += preview.length;
-    this.section(kind === 'answer' ? 'resposta parcial' : 'pensamento parcial', [preview]);
+    debugSearch.appendRequestText(this.id, kind, text);
+    debugSearch.appendRequestEvent(this.id, `${kind === 'answer' ? 'resposta' : 'pensamento'} +${text.length} chars`);
+    this.section(kind === 'answer' ? 'resposta parcial' : 'pensamento parcial', [preview], ['stream', kind]);
   }
 
   toolCall(call: any) {
@@ -136,10 +163,14 @@ class DebugTrace {
 
     const name = call.name || call.function?.name || 'tool';
     const args = call.arguments ?? call.function?.arguments ?? {};
+    const toolTag = debugSearch.tagForId(id, 'tool');
+    debugSearch.appendToolCall(this.id, call);
+    debugSearch.appendRequestEvent(this.id, `tool call: ${name} (#${toolTag})`);
     this.section('tool call', [
+      kv('tag', `#${toolTag}`),
       kv('nome', name),
       kv('argumentos', truncate(formatArgs(args), config.debug.maxChars)),
-    ]);
+    ], ['tool', name], [{ id, kind: 'tool' }]);
   }
 
   completed(result: DebugComplete = {}) {
@@ -151,6 +182,14 @@ class DebugTrace {
     }
 
     const durationMs = Date.now() - this.startedAt;
+    debugSearch.updateRequest(this.id, {
+      status: result.status === 'failed' ? 'failed' : 'ok',
+      usage: result.usage,
+      finishReason: result.finishReason,
+    });
+    if (result.outputText) debugSearch.updateRequest(this.id, { answer: result.outputText });
+    if (result.reasoningText) debugSearch.updateRequest(this.id, { reasoning: result.reasoningText });
+    debugSearch.appendRequestEvent(this.id, `finalizado: ${result.finishReason || result.status || 'ok'} em ${durationMs}ms`);
     this.section('resposta final', [
       kv('status', result.status || 'ok'),
       result.finishReason ? kv('finish', result.finishReason) : null,
@@ -161,32 +200,59 @@ class DebugTrace {
         ? kv('pensamento', truncate(clean(result.reasoningText), config.debug.maxChars))
         : null,
       result.toolCalls?.length ? kv('tools chamadas', String(result.toolCalls.length)) : null,
-    ]);
+    ], ['complete', result.status || 'ok', result.finishReason || '']);
   }
 
   failed(err: any) {
     if (!debugEnabled() || this.closed) return;
     this.closed = true;
     const translated = translateError(err);
+    debugSearch.updateRequest(this.id, {
+      status: 'failed',
+      error: translated.summary,
+    });
+    debugSearch.appendRequestEvent(this.id, `erro: ${translated.summary}`);
     this.section('erro traduzido', [
       translated.summary,
       translated.hint,
       mode === 'raw' ? kv('erro bruto', String(err?.stack || err?.message || err)) : null,
+    ], ['error', 'failed']);
+  }
+
+  private section(
+    title: string,
+    lines: Array<string | null | undefined>,
+    tags: string[] = [],
+    ids: Array<{ id: string; kind?: string }> = [{ id: this.id, kind: 'req' }],
+  ) {
+    const visible = lines.filter((line): line is string => Boolean(line && line.trim()));
+    if (visible.length === 0) return;
+    const record = debugSearch.record({
+      scope: `Debug ${this.id.slice(0, 8)}`,
+      title,
+      lines: visible,
+      tags,
+      ids,
+    });
+    terminal.info(`Debug ${this.id.slice(0, 8)}`, paint(title, 'bold'), [
+      `${paint('event:', 'dim')} #${record.eventTag} ${record.tags.slice(0, 6).map((tag) => paint(`#${tag}`, tag.includes('-') ? 'yellow' : 'blue')).join(' ')}`,
+      ...visible,
     ]);
   }
 
-  private section(title: string, lines: Array<string | null | undefined>) {
-    const visible = lines.filter((line): line is string => Boolean(line && line.trim()));
-    if (visible.length === 0) return;
-    terminal.info(`Debug ${this.id.slice(0, 8)}`, paint(title, 'bold'), visible);
-  }
-
-  private block(title: string, text: string) {
+  private block(title: string, text: string, tags: string[] = []) {
     const value = truncate(clean(text), mode === 'raw' ? Math.max(config.debug.maxChars, text.length) : config.debug.maxChars);
     if (!value) return;
+    const record = debugSearch.record({
+      scope: `Debug ${this.id.slice(0, 8)}`,
+      title,
+      lines: [value],
+      tags,
+      ids: [{ id: this.id, kind: 'req' }],
+    });
     terminal.debug(`Debug ${this.id.slice(0, 8)}`, paint(title, 'bold'));
-    console.log(paint('---', 'dim'));
-    console.log(value);
+    console.log(`${paint('---', 'dim')} ${paint(`#${record.eventTag}`, 'magenta')} ${record.tags.slice(0, 6).map((tag) => paint(`#${tag}`, 'blue')).join(' ')}`);
+    console.log(maskSensitive(value));
     console.log(paint('---', 'dim'));
   }
 }

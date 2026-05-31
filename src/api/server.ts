@@ -9,6 +9,9 @@ import { chatCompletions } from '../routes/chat.js'
 import { chatResponses, responsesStop } from '../routes/responses.js'
 import { openAIErrorBody } from '../core/openai-compat.js'
 import { terminal } from '../core/terminal.ts'
+import { debugEnabled } from '../core/debug-console.ts'
+import { debugSearch } from '../core/debug-search.ts'
+import { startDebugTui, stopDebugTui } from '../core/debug-tui.ts'
 
 const app = new Hono()
 
@@ -28,6 +31,7 @@ const routeManifest = [
 
 function logRouteManifest(): void {
   terminal.list('Server', 'Public routes', routeManifest)
+  bootRecord('routes', routeManifest, ['startup', 'routes'])
 }
 
 let cache: MemoryCache
@@ -104,8 +108,19 @@ app.notFound((c) => c.json(openAIErrorBody(`Route not found: ${c.req.method} ${n
 }), 404))
 
 export async function startServer(): Promise<void> {
+  if (debugEnabled()) {
+    startDebugTui()
+    bootRecord('debug mode', [
+      `mode: ${config.debug.mode}`,
+      `max chars: ${config.debug.maxChars}`,
+      `show prompt: ${config.debug.showPrompt ? 'yes' : 'no'}`,
+      'terminal search: enabled',
+    ], ['startup', 'debug'])
+  }
+
   cache = new MemoryCache()
   await cache.connect()
+  bootRecord('cache ready', ['backend: memory'], ['startup', 'cache'])
   logRouteManifest()
 
   const { loadAccounts } = await import('../core/accounts.ts')
@@ -117,41 +132,79 @@ export async function startServer(): Promise<void> {
     `journal: ${db.journalMode}`,
     `accounts: ${db.accounts}`,
   ])
+  bootRecord('database ready', [
+    `path: ${db.path}`,
+    `journal: ${db.journalMode}`,
+    `accounts: ${db.accounts}`,
+  ], ['startup', 'database'])
 
   if (accounts.length > 0) {
     terminal.info('Server', `Pre-warming ${accounts.length} configured account(s)`)
+    bootRecord('account prewarm started', [
+      `accounts: ${accounts.length}`,
+      `headless: ${config.browser.headless ? 'yes' : 'no'}`,
+    ], ['startup', 'account', 'prewarm'])
     const { initPlaywrightForAccount } = await import('../services/playwright.ts')
 
     void Promise.allSettled(
       accounts.map(async (account) => {
         const startedAt = Date.now()
+        const accountTag = debugSearch.tagForId(account.id, 'acct')
+        bootRecord('account init started', [
+          `tag: #${accountTag}`,
+          `email: ${account.email}`,
+        ], ['startup', 'account'], [{ id: account.id, kind: 'acct' }])
         try {
           await initPlaywrightForAccount(account, config.browser.headless)
           terminal.success('Account', `${account.email} ready`, [
             `time: ${Date.now() - startedAt}ms`,
+            `tag: #${accountTag}`,
             'route capture: deferred until first API request',
           ])
+          bootRecord('account ready', [
+            `tag: #${accountTag}`,
+            `email: ${account.email}`,
+            `time: ${Date.now() - startedAt}ms`,
+          ], ['startup', 'account', 'ready'], [{ id: account.id, kind: 'acct' }])
         } catch (err: any) {
           terminal.error('Account', `Failed to initialize ${account.email}`, [err.message])
+          bootRecord('account failed', [
+            `tag: #${accountTag}`,
+            `email: ${account.email}`,
+            `error: ${err.message}`,
+          ], ['startup', 'account', 'error'], [{ id: account.id, kind: 'acct' }])
         }
       })
     ).then((results) => {
       const failed = results.filter((result) => result.status === 'rejected').length
       if (failed > 0) {
         terminal.warn('Server', `Pre-warm completed with ${failed} failure(s)`)
+        bootRecord('prewarm completed', [`failed: ${failed}`], ['startup', 'prewarm', 'warn'])
       } else {
         terminal.success('Server', 'Pre-warm completed')
+        bootRecord('prewarm completed', ['failed: 0'], ['startup', 'prewarm', 'ready'])
       }
     })
   } else {
     const { initPlaywright } = await import('../services/playwright.ts')
+    bootRecord('global browser init started', [
+      `headless: ${config.browser.headless ? 'yes' : 'no'}`,
+    ], ['startup', 'browser'])
     await initPlaywright(config.browser.headless)
+    bootRecord('global browser ready', ['profile: global'], ['startup', 'browser', 'ready'])
   }
 
   watchdog = new Watchdog()
   watchdog.start()
+  bootRecord('watchdog started', [
+    `interval: ${config.watchdog.checkInterval}ms`,
+    `failures: ${config.watchdog.consecutiveFailuresThreshold}`,
+  ], ['startup', 'watchdog'])
 
   metrics.startCollection()
+  bootRecord('metrics started', [
+    `interval: ${config.metrics.interval}ms`,
+  ], ['startup', 'metrics'])
 
   server = serve({
     fetch: app.fetch,
@@ -159,6 +212,10 @@ export async function startServer(): Promise<void> {
     hostname: config.server.host,
   }, (info) => {
     terminal.success('Server', `Listening on http://${info.address}:${info.port}`)
+    bootRecord('server listening', [
+      `url: http://${info.address}:${info.port}`,
+      `api: http://${info.address}:${info.port}/v1`,
+    ], ['startup', 'server', 'ready'])
   })
 
   server.on?.('clientError', (err: any, socket: any) => {
@@ -176,6 +233,7 @@ export async function startServer(): Promise<void> {
     terminal.info('Server', `Received ${signal}; shutting down`)
     watchdog.stop()
     metrics.stopCollection()
+    stopDebugTui()
     await cache.close()
     const { closePlaywright } = await import('../services/playwright.js')
     await closePlaywright()
@@ -190,3 +248,23 @@ export async function startServer(): Promise<void> {
 }
 
 export { app }
+
+function bootRecord(
+  title: string,
+  lines: string[],
+  tags: string[],
+  ids: Array<{ id: string; kind?: string }> = [],
+): void {
+  if (!debugEnabled()) return
+  const record = debugSearch.record({
+    scope: 'Startup',
+    title,
+    lines,
+    tags,
+    ids,
+  })
+  terminal.debug('Startup', title, [
+    `${record.tags.slice(0, 8).map((tag) => `#${tag}`).join(' ')}`,
+    ...lines,
+  ])
+}

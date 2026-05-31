@@ -640,7 +640,7 @@ async function acquireQwenStream(prompt: string, model: string, streamKey: strin
             promptToSend,
             !model.includes('no-thinking'),
             model,
-            undefined,
+            null,
             accountId === 'global' ? undefined : accountId
           );
           registerStream(streamKey, {

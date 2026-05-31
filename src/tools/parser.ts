@@ -21,6 +21,11 @@ export interface ParserResult {
 const TOOL_OPEN_RE = /<tool_call\b[^>]*>/i;
 const TOOL_END = '</tool_call>';
 
+type RawToolJsonCandidate = {
+  start: number;
+  end: number | null;
+};
+
 function decodeXmlEntities(value: string): string {
   return value
     .replace(/&quot;/g, '"')
@@ -239,6 +244,78 @@ function findPartialInlineToolIndex(buffer: string): number {
   return idx;
 }
 
+function findBalancedJsonObjectEnd(input: string, start: number): number | null {
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+
+  for (let i = start; i < input.length; i++) {
+    const ch = input[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '{') {
+      depth++;
+      continue;
+    }
+    if (ch === '}') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+
+  return null;
+}
+
+function looksLikeRawToolJson(prefix: string, allowedToolNames: Set<string>): boolean {
+  const preview = prefix.slice(0, 1200);
+  const hasNameField = /"(?:name|tool_name|tool)"\s*:/.test(preview)
+    || /"function"\s*:\s*\{[\s\S]{0,500}"name"\s*:/.test(preview);
+  if (!hasNameField) return false;
+
+  const hasArgumentField = /"(?:arguments|args|parameters|input)"\s*:/.test(preview)
+    || /"function"\s*:\s*\{[\s\S]{0,500}"arguments"\s*:/.test(preview);
+  if (hasArgumentField) return true;
+
+  for (const name of allowedToolNames) {
+    if (preview.includes(`"${name}"`) || preview.includes(`"*${name}"`)) return true;
+  }
+
+  return false;
+}
+
+function findRawToolJsonCandidate(buffer: string, allowedToolNames: Set<string>): RawToolJsonCandidate | null {
+  if (allowedToolNames.size === 0) return null;
+
+  let start = buffer.indexOf('{');
+  while (start !== -1) {
+    const tail = buffer.substring(start);
+    if (looksLikeRawToolJson(tail, allowedToolNames)) {
+      return {
+        start,
+        end: findBalancedJsonObjectEnd(buffer, start),
+      };
+    }
+    start = buffer.indexOf('{', start + 1);
+  }
+
+  return null;
+}
+
 // ─── StreamingToolParser ───────────────────────────────────────────────────────
 
 export class StreamingToolParser {
@@ -273,6 +350,26 @@ export class StreamingToolParser {
     while (this.buffer.length > 0) {
       if (!this.insideTool) {
         const match = this.buffer.match(TOOL_OPEN_RE);
+        const rawCandidate = findRawToolJsonCandidate(this.buffer, this.allowedToolNames);
+
+        if (
+          rawCandidate
+          && (!match || match.index === undefined || rawCandidate.start < match.index)
+        ) {
+          const textBefore = this.buffer.substring(0, rawCandidate.start);
+          this.pendingLeadIn += textBefore;
+
+          if (rawCandidate.end === null) {
+            this.buffer = this.buffer.substring(rawCandidate.start);
+            break;
+          }
+
+          const content = this.buffer.substring(rawCandidate.start, rawCandidate.end);
+          this.buffer = this.buffer.substring(rawCandidate.end);
+          this.processToolContent(content, result);
+          continue;
+        }
+
         if (match && match.index !== undefined) {
           // Text before the tool call tag
           const textBefore = this.buffer.substring(0, match.index);
@@ -345,22 +442,33 @@ export class StreamingToolParser {
         } else {
           // Recovery failed. Restore lead-in text if no tools were emitted.
           logger.warn('[parser] Dropping unrecoverable unclosed tool call at end of stream');
-          if (this.emittedToolCallCount === 0) {
+          if (this.shouldExposeMalformedToolContent() && this.emittedToolCallCount === 0) {
             result.text += this.pendingLeadIn + this.currentOpenTag + this.buffer;
           }
           this.pendingLeadIn = '';
         }
       } else {
         // Empty tool call block - restore lead-in
-        if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
+        if (this.shouldExposeMalformedToolContent() && this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
           result.text += this.pendingLeadIn;
         }
         this.pendingLeadIn = '';
       }
     } else {
       if (this.emittedToolCallCount === 0) {
-        result.text += this.buffer;
+        const rawCandidate = findRawToolJsonCandidate(this.buffer, this.allowedToolNames);
+        if (
+          rawCandidate
+          && rawCandidate.start === 0
+          && rawCandidate.end === null
+          && !this.shouldExposeMalformedToolContent()
+        ) {
+          logger.warn('[parser] Dropping unrecoverable raw tool call at end of stream');
+        } else {
+          result.text += this.pendingLeadIn + this.buffer;
+        }
       }
+      this.pendingLeadIn = '';
     }
 
     this.buffer = '';
@@ -392,7 +500,7 @@ export class StreamingToolParser {
     if (!t) {
       // Empty tool call - malformed. Restore lead-in if possible.
       logger.warn('[parser] Dropping empty tool call block');
-      if (this.emittedToolCallCount === 0) {
+      if (this.shouldExposeMalformedToolContent() && this.emittedToolCallCount === 0) {
         result.text += this.pendingLeadIn + this.currentOpenTag + TOOL_END;
       }
       this.pendingLeadIn = '';
@@ -408,12 +516,12 @@ export class StreamingToolParser {
         arguments: xmlParsed.arguments,
       });
       if (normalized) {
-        if (this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
+        if (this.shouldEmitLeadInWithToolCall() && this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
           result.text += this.pendingLeadIn;
         }
         result.toolCalls.push(normalized);
+        this.emittedToolCallCount++;
       }
-      this.emittedToolCallCount++;
       this.pendingLeadIn = '';
       return;
     }
@@ -425,7 +533,7 @@ export class StreamingToolParser {
         for (const item of arr) {
           const tc = this.parseToolCall(item);
           if (tc) {
-            if (this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
+            if (this.shouldEmitLeadInWithToolCall() && this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
               result.text += this.pendingLeadIn;
             }
             result.toolCalls.push(tc);
@@ -451,7 +559,7 @@ export class StreamingToolParser {
           }
           const normalized = this.normalizeParsedToolCall(tc);
           if (normalized) {
-            if (this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
+            if (this.shouldEmitLeadInWithToolCall() && this.emittedToolCallCount === 0 && this.pendingLeadIn.length > 0) {
               result.text += this.pendingLeadIn;
             }
             result.toolCalls.push(normalized);
@@ -472,10 +580,18 @@ export class StreamingToolParser {
       hasArgs: t.includes('"arguments"') || t.includes('"args"') || t.includes('"parameters"') || t.includes('"input"'),
       first100Chars: t.substring(0, 100)
     });
-    if (this.emittedToolCallCount === 0) {
+    if (this.shouldExposeMalformedToolContent() && this.emittedToolCallCount === 0) {
       result.text += this.pendingLeadIn + this.currentOpenTag + content + TOOL_END;
     }
     this.pendingLeadIn = '';
+  }
+
+  private shouldEmitLeadInWithToolCall(): boolean {
+    return this.allowedToolNames.size === 0;
+  }
+
+  private shouldExposeMalformedToolContent(): boolean {
+    return this.allowedToolNames.size === 0;
   }
 
   private tryRecoverToolCall(block: string): ParsedToolCall | null {
@@ -610,6 +726,28 @@ export class StreamingToolParser {
     return this.allowedToolNames.has(name);
   }
 
+  private resolveAllowedToolName(name: string): string | null {
+    if (!this.allowedToolNames.size) return name;
+    if (this.allowedToolNames.has(name)) return name;
+
+    const variants = [
+      name.replace(/^[`*_~\s]+|[`*_~\s]+$/g, ''),
+      name.replace(/^[^A-Za-z0-9_]+/, '').replace(/[^A-Za-z0-9_.-]+$/, ''),
+    ].filter(Boolean);
+
+    for (const variant of variants) {
+      if (this.allowedToolNames.has(variant)) return variant;
+    }
+
+    const lowerName = name.toLowerCase();
+    for (const allowed of this.allowedToolNames) {
+      if (allowed.toLowerCase() === lowerName) return allowed;
+      if (variants.some((variant) => allowed.toLowerCase() === variant.toLowerCase())) return allowed;
+    }
+
+    return null;
+  }
+
   private isPlainObject(value: unknown): value is Record<string, unknown> {
     if (!value || typeof value !== 'object') return false;
     const proto = Object.getPrototypeOf(value);
@@ -650,7 +788,8 @@ export class StreamingToolParser {
     if (!call || typeof call.name !== 'string' || !call.name.trim()) return null;
 
     const name = call.name.trim();
-    if (!this.isAllowedToolName(name)) {
+    const resolvedName = this.resolveAllowedToolName(name);
+    if (!resolvedName) {
       const inferred = inferToolNameFromParameters(call.arguments, this.tools);
       if (!inferred || !this.isAllowedToolName(inferred)) {
         logger.warn('[parser] Dropping tool call with unknown tool name', { name });
@@ -658,7 +797,7 @@ export class StreamingToolParser {
       }
       call.name = inferred;
     } else {
-      call.name = name;
+      call.name = resolvedName;
     }
 
     call.arguments = this.sanitizeArguments(call.arguments);

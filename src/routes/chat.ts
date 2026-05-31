@@ -11,7 +11,7 @@
 import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { createQwenStream, updateSessionParent } from '../services/qwen.ts';
+import { createQwenStream, stopQwenGeneration, updateSessionParent } from '../services/qwen.ts';
 import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
 import { registry } from '../tools/registry.ts';
 import type { FunctionToolDefinition } from '../tools/types.ts';
@@ -107,6 +107,18 @@ function parseQwenErrorPayload(raw: string): { message: string; status: number }
   }
 
   return null;
+}
+
+async function stopUpstreamAfterToolCall(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  uiSessionId: string,
+  responseId: string | null,
+  headers: Record<string, string> | null
+): Promise<void> {
+  if (uiSessionId && responseId && headers) {
+    await stopQwenGeneration(uiSessionId, responseId, headers).catch(() => {});
+  }
+  await reader.cancel().catch(() => {});
 }
 
 export async function chatCompletions(c: Context) {
@@ -224,10 +236,6 @@ export async function chatCompletions(c: Context) {
 
     const isThinkingModel = !body.model.includes('no-thinking');
     
-    // A session is new if it doesn't have any assistant messages yet.
-    // This handles cases where the first request has [System, User] messages.
-    const isNewSession = !messages.some(m => m.role === 'assistant');
-
     // Account selection with fallback on rate-limit/failure
     let account = getNextAccount();
     let triedAccountIds = new Set<string>();
@@ -235,6 +243,8 @@ export async function chatCompletions(c: Context) {
 
     let stream: ReadableStream | undefined;
     let uiSessionId = '';
+    let upstreamHeaders: Record<string, string> | null = null;
+    const completionId = 'chatcmpl-' + uuidv4();
     let releaseChatLock: (() => void) | undefined;
 
     while (account) {
@@ -262,7 +272,6 @@ export async function chatCompletions(c: Context) {
 
     const accountMutex = getAccountMutex(accountId);
     releaseChatLock = await accountMutex.acquire();
-    const completionId = 'chatcmpl-' + uuidv4();
 
     try {
         let retries = 3;
@@ -275,11 +284,12 @@ export async function chatCompletions(c: Context) {
               finalPrompt,
               isThinkingModel,
               body.model,
-              isNewSession ? null : undefined,
+              null,
               accountId === 'global' ? undefined : accountId
             );
             stream = result.stream;
             uiSessionId = result.uiSessionId;
+            upstreamHeaders = result.headers;
             registerStream(completionId, {
               abortController: result.controller,
               accountId: result.accountId,
@@ -350,8 +360,6 @@ export async function chatCompletions(c: Context) {
       }
     }
 
-    const completionId = 'chatcmpl-' + uuidv4();
-
     if (!stream) {
       throw lastError || new Error('All accounts failed');
     }
@@ -364,6 +372,7 @@ export async function chatCompletions(c: Context) {
       let reasoningBuffer = '';
       let lastFullContent = '';
       let targetResponseId: string | null = null;
+      let stopAfterToolCall = false;
       const toolParser = new StreamingToolParser(bodyAny.tools || []);
       const toolCallsOut: any[] = [];
       let buffer = '';
@@ -392,9 +401,13 @@ export async function chatCompletions(c: Context) {
                 targetResponseId = chunk['response.created'].response_id;
               }
               updateSessionParent(uiSessionId, chunk['response.created'].response_id);
+              const registered = getStream(completionId);
+              if (registered) registered.targetResponseId = chunk['response.created'].response_id;
             } else if (chunk.response_id && !targetResponseId) {
               targetResponseId = chunk.response_id;
               updateSessionParent(uiSessionId, chunk.response_id);
+              const registered = getStream(completionId);
+              if (registered) registered.targetResponseId = chunk.response_id;
             }
 
             if (chunk.usage) {
@@ -457,15 +470,24 @@ export async function chatCompletions(c: Context) {
                   toolCallsOut.push(toolCall);
                   debugTrace.toolCall(toolCall);
                 }
+                if (toolCalls.length > 0) {
+                  stopAfterToolCall = true;
+                }
               }
             }
           } catch (e) {
             // parse error, ignore partial chunk
           }
+          if (stopAfterToolCall) break;
         }
+        if (stopAfterToolCall) break;
       }
 
-      const upstreamError = parseQwenErrorPayload(buffer);
+      if (stopAfterToolCall) {
+        await stopUpstreamAfterToolCall(reader, uiSessionId, targetResponseId, upstreamHeaders);
+      }
+
+      const upstreamError = stopAfterToolCall ? null : parseQwenErrorPayload(buffer);
       if (upstreamError) {
         releaseChatLock?.();
         debugTrace.failed(upstreamError.message);
@@ -579,6 +601,7 @@ export async function chatCompletions(c: Context) {
        const toolParser = new StreamingToolParser(bodyAny.tools || []);
        let streamedAnswer = '';
        const streamedToolCalls: any[] = [];
+       let stopAfterToolCall = false;
 
       let buffer = '';
       let completionTokens = 0;
@@ -611,9 +634,13 @@ export async function chatCompletions(c: Context) {
                 targetResponseId = chunk['response.created'].response_id;
               }
               updateSessionParent(uiSessionId, chunk['response.created'].response_id);
+              const registered = getStream(completionId);
+              if (registered) registered.targetResponseId = chunk['response.created'].response_id;
             } else if (chunk.response_id && !targetResponseId) {
               targetResponseId = chunk.response_id;
               updateSessionParent(uiSessionId, chunk.response_id);
+              const registered = getStream(completionId);
+              if (registered) registered.targetResponseId = chunk.response_id;
             }
 
             if (chunk.usage) {
@@ -705,15 +732,24 @@ export async function chatCompletions(c: Context) {
                     })]
                   });
                 }
+                if (toolCalls.length > 0) {
+                  stopAfterToolCall = true;
+                }
               }
             }
           } catch (e) {
             // parse error, ignore partial chunk
           }
+          if (stopAfterToolCall) break;
         }
+        if (stopAfterToolCall) break;
       }
 
-      const upstreamError = parseQwenErrorPayload(buffer);
+      if (stopAfterToolCall) {
+        await stopUpstreamAfterToolCall(reader, uiSessionId, targetResponseId, upstreamHeaders);
+      }
+
+      const upstreamError = stopAfterToolCall ? null : parseQwenErrorPayload(buffer);
       if (upstreamError) {
         debugTrace?.failed(upstreamError.message);
         await writeEvent({
