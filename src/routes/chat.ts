@@ -15,6 +15,8 @@ import {
   createQwenStream,
   updateSessionParent,
   QwenSessionExpiredError,
+  clearSessionState,
+  clearAllSessionsForAccount,
 } from "../services/qwen.ts";
 import { OpenAIRequest } from "../utils/types.ts";
 import { StreamingToolParser } from "../tools/parser.ts";
@@ -36,8 +38,14 @@ import {
   removeStream,
   getStream,
   getStreamBySessionId,
+  updateStreamTargetResponseId,
 } from "../core/stream-registry.ts";
 import { metrics } from "../core/metrics.js";
+import {
+  logger,
+  isToolcallDebugEnabled,
+  isToolcallErrorDebugEnabled,
+} from "../core/logger.js";
 
 const accountMutexes = new Map<string, Mutex>();
 function getAccountMutex(accountId: string): Mutex {
@@ -171,6 +179,13 @@ export async function chatCompletions(c: Context) {
           assistantContent = `<think>\n${reasoning}\n</think>\n${assistantContent}`;
         }
         if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
+          if (isToolcallDebugEnabled()) {
+            logger.debug("[chat] processing assistant tool_calls in history", {
+              messageIndex: i,
+              toolCallsCount: msg.tool_calls.length,
+              toolCallNames: msg.tool_calls.map((tc: any) => tc.function?.name),
+            });
+          }
           for (const tc of msg.tool_calls) {
             const args = tc.function?.arguments;
             let parsedArgs: any = {};
@@ -183,11 +198,22 @@ export async function chatCompletions(c: Context) {
             } else if (args && typeof args === "object") {
               parsedArgs = args;
             }
-            const payload = { name: tc.function?.name, arguments: parsedArgs };
+            const payload = {
+              name: tc.function?.name,
+              arguments: parsedArgs,
+            };
             const toolCallStr = `\n<tool_call>\n${JSON.stringify(payload)}\n</tool_call>`;
             assistantContent = assistantContent
               ? assistantContent + toolCallStr
               : toolCallStr.trim();
+
+            if (isToolcallDebugEnabled()) {
+              logger.debug("[chat] tool_call serialized to prompt", {
+                toolName: tc.function?.name,
+                toolCallId: tc.id,
+                argsKeys: Object.keys(parsedArgs),
+              });
+            }
           }
         }
         prompt += `Assistant: ${assistantContent.trim()}\n\n`;
@@ -208,6 +234,15 @@ export async function chatCompletions(c: Context) {
             }
           }
         }
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] processing tool response in history", {
+            messageIndex: i,
+            toolName,
+            toolCallId: msg.tool_call_id,
+            contentLength: contentStr.length,
+            contentPreview: contentStr.substring(0, 200),
+          });
+        }
         prompt += `Tool Response (${toolName || "tool"}): ${contentStr || ""}\n\n`;
       }
     }
@@ -219,6 +254,16 @@ export async function chatCompletions(c: Context) {
       Array.isArray(bodyAny.tools) &&
       bodyAny.tools.length > 0
     ) {
+      if (isToolcallDebugEnabled()) {
+        logger.debug("[chat] tools provided in request", {
+          toolsCount: bodyAny.tools.length,
+          toolNames: bodyAny.tools.map((t: any) =>
+            t.type === "function" ? t.function?.name : t.name,
+          ),
+          toolChoice: bodyAny.tool_choice || "none",
+        });
+      }
+
       // Better formatting for tools
       const formattedTools = bodyAny.tools.map((t: any) => {
         if (t.type === "function") {
@@ -241,6 +286,10 @@ export async function chatCompletions(c: Context) {
       ) {
         const forcedTool = bodyAny.tool_choice.function.name;
         systemPrompt += `CRITICAL: You MUST call the tool "${forcedTool}" in this response.\n\n`;
+
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] forced tool_choice", { forcedTool });
+        }
       }
     }
 
@@ -304,8 +353,25 @@ export async function chatCompletions(c: Context) {
         `[Chat] Routing request to account: ${accountEmail} (${accountId})`,
       );
 
+      if (isToolcallDebugEnabled()) {
+        logger.debug("[chat] account selected", {
+          accountId,
+          accountEmail,
+          isNewSession,
+          isThinkingModel,
+          promptLength: finalPrompt.length,
+        });
+      }
+
       const accountMutex = getAccountMutex(accountId);
       releaseChatLock = await accountMutex.acquire();
+
+      if (isToolcallDebugEnabled()) {
+        logger.debug("[chat] account lock acquired", {
+          accountId,
+          accountEmail,
+        });
+      }
 
       try {
         let retries = 3;
@@ -331,6 +397,16 @@ export async function chatCompletions(c: Context) {
               headers: result.headers,
             });
             success = true;
+
+            if (isToolcallDebugEnabled()) {
+              logger.debug("[chat] stream created successfully", {
+                accountId,
+                accountEmail,
+                uiSessionId,
+                completionId,
+              });
+            }
+
             break;
           } catch (err: any) {
             retries--;
@@ -388,6 +464,18 @@ export async function chatCompletions(c: Context) {
                   `[Chat] Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`,
                 );
               }
+
+              // Clear session state when "chat is in progress" persists
+              if (
+                err instanceof RetryableQwenStreamError ||
+                err.message?.includes("in progress")
+              ) {
+                console.warn(
+                  `[Chat] Clearing session state for ${accountEmail} (${accountId}) due to persistent 'chat in progress'`,
+                );
+                clearAllSessionsForAccount(accountId);
+              }
+
               releaseChatLock();
               releaseChatLock = undefined;
               lastError = err;
@@ -421,6 +509,14 @@ export async function chatCompletions(c: Context) {
 
         if (success) {
           break;
+        }
+
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] account failed, rotating", {
+            accountId,
+            accountEmail,
+            triedAccounts: Array.from(triedAccountIds),
+          });
         }
 
         releaseChatLock = undefined;
@@ -544,6 +640,17 @@ export async function chatCompletions(c: Context) {
                   reasoningBuffer += vStr;
                 } else {
                   const { text, toolCalls } = toolParser.feed(vStr);
+                  if (
+                    isToolcallDebugEnabled() &&
+                    (text || toolCalls.length > 0)
+                  ) {
+                    logger.debug("[chat] non-stream: parser feed result", {
+                      textLength: text.length,
+                      textPreview: text.substring(0, 100),
+                      toolCallsCount: toolCalls.length,
+                      toolCallNames: toolCalls.map((tc) => tc.name),
+                    });
+                  }
                   for (const tc of toolCalls) {
                     toolCallsOut.push({
                       id: tc.id,
@@ -553,6 +660,15 @@ export async function chatCompletions(c: Context) {
                         arguments: JSON.stringify(tc.arguments),
                       },
                     });
+
+                    if (isToolcallDebugEnabled()) {
+                      logger.debug("[chat] non-stream: tool_call collected", {
+                        id: tc.id,
+                        name: tc.name,
+                        argsKeys: Object.keys(tc.arguments),
+                        totalCollected: toolCallsOut.length,
+                      });
+                    }
                   }
                 }
               }
@@ -574,6 +690,15 @@ export async function chatCompletions(c: Context) {
 
         const { text: remainingText, toolCalls: remainingToolCalls } =
           toolParser.flush();
+
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] non-stream: parser flush result", {
+            remainingTextLength: remainingText?.length || 0,
+            remainingToolCallsCount: remainingToolCalls.length,
+            remainingToolCallNames: remainingToolCalls.map((tc) => tc.name),
+          });
+        }
+
         if (remainingText) {
           lastFullContent += remainingText;
         }
@@ -588,6 +713,15 @@ export async function chatCompletions(c: Context) {
           });
         }
 
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] non-stream: final toolcall summary", {
+            totalToolCalls: toolCallsOut.length,
+            toolCallNames: toolCallsOut.map((tc: any) => tc.function?.name),
+            contentLength: lastFullContent.length,
+            hasReasoning: !!reasoningBuffer,
+          });
+        }
+
         const usage = {
           prompt_tokens: promptTokens,
           completion_tokens: completionTokens,
@@ -599,9 +733,25 @@ export async function chatCompletions(c: Context) {
           content: toolCallsOut.length ? null : lastFullContent,
         };
         if (reasoningBuffer) message.reasoning_content = reasoningBuffer;
-        if (toolCallsOut.length)
-          toolCallsOut.forEach((tc, idx) => (tc.index = idx));
-        if (toolCallsOut.length) message.tool_calls = toolCallsOut;
+        if (toolCallsOut.length) {
+          toolCallsOut.forEach((tc, idx) => {
+            tc.index = idx;
+          });
+          message.tool_calls = toolCallsOut;
+        }
+
+        const finishReason = toolCallsOut.length ? "tool_calls" : "stop";
+
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] non-stream: sending response", {
+            completionId,
+            finishReason,
+            totalToolCalls: toolCallsOut.length,
+            contentLength: message.content?.length || 0,
+            hasReasoning: !!message.reasoning_content,
+            usage,
+          });
+        }
 
         return c.json({
           id: completionId,
@@ -613,12 +763,15 @@ export async function chatCompletions(c: Context) {
               index: 0,
               message,
               logprobs: null,
-              finish_reason: toolCallsOut.length ? "tool_calls" : "stop",
+              finish_reason: finishReason,
             },
           ],
           usage,
         });
       } finally {
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] non-stream: cleanup", { completionId });
+        }
         releaseChatLock?.();
         removeStream(completionId);
       }
@@ -630,6 +783,90 @@ export async function chatCompletions(c: Context) {
 
     return honoStream(c, async (streamWriter: any) => {
       let heartbeatInterval: any;
+      let clientDisconnected = false;
+
+      // Detect client disconnection
+      const abortHandler = async () => {
+        if (clientDisconnected) return;
+        clientDisconnected = true;
+
+        console.log(
+          `[Chat] Client disconnected for ${completionId}, stopping Qwen generation...`,
+        );
+
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] stream: client disconnected", {
+            completionId,
+            uiSessionId,
+          });
+        }
+
+        // Stop generation on Qwen side
+        try {
+          const streamData = getStream(completionId);
+          if (streamData && uiSessionId) {
+            const targetResponseId = streamData.targetResponseId;
+            if (targetResponseId) {
+              console.log(
+                `[Chat] Calling Qwen stop for session=${uiSessionId}, response=${targetResponseId}`,
+              );
+              await fetch(
+                `https://chat.qwen.ai/api/v2/chat/completions/stop?chat_id=${uiSessionId}`,
+                {
+                  method: "POST",
+                  headers: {
+                    Accept: "application/json",
+                    "Content-Type": "application/json",
+                    Cookie: streamData.headers.cookie,
+                    Origin: "https://chat.qwen.ai",
+                    Referer: `https://chat.qwen.ai/c/${uiSessionId}`,
+                    "User-Agent": streamData.headers["user-agent"],
+                    "X-Request-Id": uuidv4(),
+                    "bx-ua": streamData.headers["bx-ua"],
+                    "bx-umidtoken": streamData.headers["bx-umidtoken"],
+                    "bx-v": streamData.headers["bx-v"],
+                  },
+                  body: JSON.stringify({
+                    chat_id: uiSessionId,
+                    response_id: targetResponseId,
+                  }),
+                },
+              ).catch((err) => {
+                console.error(`[Chat] Error calling Qwen stop: ${err.message}`);
+              });
+            } else {
+              console.log(
+                `[Chat] No targetResponseId yet for ${completionId}, skipping Qwen stop`,
+              );
+            }
+          }
+
+          // Abort the local stream (catch AbortError gracefully)
+          try {
+            streamData?.abortController.abort();
+          } catch (abortErr: any) {
+            // Ignore AbortError - this is expected when aborting
+            if (abortErr.name !== "AbortError") {
+              console.error(
+                `[Chat] Error aborting stream: ${abortErr.message}`,
+              );
+            }
+          }
+        } catch (err: any) {
+          console.error(
+            `[Chat] Error during disconnect cleanup: ${err.message}`,
+          );
+        }
+
+        // Clean up
+        clearInterval(heartbeatInterval);
+        removeStream(completionId);
+        releaseChatLock?.();
+      };
+
+      // Listen for client disconnect via the request's close event
+      c.req.raw.signal.addEventListener("abort", abortHandler);
+
       try {
         // Send heartbeat to prevent Cloudflare 524 timeout
         await streamWriter.write(": heartbeat\n\n");
@@ -637,7 +874,9 @@ export async function chatCompletions(c: Context) {
         // Set up a periodic heartbeat to keep the connection alive during long thinking phases
         heartbeatInterval = setInterval(async () => {
           try {
-            await streamWriter.write(": keep-alive\n\n");
+            if (!clientDisconnected) {
+              await streamWriter.write(": keep-alive\n\n");
+            }
           } catch (e) {
             clearInterval(heartbeatInterval);
           }
@@ -681,6 +920,16 @@ export async function chatCompletions(c: Context) {
         let promptTokens = Math.ceil(finalPrompt.length / 3.5);
 
         while (true) {
+          // Check if client disconnected
+          if (clientDisconnected) {
+            if (isToolcallDebugEnabled()) {
+              logger.debug(
+                "[chat] stream: breaking loop - client disconnected",
+              );
+            }
+            break;
+          }
+
           const { done, value } = await reader.read();
           if (done) break;
 
@@ -694,7 +943,9 @@ export async function chatCompletions(c: Context) {
 
             const dataStr = trimmed.slice(6);
             if (dataStr === "[DONE]") {
-              await streamWriter.write("data: [DONE]\n\n");
+              if (!clientDisconnected) {
+                await streamWriter.write("data: [DONE]\n\n");
+              }
               continue;
             }
 
@@ -708,6 +959,13 @@ export async function chatCompletions(c: Context) {
               ) {
                 if (!targetResponseId) {
                   targetResponseId = chunk["response.created"].response_id;
+                  // Update stream registry with target response ID
+                  if (targetResponseId) {
+                    updateStreamTargetResponseId(
+                      completionId,
+                      targetResponseId,
+                    );
+                  }
                 }
                 updateSessionParent(
                   uiSessionId,
@@ -715,6 +973,10 @@ export async function chatCompletions(c: Context) {
                 );
               } else if (chunk.response_id && !targetResponseId) {
                 targetResponseId = chunk.response_id;
+                // Update stream registry with target response ID
+                if (targetResponseId) {
+                  updateStreamTargetResponseId(completionId, targetResponseId);
+                }
                 updateSessionParent(uiSessionId, chunk.response_id);
               }
 
@@ -784,6 +1046,18 @@ export async function chatCompletions(c: Context) {
                 } else {
                   const { text, toolCalls } = toolParser.feed(vStr);
 
+                  if (
+                    isToolcallDebugEnabled() &&
+                    (text || toolCalls.length > 0)
+                  ) {
+                    logger.debug("[chat] stream: parser feed result", {
+                      textLength: text.length,
+                      textPreview: text.substring(0, 100),
+                      toolCallsCount: toolCalls.length,
+                      toolCallNames: toolCalls.map((tc) => tc.name),
+                    });
+                  }
+
                   if (text) {
                     await writeEvent({
                       id: completionId,
@@ -795,6 +1069,18 @@ export async function chatCompletions(c: Context) {
                   }
 
                   for (const tc of toolCalls) {
+                    if (isToolcallDebugEnabled()) {
+                      logger.debug("[chat] stream: emitting tool_call chunk", {
+                        id: tc.id,
+                        name: tc.name,
+                        argsKeys: Object.keys(tc.arguments),
+                        index:
+                          toolParser.getEmittedToolCallCount() -
+                          toolCalls.length +
+                          toolCalls.indexOf(tc),
+                      });
+                    }
+
                     await writeEvent({
                       id: completionId,
                       object: "chat.completion.chunk",
@@ -851,6 +1137,16 @@ export async function chatCompletions(c: Context) {
         // Flush tool parser
         const { text: remainingText, toolCalls: remainingToolCalls } =
           toolParser.flush();
+
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] stream: parser flush result", {
+            remainingTextLength: remainingText?.length || 0,
+            remainingToolCallsCount: remainingToolCalls.length,
+            remainingToolCallNames: remainingToolCalls.map((tc) => tc.name),
+            totalEmittedToolCalls: toolParser.getEmittedToolCallCount(),
+          });
+        }
+
         if (remainingText) {
           await writeEvent({
             id: completionId,
@@ -861,6 +1157,18 @@ export async function chatCompletions(c: Context) {
           });
         }
         for (const tc of remainingToolCalls) {
+          if (isToolcallDebugEnabled()) {
+            logger.debug("[chat] stream: emitting flushed tool_call chunk", {
+              id: tc.id,
+              name: tc.name,
+              argsKeys: Object.keys(tc.arguments),
+              index:
+                toolParser.getEmittedToolCallCount() -
+                remainingToolCalls.length +
+                remainingToolCalls.indexOf(tc),
+            });
+          }
+
           await writeEvent({
             id: completionId,
             object: "chat.completion.chunk",
@@ -898,6 +1206,15 @@ export async function chatCompletions(c: Context) {
         const finalFinishReason =
           toolParser.getEmittedToolCallCount() > 0 ? "tool_calls" : "stop";
 
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] stream: sending finish reason", {
+            finishReason: finalFinishReason,
+            totalEmittedToolCalls: toolParser.getEmittedToolCallCount(),
+            usage,
+            includeUsage: body.stream_options?.include_usage,
+          });
+        }
+
         await writeEvent({
           id: completionId,
           object: "chat.completion.chunk",
@@ -908,6 +1225,9 @@ export async function chatCompletions(c: Context) {
         });
 
         if (body.stream_options?.include_usage) {
+          if (isToolcallDebugEnabled()) {
+            logger.debug("[chat] stream: sending usage event", { usage });
+          }
           await writeEvent({
             id: completionId,
             object: "chat.completion.chunk",
@@ -917,11 +1237,48 @@ export async function chatCompletions(c: Context) {
             usage,
           });
         }
-        await streamWriter.write("data: [DONE]\n\n");
+
+        // Only send [DONE] if client is still connected
+        if (!clientDisconnected) {
+          if (isToolcallDebugEnabled()) {
+            logger.debug("[chat] stream: sending [DONE]");
+          }
+          await streamWriter.write("data: [DONE]\n\n");
+
+          if (isToolcallDebugEnabled()) {
+            logger.debug("[chat] stream: completed successfully", {
+              completionId,
+              totalEmittedToolCalls: toolParser.getEmittedToolCallCount(),
+              finishReason: finalFinishReason,
+            });
+          }
+        } else {
+          if (isToolcallDebugEnabled()) {
+            logger.debug(
+              "[chat] stream: skipped [DONE] - client already disconnected",
+            );
+          }
+        }
       } finally {
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] stream: cleanup started", {
+            completionId,
+            clientDisconnected,
+          });
+        }
+
+        // Remove the abort listener
+        c.req.raw.signal.removeEventListener("abort", abortHandler);
+
         clearInterval(heartbeatInterval);
         removeStream(completionId);
         releaseChatLock?.();
+
+        if (isToolcallDebugEnabled()) {
+          logger.debug("[chat] stream: cleanup completed", {
+            completionId,
+          });
+        }
       }
     });
   } catch (err: any) {

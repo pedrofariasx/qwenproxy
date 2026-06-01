@@ -10,8 +10,13 @@ import type {
   ToolContext,
   ToolHandler,
   ToolRegistration,
-} from './types';
-import { validateAgainstSchema, SchemaValidationError } from './schema';
+} from "./types";
+import { validateAgainstSchema, SchemaValidationError } from "./schema";
+import {
+  logger,
+  isToolcallDebugEnabled,
+  isToolcallErrorDebugEnabled,
+} from "../core/logger.js";
 
 /**
  * Central tool registry. Tools are registered at startup and looked up by name
@@ -34,7 +39,7 @@ export class ToolRegistry {
     description: string,
     parameters: JsonSchema,
     handler: ToolHandler<TArgs, TResult>,
-    strict = true
+    strict = true,
   ): void {
     if (this.tools.has(name)) {
       throw new Error(`Tool '${name}' is already registered`);
@@ -52,13 +57,32 @@ export class ToolRegistry {
       strict,
       handler: handler as ToolHandler,
     });
+
+    if (isToolcallDebugEnabled()) {
+      logger.debug("[registry] tool registered", {
+        name,
+        description: description.substring(0, 100),
+        strict,
+        hasProperties: !!parameters.properties,
+        requiredParams: parameters.required || [],
+        totalTools: this.tools.size,
+      });
+    }
   }
 
   /**
    * Unregister a tool by name. Useful for testing.
    */
   unregister(name: string): boolean {
-    return this.tools.delete(name);
+    const result = this.tools.delete(name);
+    if (isToolcallDebugEnabled()) {
+      logger.debug("[registry] tool unregistered", {
+        name,
+        success: result,
+        remainingTools: this.tools.size,
+      });
+    }
+    return result;
   }
 
   /**
@@ -90,7 +114,7 @@ export class ToolRegistry {
     const defs: FunctionToolDefinition[] = [];
     for (const tool of this.tools.values()) {
       defs.push({
-        type: 'function',
+        type: "function",
         function: {
           name: tool.name,
           description: tool.description,
@@ -99,6 +123,14 @@ export class ToolRegistry {
         },
       });
     }
+
+    if (isToolcallDebugEnabled()) {
+      logger.debug("[registry] toOpenAITools: exported", {
+        count: defs.length,
+        names: defs.map((d) => d.function.name),
+      });
+    }
+
     return defs;
   }
 
@@ -112,24 +144,73 @@ export class ToolRegistry {
   async execute(
     toolName: string,
     rawArgs: Record<string, unknown>,
-    context: ToolContext
+    context: ToolContext,
   ): Promise<string> {
     const registration = this.tools.get(toolName);
     if (!registration) {
+      if (isToolcallDebugEnabled()) {
+        logger.debug("[registry] execute: tool not found", {
+          toolName,
+          availableTools: Array.from(this.tools.keys()),
+        });
+      }
       throw new Error(`Unknown tool: '${toolName}'`);
     }
 
-    // Strict validation
-    const validatedArgs = validateAgainstSchema(
-      rawArgs,
-      registration.parameters,
-      `$.${toolName}`
-    ) as Record<string, unknown>;
+    if (isToolcallDebugEnabled()) {
+      logger.debug("[registry] execute: validating args", {
+        toolName,
+        rawArgs,
+        schemaProperties: Object.keys(registration.parameters.properties || {}),
+        requiredParams: registration.parameters.required || [],
+      });
+    }
 
+    // Strict validation
+    let validatedArgs: Record<string, unknown>;
+    try {
+      validatedArgs = validateAgainstSchema(
+        rawArgs,
+        registration.parameters,
+        `$.${toolName}`,
+      ) as Record<string, unknown>;
+
+      if (isToolcallDebugEnabled()) {
+        logger.debug("[registry] execute: validation passed", {
+          toolName,
+          validatedArgs,
+        });
+      }
+    } catch (err) {
+      if (isToolcallErrorDebugEnabled()) {
+        logger.debug("[registry] execute: validation failed", {
+          toolName,
+          rawArgs,
+          error: err instanceof Error ? err.message : String(err),
+          path: err instanceof SchemaValidationError ? err.path : undefined,
+        });
+      }
+      throw err;
+    }
+
+    const startTime = Date.now();
     const result = await registration.handler(validatedArgs, context);
+    const duration = Date.now() - startTime;
+
+    if (isToolcallDebugEnabled()) {
+      logger.debug("[registry] execute: handler completed", {
+        toolName,
+        duration,
+        resultType: typeof result,
+        resultPreview:
+          typeof result === "string"
+            ? result.substring(0, 200)
+            : JSON.stringify(result).substring(0, 200),
+      });
+    }
 
     // Serialize result
-    if (typeof result === 'string') {
+    if (typeof result === "string") {
       return result;
     }
     return JSON.stringify(result, null, 2);

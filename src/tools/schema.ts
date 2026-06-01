@@ -4,7 +4,10 @@
  * Strict JSON Schema validator for tool calling
  */
 
-import type { JsonSchema } from './types';
+import type { JsonSchema } from "./types";
+import { logger } from "../core/logger.js";
+
+const isDebug = process.env.TOOLCALL_DEBUG === "1";
 
 /**
  * Error thrown when schema validation fails.
@@ -15,7 +18,7 @@ export class SchemaValidationError extends Error {
 
   constructor(message: string, path: string, value?: unknown) {
     super(message);
-    this.name = 'SchemaValidationError';
+    this.name = "SchemaValidationError";
     this.path = path;
     this.value = value;
   }
@@ -29,7 +32,7 @@ export class SchemaValidationError extends Error {
 export function validateAgainstSchema(
   value: unknown,
   schema: JsonSchema,
-  path: string = '$'
+  path: string = "$",
 ): unknown {
   // Handle nullable schemas
   if (schema.nullable && (value === null || value === undefined)) {
@@ -37,23 +40,23 @@ export function validateAgainstSchema(
   }
 
   switch (schema.type) {
-    case 'object':
+    case "object":
       return validateObject(value, schema, path);
-    case 'array':
+    case "array":
       return validateArray(value, schema, path);
-    case 'string':
+    case "string":
       return validateString(value, schema, path);
-    case 'number':
-    case 'integer':
+    case "number":
+    case "integer":
       return validateNumber(value, schema, path);
-    case 'boolean':
+    case "boolean":
       return validateBoolean(value, schema, path);
-    case 'null':
+    case "null":
       if (value !== null) {
         throw new SchemaValidationError(
           `Expected null at ${path}, got ${typeof value}`,
           path,
-          value
+          value,
         );
       }
       return null;
@@ -65,20 +68,20 @@ export function validateAgainstSchema(
 function validateObject(
   value: unknown,
   schema: JsonSchema,
-  path: string
+  path: string,
 ): Record<string, unknown> {
   if (value === null || value === undefined) {
     throw new SchemaValidationError(
-      `Expected object at ${path}, got ${value === null ? 'null' : 'undefined'}`,
+      `Expected object at ${path}, got ${value === null ? "null" : "undefined"}`,
       path,
-      value
+      value,
     );
   }
-  if (typeof value !== 'object' || Array.isArray(value)) {
+  if (typeof value !== "object" || Array.isArray(value)) {
     throw new SchemaValidationError(
       `Expected object at ${path}, got ${typeof value}`,
       path,
-      value
+      value,
     );
   }
 
@@ -92,7 +95,7 @@ function validateObject(
         throw new SchemaValidationError(
           `Missing required property '${req}' at ${path}`,
           `${path}.${req}`,
-          undefined
+          undefined,
         );
       }
     }
@@ -111,13 +114,16 @@ function validateObject(
       throw new SchemaValidationError(
         `Unexpected property '${key}' at ${path} (additionalProperties is false)`,
         `${path}.${key}`,
-        val
+        val,
       );
-    } else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+    } else if (
+      schema.additionalProperties &&
+      typeof schema.additionalProperties === "object"
+    ) {
       validated[key] = validateAgainstSchema(
         val,
         schema.additionalProperties as JsonSchema,
-        `${path}.${key}`
+        `${path}.${key}`,
       );
     } else {
       validated[key] = val;
@@ -137,13 +143,13 @@ function validateObject(
 function validateArray(
   value: unknown,
   schema: JsonSchema,
-  path: string
+  path: string,
 ): unknown[] {
   if (!Array.isArray(value)) {
     throw new SchemaValidationError(
       `Expected array at ${path}, got ${typeof value}`,
       path,
-      value
+      value,
     );
   }
 
@@ -151,7 +157,7 @@ function validateArray(
     throw new SchemaValidationError(
       `Array at ${path} has ${value.length} items, minimum is ${schema.minItems}`,
       path,
-      value
+      value,
     );
   }
 
@@ -159,13 +165,13 @@ function validateArray(
     throw new SchemaValidationError(
       `Array at ${path} has ${value.length} items, maximum is ${schema.maxItems}`,
       path,
-      value
+      value,
     );
   }
 
   if (schema.items) {
     return value.map((item, i) =>
-      validateAgainstSchema(item, schema.items!, `${path}[${i}]`)
+      validateAgainstSchema(item, schema.items!, `${path}[${i}]`),
     );
   }
 
@@ -175,14 +181,14 @@ function validateArray(
 function validateString(
   value: unknown,
   schema: JsonSchema,
-  path: string
+  path: string,
 ): string {
-  if (typeof value !== 'string') {
+  if (typeof value !== "string") {
     // Strict: no coercion from numbers/booleans
     throw new SchemaValidationError(
       `Expected string at ${path}, got ${typeof value}`,
       path,
-      value
+      value,
     );
   }
 
@@ -190,7 +196,7 @@ function validateString(
     throw new SchemaValidationError(
       `String at ${path} is ${value.length} chars, minimum is ${schema.minLength}`,
       path,
-      value
+      value,
     );
   }
 
@@ -198,7 +204,7 @@ function validateString(
     throw new SchemaValidationError(
       `String at ${path} is ${value.length} chars, maximum is ${schema.maxLength}`,
       path,
-      value
+      value,
     );
   }
 
@@ -206,15 +212,15 @@ function validateString(
     throw new SchemaValidationError(
       `String at ${path} does not match pattern '${schema.pattern}'`,
       path,
-      value
+      value,
     );
   }
 
   if (schema.enum && !schema.enum.includes(value)) {
     throw new SchemaValidationError(
-      `Value '${value}' at ${path} is not one of [${schema.enum.map(e => `'${e}'`).join(', ')}]`,
+      `Value '${value}' at ${path} is not one of [${schema.enum.map((e) => `'${e}'`).join(", ")}]`,
       path,
-      value
+      value,
     );
   }
 
@@ -224,21 +230,21 @@ function validateString(
 function validateNumber(
   value: unknown,
   schema: JsonSchema,
-  path: string
+  path: string,
 ): number {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
     throw new SchemaValidationError(
       `Expected number at ${path}, got ${typeof value}`,
       path,
-      value
+      value,
     );
   }
 
-  if (schema.type === 'integer' && !Number.isInteger(value)) {
+  if (schema.type === "integer" && !Number.isInteger(value)) {
     throw new SchemaValidationError(
       `Expected integer at ${path}, got float ${value}`,
       path,
-      value
+      value,
     );
   }
 
@@ -246,7 +252,7 @@ function validateNumber(
     throw new SchemaValidationError(
       `Number ${value} at ${path} is below minimum ${schema.minimum}`,
       path,
-      value
+      value,
     );
   }
 
@@ -254,15 +260,15 @@ function validateNumber(
     throw new SchemaValidationError(
       `Number ${value} at ${path} is above maximum ${schema.maximum}`,
       path,
-      value
+      value,
     );
   }
 
   if (schema.enum && !schema.enum.includes(value)) {
     throw new SchemaValidationError(
-      `Value ${value} at ${path} is not one of [${schema.enum.join(', ')}]`,
+      `Value ${value} at ${path} is not one of [${schema.enum.join(", ")}]`,
       path,
-      value
+      value,
     );
   }
 
@@ -272,13 +278,13 @@ function validateNumber(
 function validateBoolean(
   value: unknown,
   schema: JsonSchema,
-  path: string
+  path: string,
 ): boolean {
-  if (typeof value !== 'boolean') {
+  if (typeof value !== "boolean") {
     throw new SchemaValidationError(
       `Expected boolean at ${path}, got ${typeof value}`,
       path,
-      value
+      value,
     );
   }
   return value;

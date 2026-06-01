@@ -72,6 +72,26 @@ export function updateSessionParent(
   }
 }
 
+export function clearSessionState(sessionId: string): void {
+  if (sessionId) {
+    sessionStates.delete(sessionId);
+    console.log(`[Qwen] Session state cleared for ${sessionId}`);
+  }
+}
+
+export function clearAllSessionsForAccount(accountId: string): void {
+  // Clear all sessions that might be associated with this account
+  // Since we don't store accountId in session, clear all stale sessions
+  const now = Date.now();
+  for (const [key, entry] of sessionStates.entries()) {
+    if (now - entry.timestamp > 60000) {
+      // Clear sessions older than 1 minute
+      sessionStates.delete(key);
+    }
+  }
+  console.log(`[Qwen] Cleared stale sessions for account ${accountId}`);
+}
+
 function getSessionParent(sessionId: string): string | null | undefined {
   const entry = sessionStates.get(sessionId);
   if (!entry) return undefined;
