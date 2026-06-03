@@ -1,5 +1,5 @@
 {
-  "name": "qwenproxy",
+  "name": "@pedrofariasx/qwenproxy",
   "version": "1.1.0",
   "description": "Local OpenAI-compatible proxy API that routes requests to Qwen (chat.qwen.ai) via Playwright browser automation.",
   "main": "index.js",
@@ -42,7 +42,12 @@
     "semantic-release": "^25.0.3",
     "typescript": "^6.0.3"
   },
-  "bin": "./bin/qwenproxy.mjs",
+  "bin": {
+    "qwenproxy": "./bin/qwenproxy.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "src/**/*",
     "bin/**/*"
