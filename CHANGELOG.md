@@ -1,3 +1,10 @@
+## [1.5.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.5.0...v1.5.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* prevent guest mode timeout when bx-ua is missing in intercepted request ([b859ae7](https://github.com/pedrofariasx/qwenproxy/commit/b859ae779ed79116bc333ef507ed96fdb44e0f2a))
+
 # [1.5.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.4.0...v1.5.0) (2026-06-10)
 
 
