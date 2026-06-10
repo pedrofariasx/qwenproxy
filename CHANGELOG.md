@@ -1,3 +1,21 @@
+# [1.4.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.3.3...v1.4.0) (2026-06-10)
+
+
+### Bug Fixes
+
+* auto-recover missing headers and validate sessions on account init ([54c9f11](https://github.com/pedrofariasx/qwenproxy/commit/54c9f112e0470297ba0c69a611f75a3fd2e05e62))
+* revert request gzip compression, allow optional model IDs in registry, and persist cooldowns ([e756781](https://github.com/pedrofariasx/qwenproxy/commit/e75678172d429e68043dd3db96ffafd9d5a47875))
+
+
+### Features
+
+* improve account cooldown logic and warm pool rate-limit handling ([f9d4b9d](https://github.com/pedrofariasx/qwenproxy/commit/f9d4b9d6e6a0576afd5f648fb21db93bc5137b73))
+
+
+### Performance Improvements
+
+* optimize for large contexts with gzip compression and accurate token estimation ([16b57e3](https://github.com/pedrofariasx/qwenproxy/commit/16b57e3f62c0d8a1ec0eaa39da9d38f6d7077c2a))
+
 ## [1.3.3](https://github.com/pedrofariasx/qwenproxy/compare/v1.3.2...v1.3.3) (2026-06-10)
 
 
