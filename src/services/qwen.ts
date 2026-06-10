@@ -16,9 +16,7 @@ function getClientHintsHeaders(): Record<string, string> {
   };
 }
 
-function getRandomDelay(): number {
-  return 30 + Math.floor(Math.random() * 80);
-}
+
 
 export class RetryableQwenStreamError extends Error {
   readonly retryAfterMs: number;
@@ -85,7 +83,7 @@ const warmPool: Map<string, WarmPoolEntry[]> = new Map();
 
 const refillPromises: Map<string, Promise<void>> = new Map();
 
-const WARM_POOL_SIZE = 5;
+const WARM_POOL_SIZE = 10;
 const WARM_POOL_TTL_MS = 10 * 60 * 1000;
 
 function cleanupStalePool(accountId: string) {
@@ -187,7 +185,7 @@ export async function getWarmedChat(accountId?: string) {
   }
   if (pool.length === 0) {
     // Retry once with short backoff if pool is still empty after first refill attempt
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 200));
     if (!refillPromises.has(key)) {
       refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
     }
@@ -489,7 +487,6 @@ export async function createQwenStream(
   const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  await sleep(getRandomDelay());
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -517,14 +514,13 @@ export async function createQwenStream(
   clearTimeout(timeoutId);
 
   const responseContentType = response.headers.get('content-type') || '';
-  if (response.ok && responseContentType.includes('application/json') && response.body) {
-    const cloned = response.clone();
-    const peekText = await cloned.text().catch(() => '');
+  if (response.ok && !responseContentType.includes('text/event-stream') && response.body) {
+    const peekText = await response.clone().text().catch(() => '');
     if (peekText.includes('FAIL_SYS_USER_VALIDATE') || peekText.includes('_____tmd_____') || peekText.includes('RGV587_ERROR')) {
       console.warn('[Qwen] TMD challenge detected, refreshing headers and retrying...');
       try {
         const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
-        await sleep(1000 + Math.floor(Math.random() * 2000));
+        await sleep(500 + Math.floor(Math.random() * 1000));
         const retryController = new AbortController();
         const retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
         const retryResponse = await fetch(url, {
