@@ -827,9 +827,9 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
 
       await page.focus(inputSelector);
       await page.fill(inputSelector, '');
-      await page.type(inputSelector, 'a', { delay: 100 });
+      await page.type(inputSelector, 'a', { delay: 20 });
       console.log(`[Playwright] Typed char for ${cacheKey}, waiting for UI to update...`);
-      await sleep(2000);
+      await sleep(800);
 
       const selectors = [
         '.message-input-right-button-send .send-button',

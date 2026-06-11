@@ -566,12 +566,12 @@ export async function chatCompletions(c: Context) {
         const createdTimestamp = Math.floor(Date.now() / 1000);
 
         const fastWriteContent = (content: string) => {
-          const escaped = content.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+          const escaped = JSON.stringify(content).slice(1, -1);
           streamWriter.write(`data: {"id":"${completionId}","object":"chat.completion.chunk","created":${createdTimestamp},"model":"${body.model}","choices":[{"index":0,"delta":{"content":"${escaped}"},"logprobs":null,"finish_reason":null}]}\n\n`);
         };
 
         const fastWriteReasoning = (content: string) => {
-          const escaped = content.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+          const escaped = JSON.stringify(content).slice(1, -1);
           streamWriter.write(`data: {"id":"${completionId}","object":"chat.completion.chunk","created":${createdTimestamp},"model":"${body.model}","choices":[{"index":0,"delta":{"reasoning_content":"${escaped}"},"logprobs":null,"finish_reason":null}]}\n\n`);
         };
 

@@ -86,6 +86,7 @@ const refillPromises: Map<string, Promise<void>> = new Map();
 
 const WARM_POOL_SIZE = 10;
 const WARM_POOL_TTL_MS = 10 * 60 * 1000;
+const WARM_POOL_LOW_WATER = 3;
 
 function cleanupStalePool(accountId: string) {
   const pool = warmPool.get(accountId);
@@ -243,6 +244,11 @@ export async function getWarmedChat(accountId?: string) {
   let pool = warmPool.get(key);
   if (!pool) { pool = []; warmPool.set(key, pool); }
   cleanupStalePool(key);
+
+  if (pool.length < WARM_POOL_LOW_WATER && !refillPromises.has(key)) {
+    refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+  }
+
   if (pool.length === 0) {
     if (!refillPromises.has(key)) {
       refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));

@@ -74,9 +74,8 @@ export function listAccounts(): QwenAccount[] {
 }
 
 export function getAccountCredentials(id: string): QwenAccount | undefined {
-  const db = getDatabase()
-  const row = db.prepare('SELECT id, email, password, cooldown_until, cooldown_reason FROM accounts WHERE id = ?').get(id)
-  return row as QwenAccount | undefined
+  const cached = getCachedAccounts()
+  return cached.find(a => a.id === id)
 }
 
 export function updateAccountCooldown(id: string, cooldownUntil: number, reason: string | null): void {
