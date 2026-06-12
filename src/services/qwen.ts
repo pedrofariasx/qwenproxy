@@ -201,6 +201,69 @@ async function createRealQwenChat(header: Record<string, string>, accountId?: st
   return chatId;
 }
 
+async function fetchUnusedChats(headers: Record<string, string>, accountId?: string): Promise<string[]> {
+  const page = getPageForAccount(accountId);
+  const url = 'https://chat.qwen.ai/api/v2/chats/?page=1&exclude_project=true';
+  const reqHeaders: Record<string, string> = {
+    'accept': 'application/json, text/plain, */*',
+    'x-request-id': crypto.randomUUID(),
+    'timezone': CACHED_TIMEZONE,
+    'source': 'web',
+  };
+
+  let body = '';
+  if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+    try {
+      const result = await browserFetch(page, url, {
+        method: 'GET',
+        headers: reqHeaders,
+        timeoutMs: config.timeouts.http,
+      });
+      if (result.status && result.status < 400) {
+        body = result.body;
+      }
+    } catch (err: any) {
+      console.warn('[WarmPool] browserFetch failed for chat list, falling back:', err.message);
+    }
+  }
+
+  if (!body) {
+    const response = await fetch(url, {
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'pt-BR,pt;q=0.9',
+        'cookie': headers['cookie'],
+        'referer': 'https://chat.qwen.ai/',
+        'user-agent': headers['user-agent'],
+        'x-request-id': crypto.randomUUID(),
+        'bx-v': headers['bx-v'],
+        'bx-ua': headers['bx-ua'] || '',
+        'bx-umidtoken': headers['bx-umidtoken'] || '',
+        'timezone': CACHED_TIMEZONE,
+        'source': 'web',
+        ...getClientHintsHeaders(),
+      },
+      signal: AbortSignal.timeout(config.timeouts.http),
+    });
+    if (!response.ok) return [];
+    body = await response.text();
+  }
+
+  try {
+    const json = JSON.parse(body);
+    if (!json.success || !Array.isArray(json.data)) return [];
+    const unused: string[] = [];
+    for (const chat of json.data) {
+      if (chat.title === 'Nova Conversa' && chat.created_at === chat.updated_at) {
+        unused.push(chat.id);
+      }
+    }
+    return unused;
+  } catch {
+    return [];
+  }
+}
+
 async function refillPoolForAccount(accountId: string) {
   let pool = warmPool.get(accountId);
   if (!pool) { pool = []; warmPool.set(accountId, pool); }
@@ -218,7 +281,27 @@ async function refillPoolForAccount(accountId: string) {
   }
 
   const acctId = accountId === 'global' ? undefined : accountId;
-  for (let i = 0; i < need; i++) {
+  const existingIds = new Set(pool.map(e => e.chatId));
+
+  let reused = 0;
+  try {
+    const unusedChats = await fetchUnusedChats(headers, acctId);
+    for (const chatId of unusedChats) {
+      if (reused >= need) break;
+      if (existingIds.has(chatId)) continue;
+      pool.push({ chatId, headers, accountId, timestamp: Date.now() });
+      existingIds.add(chatId);
+      reused++;
+    }
+    if (reused > 0) {
+      console.log(`[WarmPool] Reused ${reused} existing unused chats for ${accountId}`);
+    }
+  } catch (err: any) {
+    console.warn(`[WarmPool] Failed to fetch unused chats for ${accountId}:`, err.message);
+  }
+
+  const stillNeed = Math.max(0, need - reused);
+  for (let i = 0; i < stillNeed; i++) {
     if (i > 0) {
       await sleep(800 + Math.floor(Math.random() * 2200));
     }
