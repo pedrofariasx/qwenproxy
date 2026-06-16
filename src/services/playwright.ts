@@ -8,8 +8,9 @@
  * Modified By: Pedro Farias
  */
 
-import { chromium, firefox, webkit, BrowserContext, Page } from 'playwright';
+import { chromium, firefox, webkit, Browser, BrowserContext, Page } from 'playwright';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import { QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
@@ -32,6 +33,7 @@ function resolveBrowserEngine(browserType: BrowserType): BrowserEngineConfig {
   }
 }
 
+let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 export let activePage: Page | null = null;
 const accountContexts = new Map<string, BrowserContext>();
@@ -66,10 +68,134 @@ const COOKIE_CACHE_TTL = 5 * 60 * 1000;
 const cookieCaches = new Map<string, { cookie: string, timestamp: number }>();
 const REFRESH_THRESHOLD = 0.7;
 
+let guestContext: BrowserContext | null = null;
+let guestPage: Page | null = null;
+let guestHeadersCache: { headers: Record<string, string>, timestamp: number } | null = null;
+
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
 export const CHROME_CLIENT_HINTS = '"Chromium";v="137", "Google Chrome";v="137", "Not/A)Brand";v="99"';
+
+const PROFILES_DIR = path.resolve(config.browser.userDataDir);
+
+function storageStatePath(accountId: string): string {
+  return path.join(PROFILES_DIR, `${accountId}_state.json`);
+}
+
+function loadStorageState(accountId: string): string | undefined {
+  const p = storageStatePath(accountId);
+  if (fs.existsSync(p)) return p;
+  return undefined;
+}
+
+async function saveStorageState(context: BrowserContext, accountId: string): Promise<void> {
+  try {
+    if (!fs.existsSync(PROFILES_DIR)) fs.mkdirSync(PROFILES_DIR, { recursive: true });
+    await context.storageState({ path: storageStatePath(accountId) });
+  } catch (err: any) {
+    console.warn(`[Playwright] Failed to save storageState for ${accountId}: ${err.message}`);
+  }
+}
+
+async function clearPageRuntimeState(page: Page | null): Promise<void> {
+  if (!page || page.isClosed()) return;
+
+  try {
+    await page.context().clearCookies();
+  } catch (err: any) {
+    console.warn(`[Playwright] Failed to clear cookies during profile reset: ${err.message}`);
+  }
+
+  try {
+    await page.context().clearPermissions();
+  } catch (err: any) {
+    console.warn(`[Playwright] Failed to clear permissions during profile reset: ${err.message}`);
+  }
+
+  try {
+    await page.evaluate(() => {
+      try { window.localStorage.clear(); } catch {}
+      try { window.sessionStorage.clear(); } catch {}
+    });
+  } catch (err: any) {
+    console.warn(`[Playwright] Failed to clear page storage during profile reset: ${err.message}`);
+  }
+}
+
+async function resetBrowserProfile(cacheKey: string, accountId?: string): Promise<void> {
+  const profileId = accountId === 'guest' ? '_guest' : (accountId || '_default');
+  const profilePath = path.join(PROFILES_DIR, profileId);
+
+  try {
+    if (accountId === 'guest') {
+      await clearPageRuntimeState(guestPage);
+      if (guestContext) {
+        await guestContext.close();
+        guestContext = null;
+      }
+      guestPage = null;
+    } else if (accountId) {
+      const acctPage = accountPages.get(accountId) ?? null;
+      await clearPageRuntimeState(acctPage);
+      const acctContext = accountContexts.get(accountId);
+      if (acctContext) {
+        await acctContext.close();
+        accountContexts.delete(accountId);
+      }
+      accountPages.delete(accountId);
+    } else {
+      await clearPageRuntimeState(activePage);
+      if (context) {
+        await context.close();
+        context = null;
+      }
+      activePage = null;
+    }
+
+    if (browser?.isConnected()) {
+      await browser.close();
+      browser = null;
+    }
+
+    accountHeaderCaches.delete(cacheKey);
+    cookieCaches.delete(cacheKey);
+    cachedUserAgents.delete(cacheKey);
+    accountContexts.clear();
+    accountPages.clear();
+    context = null;
+    activePage = null;
+    guestContext = null;
+    guestPage = null;
+    guestHeadersCache = null;
+    fs.rmSync(profilePath, { recursive: true, force: true });
+    fs.rmSync(storageStatePath(profileId), { force: true });
+
+    console.warn(`[Playwright] Cleared browser profile for ${cacheKey}: ${profilePath}`);
+  } catch (err: any) {
+    console.warn(`[Playwright] Failed to clear browser profile for ${cacheKey}: ${err.message}`);
+  }
+}
+
+async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'): Promise<Browser> {
+  if (browser?.isConnected()) return browser;
+  const { engine, channel } = resolveBrowserEngine(browserType);
+  console.log(`[Playwright] Launching shared ${browserType} browser...`);
+  browser = await engine.launch({
+    headless: config.browser.headless,
+    channel,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-infobars',
+      '--no-first-run',
+      '--no-default-browser-check',
+    ],
+  });
+  browser.on('disconnected', () => { browser = null; });
+  return browser;
+}
 
 function getStealthScript(): string {
   return `
@@ -344,23 +470,14 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
     return;
   }
 
-  const profilePath = path.resolve('qwen_profiles', '_default');
-  const { engine, channel } = resolveBrowserEngine(browserType);
+  const sharedBrowser = await getOrLaunchBrowser(browserType);
+  console.log(`[Playwright] Creating default context on shared browser...`);
 
-  console.log(`[Playwright] Launching ${browserType}...`);
-
-  context = await engine.launchPersistentContext(profilePath, {
-    headless,
-    channel,
+  const storageState = loadStorageState('_default');
+  context = await sharedBrowser.newContext({
     userAgent: CHROME_UA,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-infobars',
-      '--no-first-run',
-      '--no-default-browser-check',
-    ]
+    ignoreHTTPSErrors: true,
+    ...(storageState ? { storageState } : {}),
   });
 
   await context.addInitScript(getStealthScript());
@@ -377,14 +494,27 @@ export async function initPlaywright(headless = true, browserType: BrowserType =
   if (!hasValidSession) {
     await attemptAutoLogin();
   }
+
+  if (await hasValidAuthCookie(activePage)) {
+    await saveStorageState(context, '_default');
+  }
+}
+
+async function hasValidAuthCookie(page: Page | null): Promise<boolean> {
+  if (!page) return false;
+  try {
+    const cookies = await page.context().cookies();
+    return cookies.some(c => c.name.toLowerCase().includes('token') || c.name.toLowerCase().includes('session'));
+  } catch {
+    return false;
+  }
 }
 
 async function checkValidSession(): Promise<boolean> {
   if (!activePage) return false;
   try {
-    const cookies = await activePage.context().cookies();
-    const hasAuthCookie = cookies.some(c => c.name.toLowerCase().includes('token') || c.name.toLowerCase().includes('session'));
-    if (!hasAuthCookie) return false;
+    const hasAuth = await hasValidAuthCookie(activePage);
+    if (!hasAuth) return false;
     await activePage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
     const isLogged = !activePage.url().includes('auth') && !activePage.url().includes('login');
     return isLogged;
@@ -422,12 +552,27 @@ export async function closePlaywright() {
     cache.refreshInProgress = false;
   }
   if (context) {
+    if (await hasValidAuthCookie(activePage)) {
+      await saveStorageState(context, '_default');
+    }
     await context.close();
     context = null;
     activePage = null;
   }
+  if (guestContext) {
+    if (await hasValidAuthCookie(guestPage)) {
+      await saveStorageState(guestContext, '_guest');
+    }
+    await guestContext.close();
+    guestContext = null;
+    guestPage = null;
+  }
   for (const acctId of accountContexts.keys()) {
     await closePlaywrightForAccount(acctId);
+  }
+  if (browser?.isConnected()) {
+    await browser.close().catch(() => {});
+    browser = null;
   }
 }
 
@@ -479,9 +624,6 @@ async function loginToQwenUI(email: string, password: string): Promise<boolean> 
   return false;
 }
 
-let guestContext: BrowserContext | null = null;
-let guestPage: Page | null = null;
-let guestHeadersCache: { headers: Record<string, string>, timestamp: number } | null = null;
 const GUEST_HEADERS_TTL = 30 * 60 * 1000;
 
 export async function getGuestHeaders(): Promise<Record<string, string>> {
@@ -490,14 +632,12 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
   }
 
   if (!guestPage) {
-    const profilePath = path.resolve('qwen_profiles', '_guest');
-    const { engine, channel } = resolveBrowserEngine('chromium');
-    guestContext = await engine.launchPersistentContext(profilePath, {
-      headless: config.browser.headless,
-      channel,
+    const sharedBrowser = await getOrLaunchBrowser('chromium');
+    const storageState = loadStorageState('_guest');
+    guestContext = await sharedBrowser.newContext({
       userAgent: CHROME_UA,
-      ignoreDefaultArgs: ['--enable-automation'],
-      args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-first-run', '--no-default-browser-check']
+      ignoreHTTPSErrors: true,
+      ...(storageState ? { storageState } : {}),
     });
     await guestContext.addInitScript(getStealthScript());
     guestPage = await guestContext.newPage();
@@ -517,7 +657,11 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
   }
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Timeout getting guest headers')), config.timeouts.headers);
+    const timeout = setTimeout(() => {
+      resetBrowserProfile('guest', 'guest')
+        .catch((err: any) => console.warn(`[Playwright] Failed to reset guest profile after timeout: ${err.message}`))
+        .finally(() => reject(new Error('Timeout getting guest headers')));
+    }, config.timeouts.headers);
     
     const routeHandler = async (route: any, request: any) => {
       clearTimeout(timeout);
@@ -669,6 +813,23 @@ async function tryLightweightCookieRefresh(accountId?: string): Promise<{ header
 }
 
 async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
+  try {
+    return await _getQwenHeadersInternalOnce(forceNew, accountId);
+  } catch (err: any) {
+    const cacheKey = accountId || 'global';
+    if (!forceNew && err?.message?.includes('Timeout waiting for Qwen headers for')) {
+      console.warn(`[Playwright] Header capture timed out for ${cacheKey}; clearing browser profile and retrying once...`);
+      await resetBrowserProfile(cacheKey, accountId);
+      if (!accountId) {
+        await initPlaywright(config.browser.headless, config.browser.type);
+      }
+      return await _getQwenHeadersInternalOnce(true, accountId);
+    }
+    throw err;
+  }
+}
+
+async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
   const cacheKey = accountId || 'global';
   const cache = getAccountHeaderCache(cacheKey);
 
@@ -760,7 +921,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
     const timeout = setTimeout(async () => {
       console.error(`[Playwright] Timeout waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
       try {
-        const screenshotPath = path.resolve(`qwen_profiles/error_${cacheKey}.png`);
+        const screenshotPath = path.join(PROFILES_DIR, `error_${cacheKey}.png`);
         await page.screenshot({ path: screenshotPath });
         console.log(`[Playwright] Error screenshot saved to ${screenshotPath}`);
       } catch (err: any) {
@@ -872,23 +1033,15 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
 }
 
 export async function initPlaywrightForAccount(account: QwenAccount, headless = true, browserType: BrowserType = 'chromium') {
-  const profilePath = path.resolve('qwen_profiles', account.id);
-  const { engine, channel } = resolveBrowserEngine(browserType);
+  const sharedBrowser = await getOrLaunchBrowser(browserType);
 
-  console.log(`[Playwright] Launching ${browserType} for account ${account.email}...`);
+  console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
 
-  const acctContext = await engine.launchPersistentContext(profilePath, {
-    headless,
-    channel,
+  const storageState = loadStorageState(account.id);
+  const acctContext = await sharedBrowser.newContext({
     userAgent: CHROME_UA,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-infobars',
-      '--no-first-run',
-      '--no-default-browser-check',
-    ]
+    ignoreHTTPSErrors: true,
+    ...(storageState ? { storageState } : {}),
   });
 
   await acctContext.addInitScript(getStealthScript());
@@ -897,14 +1050,12 @@ export async function initPlaywrightForAccount(account: QwenAccount, headless = 
   accountContexts.set(account.id, acctContext);
   accountPages.set(account.id, acctPage);
 
-  const cookies = await acctContext.cookies();
-  const hasAuthCookie = cookies.some(c => c.name.toLowerCase().includes('token') || c.name.toLowerCase().includes('session'));
+  const hasAuth = await hasValidAuthCookie(acctPage);
 
-  if (!hasAuthCookie && account.email && account.password) {
+  if (!hasAuth && account.email && account.password) {
     await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
   }
 
-  // Navigate to Qwen home to validate session and populate cookies
   try {
     await acctPage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
     const url = acctPage.url();
@@ -922,16 +1073,18 @@ export async function initPlaywrightForAccount(account: QwenAccount, headless = 
   } catch (err: any) {
     console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
   }
+
+  if (await hasValidAuthCookie(acctPage)) {
+    await saveStorageState(acctContext, account.id);
+  }
 }
 
 export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = 'chromium'): Promise<{ context: BrowserContext, page: Page }> {
-  const profilePath = path.resolve('qwen_profiles', accountId);
   const { engine, channel } = resolveBrowserEngine(browserType);
-
-  const acctContext = await engine.launchPersistentContext(profilePath, {
+  
+  const manualBrowser = await engine.launch({
     headless: false,
     channel,
-    userAgent: CHROME_UA,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
       '--disable-blink-features=AutomationControlled',
@@ -939,7 +1092,14 @@ export async function launchManualLoginAccount(accountId: string, browserType: B
       '--disable-infobars',
       '--no-first-run',
       '--no-default-browser-check',
-    ]
+    ],
+  });
+
+  const storageState = loadStorageState(accountId);
+  const acctContext = await manualBrowser.newContext({
+    userAgent: CHROME_UA,
+    ignoreHTTPSErrors: true,
+    ...(storageState ? { storageState } : {}),
   });
 
   await acctContext.addInitScript(getStealthScript());
@@ -970,7 +1130,11 @@ export async function extractAccountInfoFromContext(page: Page): Promise<{ email
 
 export async function closePlaywrightForAccount(accountId: string) {
   const acctContext = accountContexts.get(accountId);
+  const acctPage = accountPages.get(accountId);
   if (acctContext) {
+    if (await hasValidAuthCookie(acctPage || null)) {
+      await saveStorageState(acctContext, accountId);
+    }
     await acctContext.close();
     accountContexts.delete(accountId);
     accountPages.delete(accountId);
