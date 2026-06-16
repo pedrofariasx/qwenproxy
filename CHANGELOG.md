@@ -1,3 +1,10 @@
+## [1.7.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.7.0...v1.7.1) (2026-06-16)
+
+
+### Performance Improvements
+
+* use shared browser instance with isolated contexts to reduce RAM usage ([6b58072](https://github.com/pedrofariasx/qwenproxy/commit/6b580724ba023e9ddeaabdf68a02a3bc68cc144d))
+
 # [1.7.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.6.4...v1.7.0) (2026-06-15)
 
 
