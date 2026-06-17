@@ -1,17 +1,43 @@
 services:
   qwenproxy:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: qwenproxy
     ports:
       - "${PORT:-3000}:3000"
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
-      - ./qwen_profiles:/app/qwen_profiles
+      - qwenproxy_data:/app/data
+      - qwenproxy_profiles:/app/qwen_profiles
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 536870912
     restart: unless-stopped
+    shm_size: '1gb'
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: '2.0'
+        reservations:
+          memory: 1g
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  qwenproxy_data:
+  qwenproxy_profiles:
