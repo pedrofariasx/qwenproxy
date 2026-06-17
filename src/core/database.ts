@@ -47,12 +47,10 @@ function runMigrations(db: Database.Database): void {
 
   try {
     db.exec(`ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER DEFAULT 0;`)
-  } catch (err) {
-  }
+  } catch { /* column may already exist */ }
   try {
     db.exec(`ALTER TABLE accounts ADD COLUMN cooldown_reason TEXT;`)
-  } catch (err) {
-  }
+  } catch { /* column may already exist */ }
 }
 
 function encryptPlaintextPasswords(db: Database.Database): void {

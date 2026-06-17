@@ -60,7 +60,7 @@ function coerceParameterValue(rawValue: string): unknown {
   if (value === 'null') return null;
   if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
   if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
-    try { return JSON.parse(value); } catch {}
+    try { return JSON.parse(value); } catch { /* ignore */ }
   }
   return value;
 }
@@ -471,7 +471,7 @@ export class StreamingToolParser {
         const tc = this.parseToolCall(parsed);
         if (tc) calls.push(tc);
       }
-    } catch {}
+    } catch { /* ignore */ }
     
     // Always try line-by-line parsing for multi-JSON content (independent of single parse)
     if (str.includes('\n')) {
@@ -485,7 +485,7 @@ export class StreamingToolParser {
               calls.push(tc);
             }
           }
-        } catch {}
+        } catch { /* ignore */ }
       }
     }
     

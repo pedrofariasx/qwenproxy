@@ -120,9 +120,8 @@ test('Chat Completions endpoint with qwen3.6-plus (thinking enabled)', async () 
                 }
               }
             }
-          } catch (err) {
+          } catch {
             // Partial JSON ignored
-            // console.error("Parse error:", err);
           }
         }
       }

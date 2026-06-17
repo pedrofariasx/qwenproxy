@@ -85,16 +85,6 @@ export function updateSessionParent(sessionId: string, parentId: string | null) 
   }
 }
 
-function getSessionParent(sessionId: string): string | null | undefined {
-  const entry = sessionStates.get(sessionId);
-  if (!entry) return undefined;
-  if (Date.now() - entry.timestamp > SESSION_TTL_MS) {
-    sessionStates.delete(sessionId);
-    return undefined;
-  }
-  return entry.parentId;
-}
-
 function addIdleTimeoutToStream(
   stream: ReadableStream<Uint8Array>,
   controller: AbortController,
@@ -105,8 +95,6 @@ function addIdleTimeoutToStream(
 ): ReadableStream<Uint8Array> {
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
-
   const clearIdleTimer = () => {
     if (idleTimer) {
       clearTimeout(idleTimer);
@@ -118,12 +106,10 @@ function addIdleTimeoutToStream(
     clearIdleTimer();
     idleTimer = setTimeout(() => {
       const message = `${label} idle timeout after ${idleTimeoutMs}ms without upstream data`;
-      const timeoutError = new Error(message);
       clearIdleTimer();
       controller.abort();
-      streamController?.error(timeoutError);
       onTimeout?.();
-      try { stream.cancel(message).catch(() => {}); } catch {}
+      try { stream.cancel(message).catch(() => {}); } catch { /* ignore */ }
     }, idleTimeoutMs);
   };
 
@@ -413,10 +399,10 @@ export async function createQwenStream(
           body: guestBody,
           signal: AbortSignal.timeout(config.timeouts.http),
         });
-        if (!response.ok) throw new Error(`Failed to create guest chat: ${response.status}`);
+        if (!response.ok) { throw new Error(`Failed to create guest chat: ${response.status}`, { cause: err }); }
         const json = await response.json();
         chatId = json.chat_id || json.id || json.data?.chat_id || json.data?.id;
-        if (!chatId) throw new Error(`Unexpected guest chat response: ${JSON.stringify(json).slice(0, 200)}`);
+        if (!chatId) { throw new Error(`Unexpected guest chat response: ${JSON.stringify(json).slice(0, 200)}`, { cause: err }); }
       }
     } else {
       const response = await fetch('https://chat.qwen.ai/api/v2/chats/new', {
@@ -446,7 +432,7 @@ export async function createQwenStream(
 
   const actualParentId: string | null = null;
 
-  let resolvedFiles = files || [];
+  const resolvedFiles = files || [];
   if (pendingMultimodal && pendingMultimodal.length > 0 && resolvedFiles.length === 0) {
     try {
       const { processImagesForQwen } = await import('../routes/upload.ts');
@@ -475,7 +461,7 @@ export async function createQwenStream(
       }
     } catch (err: any) {
       console.error('[Qwen] Failed to process multimodal uploads:', err.message);
-      throw new Error(`Multimodal upload failed: ${err.message}`);
+      throw new Error(`Multimodal upload failed: ${err.message}`, { cause: err });
     }
   }
 

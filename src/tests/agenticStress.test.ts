@@ -240,7 +240,7 @@ test('Agentic Stress Test: >30 messages multi-turn using the REAL live API', { s
         const decoder = new TextDecoder();
         let content = '';
         let reasoning = '';
-        let toolCalls: any[] = [];
+        const toolCalls: any[] = [];
         let buffer = '';
 
         while (true) {
@@ -279,7 +279,7 @@ test('Agentic Stress Test: >30 messages multi-turn using the REAL live API', { s
                   }
                 }
               }
-            } catch (err) {
+            } catch {
               // ignore partial chunk parsing errors
             }
           }

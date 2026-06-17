@@ -6,7 +6,6 @@ const DATA_DIR = path.resolve('data')
 const KEY_PATH = path.join(DATA_DIR, '.encryption_key')
 const ALGORITHM = 'aes-256-gcm'
 const IV_LENGTH = 16
-const AUTH_TAG_LENGTH = 16
 const KEY_LENGTH = 32
 
 let cachedKey: Buffer | null = null

@@ -103,7 +103,7 @@ export function truncateMessages(
   let droppedToolMemory = '';
   
   const normalizedMessages = messages.map(msg => {
-    let contentStr = '';
+    let contentStr: string;
     if (Array.isArray(msg.content)) {
       contentStr = msg.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
     } else if (typeof msg.content === 'object' && msg.content !== null) {

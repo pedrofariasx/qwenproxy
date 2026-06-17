@@ -1,4 +1,4 @@
-import { Page } from 'playwright';
+import type { Page } from 'playwright';
 import crypto from 'crypto';
 import { config } from '../core/config.js';
 
@@ -43,7 +43,7 @@ export async function browserFetch(
   await ensureStreamBridge(page);
   const reqId = crypto.randomUUID();
 
-  return page.evaluate(async ({ url, options, reqId }: any) => {
+  return page.evaluate(async ({ url, options }: any) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
     try {
@@ -66,7 +66,7 @@ export async function browserFetch(
       };
     } catch (e: any) {
       clearTimeout(timeoutId);
-      throw new Error(`browserFetch failed: ${e.message}`);
+      throw new Error(`browserFetch failed: ${e.message}`, { cause: e });
     }
   }, { url, options, reqId });
 }
@@ -122,7 +122,6 @@ export async function browserStreamFetch(
     onBody: () => {},
   });
 
-  let abortFn = () => {};
   let bodyResolve!: (value: string) => void;
   let bodyReject!: (reason: Error) => void;
   const bodyPromise = new Promise<string>((resolve, reject) => {
@@ -135,16 +134,16 @@ export async function browserStreamFetch(
       const cb = streamCallbacks.get(reqId);
       if (!cb) return;
       cb.onChunk = (chunk: string) => {
-        try { controller.enqueue(enc.encode(chunk)); } catch {}
+        try { controller.enqueue(enc.encode(chunk)); } catch { /* ignore */ }
       };
       cb.onEnd = () => {
-        try { controller.close(); } catch {}
+        try { controller.close(); } catch { /* ignore */ }
         bodyResolve('');
         streamCallbacks.delete(reqId);
         abortControllers.delete(reqId);
       };
       cb.onError = (msg: string) => {
-        try { controller.error(new Error(msg)); } catch {}
+        try { controller.error(new Error(msg)); } catch { /* ignore */ }
         bodyReject(new Error(msg));
         streamCallbacks.delete(reqId);
         abortControllers.delete(reqId);
@@ -219,7 +218,7 @@ export async function browserStreamFetch(
 
   const meta = await metaPromise;
 
-  abortFn = () => {
+  const abortFn = () => {
     page.evaluate((reqId: string) => {
       const c = (window as any).__abortControllers?.[reqId];
       if (c) { c.abort(); delete (window as any).__abortControllers[reqId]; }

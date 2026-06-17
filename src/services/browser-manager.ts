@@ -1,8 +1,9 @@
-import { chromium, firefox, webkit, Browser, BrowserContext, Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
+import { chromium, firefox, webkit } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { QwenAccount } from '../core/accounts.js';
+import type { QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
 import { getStealthScript } from './stealth.js';
 
@@ -119,8 +120,8 @@ export async function clearPageRuntimeState(page: Page | null): Promise<void> {
 
   try {
     await page.evaluate(() => {
-      try { window.localStorage.clear(); } catch {}
-      try { window.sessionStorage.clear(); } catch {}
+      try { window.localStorage.clear(); } catch { /* ignore */ }
+      try { window.sessionStorage.clear(); } catch { /* ignore */ }
     });
   } catch (err: any) {
     console.warn(`[Playwright] Failed to clear page storage during profile reset: ${err.message}`);
@@ -369,7 +370,7 @@ export async function resetBrowserProfile(cacheKey: string, accountId?: string):
   }
 }
 
-export async function initPlaywright(headless = true, browserType: BrowserType = 'chromium') {
+export async function initPlaywright(_headless = true, browserType: BrowserType = 'chromium') {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
   if (context) {
     return;
@@ -435,7 +436,7 @@ export async function closePlaywright() {
   }
 }
 
-export async function initPlaywrightForAccount(account: QwenAccount, headless = true, browserType: BrowserType = 'chromium') {
+export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = 'chromium') {
   const sharedBrowser = await getOrLaunchBrowser(browserType);
 
   console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
@@ -524,8 +525,7 @@ export async function extractAccountInfoFromContext(page: Page): Promise<{ email
         const el = document.querySelector('[data-testid="user-email"], .user-email, [class*="email"]');
         return el?.textContent?.trim() || null;
       });
-    } catch {
-    }
+    } catch { /* ignore */ }
   }
 
   return { email, hasSession };

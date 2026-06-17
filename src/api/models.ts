@@ -107,7 +107,7 @@ app.get('/v1/models/:model', async (c) => {
     }
 
     const cacheKey = `models:${accountId || 'global'}` as any
-    let formattedList = await cache.get<any>(cacheKey)
+    const formattedList = await cache.get<any>(cacheKey)
     let models = formattedList?.data || []
 
     if (models.length === 0) {

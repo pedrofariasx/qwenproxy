@@ -5,18 +5,18 @@ import { getIncrementalDelta } from '../routes/chat.js';
 test('getIncrementalDelta: handles strictly cumulative stream correctly', () => {
   let accumulated = '';
   
-  let chunk1 = 'const x = 1;';
-  let res1 = getIncrementalDelta(accumulated, chunk1);
+  const chunk1 = 'const x = 1;';
+  const res1 = getIncrementalDelta(accumulated, chunk1);
   assert.strictEqual(res1.delta, 'const x = 1;');
   accumulated = res1.matchedContent;
   
-  let chunk2 = 'const x = 1;\nconst y = 2;';
-  let res2 = getIncrementalDelta(accumulated, chunk2);
+  const chunk2 = 'const x = 1;\nconst y = 2;';
+  const res2 = getIncrementalDelta(accumulated, chunk2);
   assert.strictEqual(res2.delta, '\nconst y = 2;');
   accumulated = res2.matchedContent;
 
-  let chunk3 = 'const x = 1;\nconst y = 2;\nconst z = 3;';
-  let res3 = getIncrementalDelta(accumulated, chunk3);
+  const chunk3 = 'const x = 1;\nconst y = 2;\nconst z = 3;';
+  const res3 = getIncrementalDelta(accumulated, chunk3);
   assert.strictEqual(res3.delta, '\nconst z = 3;');
   accumulated = res3.matchedContent;
   
@@ -26,18 +26,18 @@ test('getIncrementalDelta: handles strictly cumulative stream correctly', () => 
 test('getIncrementalDelta: handles strictly incremental stream correctly', () => {
   let accumulated = '';
   
-  let chunk1 = 'const x = 1;';
-  let res1 = getIncrementalDelta(accumulated, chunk1);
+  const chunk1 = 'const x = 1;';
+  const res1 = getIncrementalDelta(accumulated, chunk1);
   assert.strictEqual(res1.delta, 'const x = 1;');
   accumulated = res1.matchedContent;
   
-  let chunk2 = '\nconst y = 2;';
-  let res2 = getIncrementalDelta(accumulated, chunk2);
+  const chunk2 = '\nconst y = 2;';
+  const res2 = getIncrementalDelta(accumulated, chunk2);
   assert.strictEqual(res2.delta, '\nconst y = 2;');
   accumulated = res2.matchedContent;
 
-  let chunk3 = '\nconst z = 3;';
-  let res3 = getIncrementalDelta(accumulated, chunk3);
+  const chunk3 = '\nconst z = 3;';
+  const res3 = getIncrementalDelta(accumulated, chunk3);
   assert.strictEqual(res3.delta, '\nconst z = 3;');
   accumulated = res3.matchedContent;
   
@@ -45,10 +45,10 @@ test('getIncrementalDelta: handles strictly incremental stream correctly', () =>
 });
 
 test('getIncrementalDelta: does not suffer from false-positive repetitive word overlap bugs', () => {
-  let accumulated = 'import { useState } from \'react\';\nimport {';
-  let nextChunk = ' Button } from \'@/components/ui/button\';';
+  const accumulated = 'import { useState } from \'react\';\nimport {';
+  const nextChunk = ' Button } from \'@/components/ui/button\';';
   
-  let res = getIncrementalDelta(accumulated, nextChunk);
+  const res = getIncrementalDelta(accumulated, nextChunk);
   assert.strictEqual(res.delta, ' Button } from \'@/components/ui/button\';');
   assert.strictEqual(res.matchedContent, 'import { useState } from \'react\';\nimport { Button } from \'@/components/ui/button\';');
 });

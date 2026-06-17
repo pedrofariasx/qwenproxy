@@ -4,7 +4,7 @@
  * File upload handler - forwards files to Qwen's OSS storage
  */
 
-import { Context } from "hono";
+import type { Context } from "hono";
 import { getQwenHeaders } from "../services/playwright.js";
 import crypto from "crypto";
 

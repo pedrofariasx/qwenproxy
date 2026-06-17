@@ -65,7 +65,7 @@ test('multiturn-thinking-tools: maintains reasoning_content history', async () =
 });
 
 test('streaming-whitespace: preserves exact whitespace', async () => {
-  const restore = setupFetchMock((url) => {
+  const restore = setupFetchMock((_url) => {
     const stream = new ReadableStream({
       start(c) {
         c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"content": "   ", "phase": "answer"}}]}\n\n'));
@@ -100,7 +100,7 @@ test('streaming-whitespace: preserves exact whitespace', async () => {
             if (data.choices?.[0]?.delta?.content) {
               full += data.choices[0].delta.content;
             }
-          } catch(e) {}
+          } catch { /* ignore */ }
         }
       }
     }
@@ -113,7 +113,7 @@ test('streaming-whitespace: preserves exact whitespace', async () => {
 });
 
 test('caching-streaming and cache-control: returns prompt_tokens_details', async () => {
-  const restore = setupFetchMock((url) => {
+  const restore = setupFetchMock((_url) => {
     const stream = new ReadableStream({
       start(c) {
         c.enqueue(new TextEncoder().encode('data: {"choices": [{"delta": {"content": "done", "phase": "answer"}}], "usage": {"output_tokens": 10}}\n\n'));
@@ -146,7 +146,7 @@ test('caching-streaming and cache-control: returns prompt_tokens_details', async
             if (data.usage) {
               usageBlock = data.usage;
             }
-          } catch(e) {}
+          } catch { /* ignore */ }
         }
       }
     }
@@ -161,7 +161,7 @@ test('caching-streaming and cache-control: returns prompt_tokens_details', async
 });
 
 test('session-parent-tracking: appends messages using response message_id as parent', async () => {
-  let capturedPayloads: any[] = [];
+  const capturedPayloads: any[] = [];
 
   const restore = setupFetchMock((url, init) => {
     const bodyObj = JSON.parse(init?.body as string || '{}');

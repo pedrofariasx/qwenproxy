@@ -1,5 +1,7 @@
-import { addAccount, removeAccount, listAccounts, getAccountCredentials, QwenAccount } from './core/accounts.js'
-import { initPlaywrightForAccount, closePlaywrightForAccount, BrowserType, launchManualLoginAccount, extractAccountInfoFromContext } from './services/playwright.js'
+import type { QwenAccount } from './core/accounts.js';
+import { addAccount, removeAccount, listAccounts, getAccountCredentials } from './core/accounts.js'
+import type { BrowserType} from './services/playwright.js';
+import { initPlaywrightForAccount, closePlaywrightForAccount, launchManualLoginAccount, extractAccountInfoFromContext } from './services/playwright.js'
 import * as readline from 'readline'
 import * as dotenv from 'dotenv'
 

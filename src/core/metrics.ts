@@ -142,7 +142,7 @@ export class Metrics extends EventEmitter {
       output += `# HELP ${metric.name} ${metric.help}\n`
       output += `# TYPE ${metric.name} ${metric.type}\n`
 
-      for (const [key, point] of metric.values) {
+      for (const [, point] of metric.values) {
         const labelsStr = point.labels
           ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')}}`
           : ''

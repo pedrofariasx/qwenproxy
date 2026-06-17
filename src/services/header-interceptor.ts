@@ -8,7 +8,6 @@ import {
   sleep,
   accountContexts,
   accountPages,
-  accountHeaderCaches,
   cachedUserAgents,
   cookieCaches,
   getAccountHeaderCache,
@@ -16,7 +15,6 @@ import {
   getGuestPage,
   getGuestHeadersCache,
   setGuestHeadersCache,
-  getGuestContext,
   setGuestContext,
   setGuestPage,
   getOrLaunchBrowser,
@@ -25,8 +23,6 @@ import {
   resetBrowserProfile,
   initPlaywright,
   initPlaywrightForAccount,
-  getPageForAccount,
-  BrowserType,
 } from './browser-manager.js';
 import { getStealthScript } from './stealth.js';
 
@@ -125,8 +121,7 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
         console.log('[Playwright] Guest: Clicked "Manter sessão terminada"');
         await sleep(1000);
       }
-    } catch (e) {
-    }
+    } catch { /* ignore popup errors */ }
   }
 
   return new Promise((resolve, reject) => {
@@ -272,8 +267,7 @@ async function tryLightweightCookieRefresh(accountId?: string): Promise<{ header
       };
       return cache.cachedQwenHeaders;
     }
-  } catch {
-  }
+  } catch { /* ignore cache read errors */ }
 
   return null;
 }
@@ -335,7 +329,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
   const currentUrl = page.url();
   const isOnQwen = currentUrl.includes('chat.qwen.ai');
-  const isOnSpecificChat = isOnQwen && /\/c\//.test(currentUrl);
+  const _isOnSpecificChat = isOnQwen && /\/c\//.test(currentUrl);
 
   if (!isOnQwen || forceNew) {
     console.log(`[Playwright] Navigating to Qwen home for ${cacheKey}... (Current: ${currentUrl})`);
@@ -415,8 +409,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           if (payload.parent_id !== undefined) {
             uiParentMessageId = payload.parent_id;
           }
-        } catch (e) {
-        }
+        } catch { /* ignore parse errors */ }
       }
 
       const extractedHeaders = {

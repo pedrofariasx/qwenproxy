@@ -76,7 +76,7 @@ export async function startServer(): Promise<void> {
   const { loadAccounts } = await import('../core/accounts.js')
   const accounts = loadAccounts()
 
-  const { initPlaywright, initPlaywrightForAccount, getQwenHeaders } = await import('../services/playwright.js')
+  const { initPlaywright, initPlaywrightForAccount } = await import('../services/playwright.js')
   
   await initPlaywright(config.browser.headless)
   

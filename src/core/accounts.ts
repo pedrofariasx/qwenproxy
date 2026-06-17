@@ -1,7 +1,7 @@
 import crypto from 'crypto'
 import { getDatabase } from './database.js'
 import { config } from './config.js'
-import { encrypt, decrypt, isEncrypted } from './crypto-utils.js'
+import { encrypt, decrypt } from './crypto-utils.js'
 
 export interface QwenAccount {
   id: string

@@ -93,7 +93,7 @@ async function sendMultimodalRequest(
         const delta = chunk.choices?.[0]?.delta;
         if (delta?.content) content += delta.content;
         if (delta?.reasoning_content) reasoning += delta.reasoning_content;
-      } catch {}
+      } catch { /* ignore */ }
     }
   }
 

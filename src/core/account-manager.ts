@@ -1,4 +1,5 @@
-import { QwenAccount, loadAccounts, updateAccountCooldown, invalidateAccountsCache as invalidateAccountsCacheSource } from './accounts.js'
+import type { QwenAccount} from './accounts.js';
+import { loadAccounts, updateAccountCooldown, invalidateAccountsCache as invalidateAccountsCacheSource } from './accounts.js'
 
 let currentIndex = 0
 

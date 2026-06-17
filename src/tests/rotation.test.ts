@@ -82,7 +82,7 @@ test('Account Cooldown: Database persistence and recovery', async () => {
     if (available && available.id === accountId) {
       // If it returned our test account, it must be because all accounts are on cooldown.
       // Let's assert that the cooldown is actually registered in memory.
-      const info = getNextAccount();
+      getNextAccount();
       // It shouldn't be the first option if others are available
     }
 

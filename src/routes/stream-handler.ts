@@ -1,4 +1,4 @@
-import { Context } from 'hono';
+import type { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { StreamingToolParser } from '../tools/parser.js';
 import { QwenStreamParser } from '../utils/qwen-stream-parser.js';
@@ -36,8 +36,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       heartbeatInterval = setInterval(async () => {
         try {
           await streamWriter.write(': keep-alive\n\n');
-        } catch (e) {
-          clearInterval(heartbeatInterval);
+        } catch { clearInterval(heartbeatInterval);
         }
       }, 15000);
 
@@ -74,7 +73,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
 
       const reader = ctx.stream.getReader();
       const decoder = new TextDecoder();
-      let reasoningBuffer = '';
+      let _reasoningBuffer = '';
       let lastFullContent = '';
       let contentLength = 0;
       let contentSuffix = '';
@@ -160,7 +159,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
             if (foundStr && vStr !== '') {
               if (vStr === 'FINISHED') continue;
               if (isThinkingChunk) {
-                reasoningBuffer += vStr;
+                _reasoningBuffer += vStr;
                 fastWriteReasoning(vStr);
               } else {
                 if (ctx.hasTools && toolParser) {
