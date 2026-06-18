@@ -177,7 +177,13 @@ export async function browserStreamFetch(
             headers: respHeaders,
           });
 
-          if (!resp.ok || !resp.body) {
+          // Only stream genuine SSE responses. Anything else (JSON errors and,
+          // crucially, the 200 + application/json anti-bot "TMD/RGV587"
+          // challenge) must be relayed as a full body so the caller can detect
+          // and handle it — otherwise the body is lost into a consumed stream
+          // and challenge detection is silently bypassed.
+          const ctHeader = resp.headers.get('content-type') || '';
+          if (!resp.ok || !resp.body || !ctHeader.includes('text/event-stream')) {
             const bodyText = await resp.text();
             (window as any).__streamRelay(reqId, 'body', bodyText);
             delete (window as any).__abortControllers[reqId];

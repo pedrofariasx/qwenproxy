@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import v8 from 'v8'
 import { config } from './config.js'
 import { metrics } from './metrics.js'
 
@@ -51,7 +52,13 @@ export class Watchdog extends EventEmitter {
 
   private checkRAM(): 'ok' | 'warning' | 'critical' {
     const mem = process.memoryUsage()
-    const usagePercent = (mem.heapUsed / mem.heapTotal) * 100
+    // NOTE: heapUsed/heapTotal is NOT a memory-pressure signal — V8 keeps
+    // heapTotal close to heapUsed, so that ratio is almost always ~90-98% even
+    // when the process is using only a few dozen MB. That made the watchdog
+    // report "critical"/"unhealthy" permanently and loop recovery forever.
+    // Compare heapUsed against the actual heap size limit instead.
+    const heapLimit = v8.getHeapStatistics().heap_size_limit
+    const usagePercent = heapLimit > 0 ? (mem.heapUsed / heapLimit) * 100 : 0
 
     if (usagePercent > config.watchdog.ram.criticalThreshold) return 'critical'
     if (usagePercent > config.watchdog.ram.warningThreshold) return 'warning'
