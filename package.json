@@ -1,6 +1,6 @@
 {
   "name": "@pedrofariasx/qwenproxy",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "Local OpenAI-compatible proxy API that routes requests to Qwen (chat.qwen.ai) via Playwright browser automation.",
   "scripts": {
     "start": "npx tsx src/index.ts",
@@ -17,7 +17,15 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix"
   },
-  "keywords": ["openai", "proxy", "qwen", "playwright", "llm", "api", "chat-completions"],
+  "keywords": [
+    "openai",
+    "proxy",
+    "qwen",
+    "playwright",
+    "llm",
+    "api",
+    "chat-completions"
+  ],
   "author": "Pedro Farias",
   "license": "ISC",
   "dependencies": {
