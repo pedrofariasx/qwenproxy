@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import type { QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
 import { getStealthScript } from './stealth.js';
+import { getFingerprintProfile } from './fingerprint.js';
 
 export type BrowserType = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'edge';
 
@@ -54,9 +55,29 @@ function getBrowserLaunchArgs(): string[] {
   ]));
 }
 
-export function sharedContextOptions(): BrowserContextOptions {
+export function sharedContextOptions(accountId?: string): BrowserContextOptions {
+  if (accountId) {
+    const profile = getFingerprintProfile(accountId);
+    return {
+      userAgent: profile.userAgent,
+      locale: BROWSER_LOCALE,
+      timezoneId: BROWSER_TIMEZONE,
+      viewport: profile.viewport,
+      deviceScaleFactor: 1,
+      isMobile: false,
+      hasTouch: false,
+      colorScheme: 'light',
+      ignoreHTTPSErrors: true,
+      extraHTTPHeaders: {
+        ...config.browser.headers,
+        'sec-ch-ua': profile.secChUa,
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': `"${profile.platform}"`,
+      },
+    };
+  }
   return {
-    userAgent: config.browser.userAgent,
+    userAgent: CHROME_UA,
     locale: BROWSER_LOCALE,
     timezoneId: BROWSER_TIMEZONE,
     viewport: BROWSER_VIEWPORT,
@@ -413,12 +434,13 @@ export async function initPlaywright(_headless = true, browserType: BrowserType 
   console.log(`[Playwright] Creating default context on shared browser...`);
 
   const storageState = loadStorageState('_default');
+  const defaultProfile = getFingerprintProfile('_default');
   context = await sharedBrowser.newContext({
-    ...sharedContextOptions(),
+    ...sharedContextOptions('_default'),
     ...(storageState ? { storageState } : {}),
   });
 
-  await context.addInitScript(getStealthScript());
+  await context.addInitScript(getStealthScript(defaultProfile));
 
   activePage = await context.newPage();
 
@@ -474,12 +496,13 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
 
   const storageState = loadStorageState(account.id);
+  const acctProfile = getFingerprintProfile(account.id);
   const acctContext = await sharedBrowser.newContext({
-    ...sharedContextOptions(),
+    ...sharedContextOptions(account.id),
     ...(storageState ? { storageState } : {}),
   });
 
-  await acctContext.addInitScript(getStealthScript());
+  await acctContext.addInitScript(getStealthScript(acctProfile));
 
   const acctPage = await acctContext.newPage();
   accountContexts.set(account.id, acctContext);
@@ -525,12 +548,13 @@ export async function launchManualLoginAccount(accountId: string, browserType: B
   });
 
   const storageState = loadStorageState(accountId);
+  const manualProfile = getFingerprintProfile(accountId);
   const acctContext = await manualBrowser.newContext({
-    ...sharedContextOptions(),
+    ...sharedContextOptions(accountId),
     ...(storageState ? { storageState } : {}),
   });
 
-  await acctContext.addInitScript(getStealthScript());
+  await acctContext.addInitScript(getStealthScript(manualProfile));
 
   const acctPage = await acctContext.newPage();
   await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });

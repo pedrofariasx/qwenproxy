@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { humanDrag } from './human-behavior.js';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -39,32 +40,10 @@ export async function solveBaxiaCaptcha(page: Page): Promise<boolean> {
 
       console.log(`[Captcha] Attempt ${attempt}: Dragging slider from x=${startX}, y=${startY} by ${dragDistance}px`);
       
-      // Move mouse to slider center, hover for a moment
-      await page.mouse.move(startX, startY, { steps: 5 });
-      await sleep(150 + Math.floor(Math.random() * 150));
+      const endX = startX + dragDistance;
+      const endY = startY;
       
-      // Press down
-      await page.mouse.down();
-      await sleep(100 + Math.floor(Math.random() * 100));
-
-      // Ease-in-out dragging simulation to mimic human acceleration & deceleration
-      const steps = 25;
-      for (let i = 1; i <= steps; i++) {
-        const t = i / steps;
-        // Cubic ease-in-out formula
-        const progress = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-        
-        const x = startX + dragDistance * progress + (Math.random() * 2 - 1);
-        // Add subtle vertical jitter
-        const y = startY + (Math.random() * 2 - 1);
-        
-        await page.mouse.move(x, y, { steps: 2 });
-        await sleep(15 + Math.floor(Math.random() * 20));
-      }
-
-      // Pause at the end before releasing the mouse button
-      await sleep(200 + Math.floor(Math.random() * 200));
-      await page.mouse.up();
+      await humanDrag(page, startX, startY, endX, endY);
 
       // Wait a moment for the page to register success and close the dialog
       await sleep(2000);

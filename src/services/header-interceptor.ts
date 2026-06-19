@@ -27,6 +27,8 @@ import {
 } from './browser-manager.js';
 import { getStealthScript } from './stealth.js';
 import { startCaptchaWatcher } from './captcha-solver.js';
+import { humanType, humanDelay } from './human-behavior.js';
+import { getFingerprintProfile } from './fingerprint.js';
 
 export async function getCookies(accountId?: string): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
@@ -104,11 +106,12 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
   if (!guestPage) {
     const sharedBrowser = await getOrLaunchBrowser('chromium');
     const storageState = loadStorageState('_guest');
+    const guestProfile = getFingerprintProfile('_guest');
     const guestCtx = await sharedBrowser.newContext({
-      ...sharedContextOptions(),
+      ...sharedContextOptions('_guest'),
       ...(storageState ? { storageState } : {}),
     });
-    await guestCtx.addInitScript(getStealthScript());
+    await guestCtx.addInitScript(getStealthScript(guestProfile));
     setGuestContext(guestCtx);
     guestPage = await guestCtx.newPage();
     setGuestPage(guestPage);
@@ -172,10 +175,8 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
         const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
         try {
           await guestPage!.waitForSelector(inputSelector, { timeout: config.timeouts.page });
-          await guestPage!.focus(inputSelector);
-          await guestPage!.fill(inputSelector, '');
-          await guestPage!.type(inputSelector, 'a', { delay: 50 });
-          await sleep(1000);
+          await humanType(guestPage!, inputSelector, 'Hello');
+          await sleep(humanDelay(800, 1500));
 
           const selectors = ['.message-input-right-button-send .send-button', '.chat-prompt-send-button', 'button.send-button'];
           let clicked = false;
@@ -456,11 +457,9 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
         console.log(`[Playwright] Triggering request for ${cacheKey}...`);
         const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
 
-        await page.focus(inputSelector);
-        await page.fill(inputSelector, '');
-        await page.type(inputSelector, 'a', { delay: 100 });
-        console.log(`[Playwright] Typed char for ${cacheKey}, waiting for UI to update...`);
-        await sleep(2000);
+        await humanType(page, inputSelector, 'Hello');
+        console.log(`[Playwright] Typed human text for ${cacheKey}, waiting for UI to update...`);
+        await sleep(humanDelay(1500, 2500));
 
         const selectors = [
           '.message-input-right-button-send .send-button',
@@ -483,7 +482,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
                 }
               }, selector);
 
-              await btn.click({ force: true, delay: 50 }).catch(() => {});
+              await btn.click({ force: true, delay: humanDelay(30, 80) }).catch(() => {});
 
               clicked = true;
               break;

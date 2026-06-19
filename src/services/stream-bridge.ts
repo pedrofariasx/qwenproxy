@@ -48,6 +48,7 @@ export async function browserFetch(
   const watcher = startCaptchaWatcher(page, timeoutMs);
 
   try {
+    if (page.isClosed()) throw new Error('Page is closed');
     return await page.evaluate(async ({ url, options }: any) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
@@ -74,6 +75,11 @@ export async function browserFetch(
         throw new Error(`browserFetch failed: ${e.message}`, { cause: e });
       }
     }, { url, options, reqId });
+  } catch (err: any) {
+    if (err.message?.includes('Execution context was destroyed') || err.message?.includes('Target closed') || err.message?.includes('Page is closed')) {
+      throw new Error(`browserFetch context lost: ${err.message}`, { cause: err });
+    }
+    throw err;
   } finally {
     watcher.stop();
   }
