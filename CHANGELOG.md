@@ -1,3 +1,10 @@
+## [1.10.2](https://github.com/pedrofariasx/qwenproxy/compare/v1.10.1...v1.10.2) (2026-06-21)
+
+
+### Bug Fixes
+
+* sequentialize account init, validate storage state, use headless=new and increase timeouts ([46cdcc0](https://github.com/pedrofariasx/qwenproxy/commit/46cdcc03551b7cc366a08de59fd7b28ddad96299))
+
 ## [1.10.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.10.0...v1.10.1) (2026-06-21)
 
 
