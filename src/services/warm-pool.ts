@@ -1,11 +1,13 @@
-import { getBasicHeaders, getPageForAccount, browserFetch } from './playwright.js';
+import { getBasicHeaders, getPageForAccount } from './playwright.js';
 import { markAccountRateLimited } from '../core/account-manager.js';
 import { config } from '../core/config.js';
 import { QwenUpstreamError } from './error-handler.js';
 import { getClientHintsHeaders } from './browser-manager.js';
+import type { Page } from 'playwright';
 import crypto from 'crypto';
 
 const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
+const QWEN_WEB_VERSION = '0.2.66';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -64,6 +66,33 @@ async function getBasicQwenHeaders(accountId?: string): Promise<Record<string, s
   };
 }
 
+async function browserJsonFetch<T>(page: Page, url: string, options: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<{ status: number; body: string; json: T | null }> {
+  const resultPage = await page.context().newPage();
+  try {
+    await resultPage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    return await resultPage.evaluate(async ({ url, options }) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
+      try {
+        const response = await fetch(url, {
+          method: options.method || 'GET',
+          headers: options.headers || {},
+          body: options.body,
+          signal: controller.signal,
+        });
+        const body = await response.text();
+        let json = null;
+        try { json = JSON.parse(body); } catch { /* not json */ }
+        return { status: response.status, body, json };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }, { url, options });
+  } finally {
+    await resultPage.close().catch(() => {});
+  }
+}
+
 async function createRealQwenChat(header: Record<string, string>, accountId?: string): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) {
     return process.env.TEST_SESSION_ID || `mock-chat-${crypto.randomUUID()}`;
@@ -84,13 +113,15 @@ async function createRealQwenChat(header: Record<string, string>, accountId?: st
 
   if (page && !page.isClosed() && isOnQwenOrigin) {
     try {
-      const result = await browserFetch(page, 'https://chat.qwen.ai/api/v2/chats/new', {
+      const result = await browserJsonFetch<any>(page, 'https://chat.qwen.ai/api/v2/chats/new', {
         method: 'POST',
         headers: {
           'accept': 'application/json, text/plain, */*',
           'content-type': 'application/json',
           'x-request-id': crypto.randomUUID(),
           'timezone': CACHED_TIMEZONE,
+          'version': QWEN_WEB_VERSION,
+          'source': 'web',
         },
         body,
         timeoutMs: config.timeouts.http,
@@ -102,7 +133,7 @@ async function createRealQwenChat(header: Record<string, string>, accountId?: st
       if (!result.status || result.status >= 400) {
         throw new Error(`Failed to create chat: ${result.status} - ${result.body}`);
       }
-      const json = JSON.parse(result.body);
+      const json = result.json ?? JSON.parse(result.body);
       if (json && json.success === false) {
         const code = json.data?.code || json.code || 'UpstreamError';
         const details = json.data?.details || json.message || 'Qwen returned an error';
@@ -130,10 +161,13 @@ async function createRealQwenChat(header: Record<string, string>, accountId?: st
       origin: 'https://chat.qwen.ai',
       referer: 'https://chat.qwen.ai/c/new-chat',
       'user-agent': header['user-agent'],
+      'version': QWEN_WEB_VERSION,
       'x-request-id': crypto.randomUUID(),
       'bx-v': header['bx-v'],
       'bx-ua': header['bx-ua'],
       'bx-umidtoken': header['bx-umidtoken'],
+      'timezone': CACHED_TIMEZONE,
+      'source': 'web',
       ...getClientHintsHeaders(accountId),
     },
     body,
@@ -176,7 +210,7 @@ async function fetchUnusedChats(headers: Record<string, string>, accountId?: str
   let body = '';
   if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
     try {
-      const result = await browserFetch(page, url, {
+      const result = await browserJsonFetch<any>(page, url, {
         method: 'GET',
         headers: reqHeaders,
         timeoutMs: config.timeouts.http,
@@ -185,7 +219,7 @@ async function fetchUnusedChats(headers: Record<string, string>, accountId?: str
         body = result.body;
       }
     } catch (err: any) {
-      console.warn('[WarmPool] browserFetch failed for chat list with active Qwen page:', err.message);
+      console.warn('[WarmPool] Isolated browser fetch failed for chat list with active Qwen context:', err.message);
       return [];
     }
   }

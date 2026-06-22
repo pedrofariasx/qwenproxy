@@ -8,6 +8,7 @@ import { Watchdog } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
 import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
 import { uploadFile } from '../routes/upload.js'
+import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js'
 
 const app = new Hono()
 
@@ -97,27 +98,54 @@ export async function startServer(): Promise<void> {
   const accounts = loadAccounts()
 
   const { initPlaywright, initPlaywrightForAccount } = await import('../services/playwright.js')
-  
-  await initPlaywright(config.browser.headless)
-  
+
   if (accounts.length > 0) {
-    console.log(`[Server] Initializing ${accounts.length} configured account(s) with concurrency ${config.accounts.initConcurrency}...`)
+    const now = Date.now()
+    let activeAccounts = accounts.filter(account => !account.cooldown_until || account.cooldown_until <= now)
+    let cooldownAccounts = accounts.filter(account => account.cooldown_until && account.cooldown_until > now)
+
+    if (config.accounts.singleAccountMode) {
+      const selected = activeAccounts.find(account => {
+        if (config.accounts.singleAccountId) return account.id === config.accounts.singleAccountId
+        if (config.accounts.singleAccountEmail) return account.email === config.accounts.singleAccountEmail
+        return true
+      }) || activeAccounts[0]
+
+      activeAccounts = selected
+        ? Array.from({ length: config.accounts.lanes }, (_, index) => ({
+          ...selected,
+          id: makeAccountLaneId(selected.id, index + 1),
+          email: `${selected.email}#lane-${index + 1}`,
+        }))
+        : []
+      cooldownAccounts = selected ? [] : cooldownAccounts
+
+      if (selected) {
+        console.log(`[Server] Single account mode enabled: ${selected.email} with ${config.accounts.lanes} isolated lane(s).`)
+      }
+    }
+
+    if (cooldownAccounts.length > 0) {
+      console.log(`[Server] Skipping ${cooldownAccounts.length} account(s) on cooldown during startup.`)
+    }
+
+    console.log(`[Server] Initializing ${activeAccounts.length}/${accounts.length} configured account(s) with concurrency ${config.accounts.initConcurrency}...`)
     const { getAccountCredentials } = await import('../core/accounts.js')
-    await runWithConcurrency(accounts, config.accounts.initConcurrency, async (account, i) => {
-      const creds = getAccountCredentials(account.id)
+    await runWithConcurrency(activeAccounts, config.accounts.initConcurrency, async (account, i) => {
+      const creds = getAccountCredentials(getBaseAccountId(account.id))
       if (!creds) return
       const stagger = i === 0 ? 0 : randomDelay(config.accounts.initStaggerMinMs, config.accounts.initStaggerMaxMs)
       if (stagger > 0) await sleep(stagger)
       try {
-        await initPlaywrightForAccount(creds, config.browser.headless)
+        await initPlaywrightForAccount({ ...creds, id: account.id, email: account.email }, config.browser.headless)
       } catch (err: any) {
         console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
       }
     })
     if (config.precapture.headersStartup) {
-      console.log(`[Server] Pre-capturing Qwen headers with concurrency ${config.precapture.concurrency}...`)
+      console.log(`[Server] Pre-capturing Qwen headers for ${activeAccounts.length} active account(s) with concurrency ${config.precapture.concurrency}...`)
       const { getQwenHeaders } = await import('../services/playwright.js')
-      runWithConcurrency(accounts, config.precapture.concurrency, async (account, i) => {
+      runWithConcurrency(activeAccounts, config.precapture.concurrency, async (account, i) => {
         const stagger = i === 0 ? 0 : randomDelay(config.precapture.staggerMinMs, config.precapture.staggerMaxMs)
         if (stagger > 0) await sleep(stagger)
         try {
@@ -128,10 +156,12 @@ export async function startServer(): Promise<void> {
       }).catch(() => {})
     }
     if (config.warmPool.startup) {
-      console.log('[Server] Pre-fetching warm chats for all accounts in background...')
+      console.log(`[Server] Pre-fetching warm chats for ${activeAccounts.length} active account(s) in background...`)
       const { warmAllPools } = await import('../services/qwen.js')
-      warmAllPools(accounts.map(a => a.id)).catch(() => {})
+      warmAllPools(activeAccounts.map(a => a.id)).catch(() => {})
     }
+  } else {
+    await initPlaywright(config.browser.headless)
   }
 
   const { startSessionKeeper } = await import('../services/session-keeper.js')

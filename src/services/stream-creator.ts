@@ -1,12 +1,15 @@
-import { getQwenHeaders, getBasicHeaders, getGuestHeaders, getPageForAccount, browserFetch, browserStreamFetch } from './playwright.js';
+import { getQwenHeaders, getBasicHeaders, getGuestHeaders, getPageForAccount, browserStreamFetch } from './playwright.js';
 import { MAX_PAYLOAD_SIZE } from '../core/model-registry.js';
 import { config } from '../core/config.js';
 import { RetryableQwenStreamError, QwenUpstreamError, handleErrorBody, handleJsonErrorBody } from './error-handler.js';
 import { getWarmedChat, releaseWarmChat } from './warm-pool.js';
-import { getClientHintsHeaders } from './browser-manager.js';
+import { getClientHintsHeaders, Mutex } from './browser-manager.js';
+import type { Page } from 'playwright';
+import { releaseAccountInUse } from '../core/account-manager.js';
 import crypto from 'crypto';
 
 const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
+const QWEN_WEB_VERSION = '0.2.66';
 const BASE_TIMEOUT_MS = 120000;
 const TIMEOUT_PER_MB = 30000;
 
@@ -16,6 +19,60 @@ function assertAntiBotHeaders(headers: Record<string, string>, label: string): v
   if (!headers['cookie'] || !headers['user-agent'] || !headers['bx-ua'] || !headers['bx-umidtoken'] || !headers['bx-v']) {
     throw new Error(`${label} missing required browser anti-bot headers`);
   }
+}
+
+function isTmdChallenge(text: string): boolean {
+  return text.includes('FAIL_SYS_USER_VALIDATE') || text.includes('_____tmd_____') || text.includes('RGV587_ERROR');
+}
+
+function buildBrowserCompletionHeaders(headers: Record<string, string>): Record<string, string> {
+  return {
+    'accept': 'application/json',
+    'content-type': 'application/json',
+    'timezone': CACHED_TIMEZONE,
+    'version': QWEN_WEB_VERSION,
+    'x-accel-buffering': 'no',
+    'x-request-id': crypto.randomUUID(),
+    'bx-v': headers['bx-v'],
+    'bx-ua': headers['bx-ua'],
+    'bx-umidtoken': headers['bx-umidtoken'],
+    'source': 'web',
+  };
+}
+
+function buildNodeCompletionHeaders(headers: Record<string, string>, chatId: string, accountId?: string): Record<string, string> {
+  return {
+    'accept': 'application/json',
+    'accept-language': 'pt-BR,pt;q=0.9',
+    'content-type': 'application/json',
+    'cookie': headers['cookie'],
+    'origin': 'https://chat.qwen.ai',
+    'referer': accountId === 'guest' ? 'https://chat.qwen.ai/c/guest' : `https://chat.qwen.ai/c/${chatId}`,
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
+    'timezone': CACHED_TIMEZONE,
+    'user-agent': headers['user-agent'],
+    'version': QWEN_WEB_VERSION,
+    'x-accel-buffering': 'no',
+    'x-request-id': crypto.randomUUID(),
+    'bx-v': headers['bx-v'],
+    'bx-ua': headers['bx-ua'],
+    'bx-umidtoken': headers['bx-umidtoken'],
+    'source': 'web',
+    ...getClientHintsHeaders(accountId),
+  };
+}
+
+async function openIsolatedQwenPage(basePage: Page, targetUrl = 'https://chat.qwen.ai/'): Promise<Page> {
+  const page = await basePage.context().newPage();
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+  return page;
+}
+
+async function openIsolatedCompletionPage(basePage: Page, chatId: string, accountId?: string): Promise<Page> {
+  const targetUrl = accountId === 'guest' ? 'https://chat.qwen.ai/c/guest' : `https://chat.qwen.ai/c/${chatId}`;
+  return openIsolatedQwenPage(basePage, targetUrl);
 }
 
 export interface QwenMessage {
@@ -156,6 +213,20 @@ let lastModelsFetch = 0;
 
 const nativeToolsDisabled = new Set<string>();
 const disablingNativeToolsInProgress = new Set<string>();
+const accountStreamMutexes = new Map<string, Mutex>();
+
+function getAccountStreamMutex(accountId: string): Mutex {
+  let mutex = accountStreamMutexes.get(accountId);
+  if (!mutex) {
+    mutex = new Mutex();
+    accountStreamMutexes.set(accountId, mutex);
+  }
+  return mutex;
+}
+
+function shouldSerializeAccountStreams(accountId: string): boolean {
+  return !accountId.includes('::lane-');
+}
 
 export async function disableNativeTools(accountId?: string): Promise<void> {
   const cacheKey = accountId || 'global';
@@ -184,18 +255,33 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
     console.log(`[Qwen] Disabling native tools for ${cacheKey}...`);
     const page = getPageForAccount(accountId);
     if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+      let isolatedPage: Page | null = null;
       try {
-        const result = await browserFetch(page, 'https://chat.qwen.ai/api/v2/users/user/settings/update', {
-          method: 'POST',
-          headers: {
-            'accept': 'application/json, text/plain, */*',
-            'content-type': 'application/json',
-            'x-request-id': crypto.randomUUID(),
-            'timezone': CACHED_TIMEZONE,
-          },
-          body: JSON.stringify(payload),
-          timeoutMs: config.timeouts.http,
-        });
+        isolatedPage = await openIsolatedQwenPage(page);
+        const result = await isolatedPage.evaluate(async ({ payload, timeoutMs, qwenVersion }) => {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const response = await fetch('https://chat.qwen.ai/api/v2/users/user/settings/update', {
+              method: 'POST',
+              headers: {
+                'accept': 'application/json, text/plain, */*',
+                'content-type': 'application/json',
+                'x-request-id': crypto.randomUUID(),
+                'timezone': new Date().toString().split(' (')[0],
+                'version': qwenVersion,
+                'source': 'web',
+              },
+              body: JSON.stringify(payload),
+              signal: controller.signal,
+            });
+            const body = await response.text();
+            return { status: response.status, body };
+          } finally {
+            clearTimeout(timeoutId);
+          }
+        }, { payload, timeoutMs: config.timeouts.http, qwenVersion: QWEN_WEB_VERSION });
+
         if (result.status && result.status < 400) {
           console.log(`[Qwen] Native tools disabled successfully for ${cacheKey}.`);
           nativeToolsDisabled.add(cacheKey);
@@ -204,8 +290,10 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
         console.error(`[Qwen] Failed to disable native tools for ${cacheKey}: ${result.status} - ${result.body}`);
         return;
       } catch (err: any) {
-        console.warn('[Qwen] browserFetch failed for disableNativeTools with active Qwen page:', err.message);
+        console.warn('[Qwen] Isolated browser fetch failed for disableNativeTools with active Qwen context:', err.message);
         return;
+      } finally {
+        await isolatedPage?.close().catch(() => {});
       }
     }
 
@@ -221,10 +309,12 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
         'origin': 'https://chat.qwen.ai',
         'referer': 'https://chat.qwen.ai/',
         'user-agent': headers['user-agent'],
+        'version': QWEN_WEB_VERSION,
         'x-request-id': crypto.randomUUID(),
         'bx-ua': headers['bx-ua'],
         'bx-umidtoken': headers['bx-umidtoken'],
-        'bx-v': headers['bx-v']
+        'bx-v': headers['bx-v'],
+        'source': 'web'
       },
       body: JSON.stringify(payload),
       signal: controller.signal
@@ -253,23 +343,37 @@ export async function fetchQwenModels(accountId?: string): Promise<any[]> {
 
   const page = getPageForAccount(accountId);
   if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+    let isolatedPage: Page | null = null;
     try {
-      const result = await browserFetch(page, 'https://chat.qwen.ai/api/models', {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json, text/plain, */*',
-          'x-request-id': crypto.randomUUID(),
-          'timezone': CACHED_TIMEZONE,
-          'source': 'web',
-        },
-        timeoutMs: config.timeouts.http,
-      });
+      isolatedPage = await openIsolatedQwenPage(page);
+      const result = await isolatedPage.evaluate(async ({ timeoutMs }) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch('https://chat.qwen.ai/api/models', {
+            method: 'GET',
+            headers: {
+              'accept': 'application/json, text/plain, */*',
+              'x-request-id': crypto.randomUUID(),
+              'timezone': new Date().toString().split(' (')[0],
+              'source': 'web',
+            },
+            signal: controller.signal,
+          });
+          const body = await response.text();
+          return { status: response.status, body };
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }, { timeoutMs: config.timeouts.http });
       if (result.status && result.status < 400) {
         return processModelsJson(JSON.parse(result.body));
       }
     } catch (err: any) {
-      console.warn('[Qwen] browserFetch failed for models with active Qwen page:', err.message);
-      throw new Error(`Browser model fetch failed with active Qwen page: ${err.message}`, { cause: err });
+      console.warn('[Qwen] Isolated browser fetch failed for models with active Qwen context:', err.message);
+      throw new Error(`Browser model fetch failed with active Qwen context: ${err.message}`, { cause: err });
+    } finally {
+      await isolatedPage?.close().catch(() => {});
     }
   }
 
@@ -341,11 +445,28 @@ export async function createQwenStream(
   let chatHeaders: Record<string, string>;
   let leasedChat: any;
   let leasedChatReleased = false;
+  const streamLockKey = accountId || 'global';
+  const releaseAccountStream = shouldSerializeAccountStreams(streamLockKey)
+    ? await getAccountStreamMutex(streamLockKey).acquire()
+    : null;
+  let accountStreamReleased = false;
+
+  const releaseAccountStreamOnce = () => {
+    if (accountStreamReleased) return;
+    accountStreamReleased = true;
+    releaseAccountStream?.();
+  };
 
   const releaseLeasedChat = () => {
     if (leasedChatReleased || !leasedChat) return;
     leasedChatReleased = true;
     releaseWarmChat(leasedChat.accountId, leasedChat.chatId);
+    releaseAccountInUse(leasedChat.accountId);
+  };
+
+  const releaseStreamResources = () => {
+    releaseLeasedChat();
+    releaseAccountStreamOnce();
   };
 
   const wrapLeasedStream = (
@@ -363,7 +484,7 @@ export async function createQwenStream(
       onTimeout,
       () => {
         onTimeout?.();
-        releaseLeasedChat();
+        releaseStreamResources();
       },
     );
   };
@@ -382,19 +503,37 @@ export async function createQwenStream(
     });
 
     if (guestPage && !guestPage.isClosed()) {
+      let isolatedPage: Page | null = null;
       try {
-        const result = await browserFetch(guestPage, 'https://chat.qwen.ai/api/v2/chats/new', {
-          method: 'POST',
-          headers: { 'accept': 'application/json, text/plain, */*', 'content-type': 'application/json', 'x-request-id': crypto.randomUUID(), 'timezone': CACHED_TIMEZONE },
-          body: guestBody,
-          timeoutMs: config.timeouts.http,
-        });
+        isolatedPage = await openIsolatedQwenPage(guestPage, 'https://chat.qwen.ai/c/guest');
+        const result = await isolatedPage.evaluate(async ({ body, timeoutMs }) => {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const response = await fetch('https://chat.qwen.ai/api/v2/chats/new', {
+              method: 'POST',
+              headers: {
+                'accept': 'application/json, text/plain, */*',
+                'content-type': 'application/json',
+                'x-request-id': crypto.randomUUID(),
+                'timezone': new Date().toString().split(' (')[0],
+              },
+              body,
+              signal: controller.signal,
+            });
+            return { status: response.status, body: await response.text() };
+          } finally {
+            clearTimeout(timeoutId);
+          }
+        }, { body: guestBody, timeoutMs: config.timeouts.http });
         if (!result.status || result.status >= 400) throw new Error(`Failed to create guest chat: ${result.status}`);
         const json = JSON.parse(result.body);
         chatId = json.chat_id || json.id || json.data?.chat_id || json.data?.id;
         if (!chatId) throw new Error(`Unexpected guest chat response: ${JSON.stringify(json).slice(0, 200)}`);
       } catch (err: any) {
         throw new Error(`Browser guest chat creation failed with active Qwen page: ${err.message}`, { cause: err });
+      } finally {
+        await isolatedPage?.close().catch(() => {});
       }
     } else {
       const response = await fetch('https://chat.qwen.ai/api/v2/chats/new', {
@@ -515,46 +654,59 @@ export async function createQwenStream(
 
   const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
 
-  const completionHeaders: Record<string, string> = {
-    'accept': 'text/event-stream',
-    'content-type': 'application/json',
-    'x-request-id': crypto.randomUUID(),
-    'timezone': CACHED_TIMEZONE,
-  };
-
   const page = getPageForAccount(accountId);
   if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+    let completionPage: Page | null = null;
     try {
-      const browserResult = await browserStreamFetch(page, url, {
+      completionPage = await openIsolatedCompletionPage(page, chatId, accountId);
+      const browserResult = await browserStreamFetch(completionPage, url, {
         method: 'POST',
-        headers: completionHeaders,
+        headers: buildBrowserCompletionHeaders(chatHeaders),
         body: payloadJson,
         timeoutMs,
       });
 
       if (browserResult.contentType.includes('text/event-stream') && browserResult.status < 400) {
         const controller = new AbortController();
-        return { stream: wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, browserResult.abort), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
+        return {
+          stream: wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
+            browserResult.abort();
+            completionPage?.close().catch(() => {});
+          }),
+          headers: chatHeaders,
+          uiSessionId: chatId,
+          controller,
+          accountId: accountId || 'guest'
+        };
       }
 
       if (browserResult.body) {
         const peekText = browserResult.body;
-        if (peekText.includes('FAIL_SYS_USER_VALIDATE') || peekText.includes('_____tmd_____') || peekText.includes('RGV587_ERROR')) {
+        if (isTmdChallenge(peekText)) {
           console.warn('[Qwen] TMD challenge detected via browser, refreshing headers and retrying...');
           try {
             const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
             await sleep(500 + Math.floor(Math.random() * 1000));
-            const retryResult = await browserStreamFetch(page, url, {
+            const retryResult = await browserStreamFetch(completionPage, url, {
               method: 'POST',
-              headers: completionHeaders,
+              headers: buildBrowserCompletionHeaders(freshHeaders),
               body: payloadJson,
               timeoutMs,
             });
             if (retryResult.contentType.includes('text/event-stream') && retryResult.status < 400) {
               const controller = new AbortController();
-              return { stream: wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, retryResult.abort), headers: freshHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
+              return {
+                stream: wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
+                  retryResult.abort();
+                  completionPage?.close().catch(() => {});
+                }),
+                headers: freshHeaders,
+                uiSessionId: chatId,
+                controller,
+                accountId: accountId || 'guest'
+              };
             }
-            if (retryResult.body && (retryResult.body.includes('FAIL_SYS_USER_VALIDATE') || retryResult.body.includes('_____tmd_____'))) {
+            if (retryResult.body && isTmdChallenge(retryResult.body)) {
               throw new QwenUpstreamError('Qwen TMD challenge persists after header refresh.', 'FAIL_SYS_USER_VALIDATE', 403);
             }
             if (retryResult.body) {
@@ -569,6 +721,7 @@ export async function createQwenStream(
         handleErrorBody(peekText, browserResult.status);
       }
     } catch (browserErr: any) {
+      await completionPage?.close().catch(() => {});
       if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
       throw new Error(`Browser stream fetch failed with active Qwen page: ${browserErr.message}`, { cause: browserErr });
     }
@@ -578,25 +731,7 @@ export async function createQwenStream(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'accept': 'application/json',
-      'accept-language': 'pt-BR,pt;q=0.9',
-      'content-type': 'application/json',
-      'cookie': chatHeaders['cookie'],
-      'origin': 'https://chat.qwen.ai',
-      'referer': accountId === 'guest' ? 'https://chat.qwen.ai/c/guest' : `https://chat.qwen.ai/c/${chatId}`,
-      'sec-fetch-dest': 'empty',
-      'sec-fetch-mode': 'cors',
-      'sec-fetch-site': 'same-origin',
-      'timezone': CACHED_TIMEZONE,
-      'user-agent': chatHeaders['user-agent'],
-      'x-accel-buffering': 'no',
-      'x-request-id': crypto.randomUUID(),
-      'bx-v': chatHeaders['bx-v'],
-      'bx-ua': chatHeaders['bx-ua'],
-      'bx-umidtoken': chatHeaders['bx-umidtoken'],
-      ...getClientHintsHeaders(accountId),
-    },
+    headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
     body: payloadJson,
     signal: controller.signal
   });
@@ -609,7 +744,7 @@ export async function createQwenStream(
 
   if (response.ok && !responseContentType.includes('text/event-stream') && response.body) {
     const peekText = await response.clone().text().catch(() => '');
-    if (peekText.includes('FAIL_SYS_USER_VALIDATE') || peekText.includes('_____tmd_____') || peekText.includes('RGV587_ERROR')) {
+    if (isTmdChallenge(peekText)) {
       console.warn('[Qwen] TMD challenge detected, refreshing headers and retrying...');
       try {
         const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
@@ -618,25 +753,7 @@ export async function createQwenStream(
         const retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
         const retryResponse = await fetch(url, {
           method: 'POST',
-          headers: {
-            'accept': 'application/json',
-            'accept-language': 'pt-BR,pt;q=0.9',
-            'content-type': 'application/json',
-            'cookie': freshHeaders['cookie'],
-            'origin': 'https://chat.qwen.ai',
-            'referer': `https://chat.qwen.ai/c/${chatId}`,
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
-            'timezone': CACHED_TIMEZONE,
-            'user-agent': freshHeaders['user-agent'],
-            'x-accel-buffering': 'no',
-            'x-request-id': crypto.randomUUID(),
-            'bx-v': freshHeaders['bx-v'],
-            'bx-ua': freshHeaders['bx-ua'],
-            'bx-umidtoken': freshHeaders['bx-umidtoken'],
-            ...getClientHintsHeaders(accountId),
-          },
+          headers: buildNodeCompletionHeaders(freshHeaders, chatId, accountId),
           body: payloadJson,
           signal: retryController.signal
         });
@@ -648,7 +765,7 @@ export async function createQwenStream(
         }
 
         const retryPeek = await retryResponse.clone().text().catch(() => '');
-        if (retryPeek.includes('FAIL_SYS_USER_VALIDATE') || retryPeek.includes('_____tmd_____')) {
+        if (isTmdChallenge(retryPeek)) {
           throw new QwenUpstreamError('Qwen TMD challenge persists after header refresh. The account may need manual captcha resolution.', 'FAIL_SYS_USER_VALIDATE', 403);
         }
 
@@ -678,7 +795,7 @@ export async function createQwenStream(
 
   return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
   } catch (err) {
-    releaseLeasedChat();
+    releaseStreamResources();
     throw err;
   }
 }

@@ -13,7 +13,7 @@ app.get('/v1/models', async (c) => {
     let accountId: string | undefined
     try {
       const accounts = loadAccounts()
-      const account = accounts.find(a => !getAccountCooldownInfo(a.id)) || accounts[0]
+      const account = accounts.find(a => !getAccountCooldownInfo(a.id))
       if (account) {
         accountId = account.id
       }
@@ -98,7 +98,7 @@ app.get('/v1/models/:model', async (c) => {
     let accountId: string | undefined
     try {
       const accounts = loadAccounts()
-      const account = accounts.find(a => !getAccountCooldownInfo(a.id)) || accounts[0]
+      const account = accounts.find(a => !getAccountCooldownInfo(a.id))
       if (account) {
         accountId = account.id
       }

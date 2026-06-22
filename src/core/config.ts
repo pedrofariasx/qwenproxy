@@ -41,6 +41,10 @@ const envSchema = z.object({
   PRECAPTURE_HEADERS_CONCURRENCY: z.string().default('1'),
   PRECAPTURE_HEADERS_STAGGER_MIN_MS: z.string().default('2500'),
   PRECAPTURE_HEADERS_STAGGER_MAX_MS: z.string().default('5000'),
+  SINGLE_ACCOUNT_MODE: z.string().default('false'),
+  SINGLE_ACCOUNT_ID: z.string().default(''),
+  SINGLE_ACCOUNT_EMAIL: z.string().default(''),
+  ACCOUNT_LANES: z.string().default('1'),
 })
 
 const env = envSchema.parse(process.env)
@@ -121,6 +125,10 @@ export const config = {
     initConcurrency: parseInt(env.ACCOUNT_INIT_CONCURRENCY),
     initStaggerMinMs: parseInt(env.ACCOUNT_INIT_STAGGER_MIN_MS),
     initStaggerMaxMs: parseInt(env.ACCOUNT_INIT_STAGGER_MAX_MS),
+    singleAccountMode: env.SINGLE_ACCOUNT_MODE === 'true',
+    singleAccountId: env.SINGLE_ACCOUNT_ID,
+    singleAccountEmail: env.SINGLE_ACCOUNT_EMAIL,
+    lanes: Math.max(1, parseInt(env.ACCOUNT_LANES)),
   },
   precapture: {
     headersStartup: env.PRECAPTURE_HEADERS_STARTUP === 'true',

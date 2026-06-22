@@ -4,7 +4,7 @@ import { createQwenStream, RetryableQwenStreamError } from '../services/qwen.js'
 import type { OpenAIRequest } from '../utils/types.js';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.js';
-import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo } from '../core/account-manager.js';
+import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo, markAccountInUse, releaseAccountInUse, getInUseAccounts } from '../core/account-manager.js';
 import { loadAccounts } from '../core/accounts.js';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
@@ -194,6 +194,14 @@ export async function chatCompletions(c: Context) {
       let account = getNextAccount();
       const triedAccountIds = new Set<string>();
 
+      if (!account) {
+        const inUse = getInUseAccounts();
+        const message = inUse.length > 0
+          ? `All configured account lanes are busy: ${inUse.join(', ')}`
+          : 'No available account lanes';
+        throw new RetryableQwenStreamError(message, 1000);
+      }
+
       while (account) {
         const accountId = account.id;
         const accountEmail = account.email;
@@ -212,67 +220,74 @@ export async function chatCompletions(c: Context) {
         }
 
         console.log(`[Chat] Routing request to account: ${accountEmail} (${accountId})`);
+        markAccountInUse(accountId);
 
         let retries = 3;
         let retryDelay = 500;
         let success = false;
 
-        while (retries > 0) {
-          try {
-            const result = await createQwenStream(
-              finalPrompt,
-              isThinkingModel,
-              body.model,
-              null,
-              accountId === 'global' ? undefined : accountId,
-              undefined,
-              pendingMultimodal.length > 0 ? pendingMultimodal : undefined
-            );
-            stream = result.stream;
-            uiSessionId = result.uiSessionId;
-            registerStream(completionId, {
-              abortController: result.controller,
-              accountId: result.accountId,
-              uiSessionId: result.uiSessionId,
-              targetResponseId: '',
-              headers: result.headers,
-            });
-            success = true;
-            break;
-          } catch (err: any) {
-            retries--;
-
-            if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
-              const hourHint = err.message?.match(/Wait about (\d+) hour/);
-              const hours = hourHint ? parseInt(hourHint[1]) : 24;
-              const cooldownMs = hours * 60 * 60 * 1000;
-              markAccountRateLimited(accountId, cooldownMs, 'RateLimited');
-              console.warn(`[Chat] Account ${accountEmail} (${accountId}) rate-limited. Entering cooldown for ${hours} hours.`);
-              lastError = err;
+        try {
+          while (retries > 0) {
+            try {
+              const result = await createQwenStream(
+                finalPrompt,
+                isThinkingModel,
+                body.model,
+                null,
+                accountId === 'global' ? undefined : accountId,
+                undefined,
+                pendingMultimodal.length > 0 ? pendingMultimodal : undefined
+              );
+              stream = result.stream;
+              uiSessionId = result.uiSessionId;
+              registerStream(completionId, {
+                abortController: result.controller,
+                accountId: result.accountId,
+                uiSessionId: result.uiSessionId,
+                targetResponseId: '',
+                headers: result.headers,
+              });
+              success = true;
               break;
-            }
+            } catch (err: any) {
+              retries--;
 
-            if (retries === 0) {
-              if (err.upstreamStatus && err.upstreamStatus >= 500) {
-                markAccountRateLimited(accountId, undefined, 'ServerError');
-                console.warn(`[Chat] Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`);
+              if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
+                const hourHint = err.message?.match(/Wait about (\d+) hour/);
+                const hours = hourHint ? parseInt(hourHint[1]) : 24;
+                const cooldownMs = hours * 60 * 60 * 1000;
+                markAccountRateLimited(accountId, cooldownMs, 'RateLimited');
+                console.warn(`[Chat] Account ${accountEmail} (${accountId}) rate-limited. Entering cooldown for ${hours} hours.`);
+                lastError = err;
+                break;
               }
-              lastError = err;
-              break;
-            }
 
-            let useDelay = retryDelay;
-            if (err instanceof RetryableQwenStreamError && err.retryAfterMs !== undefined) {
-              useDelay = err.retryAfterMs;
+              if (retries === 0) {
+                if (err.upstreamStatus && err.upstreamStatus >= 500) {
+                  markAccountRateLimited(accountId, undefined, 'ServerError');
+                  console.warn(`[Chat] Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`);
+                }
+                lastError = err;
+                break;
+              }
+
+              let useDelay = retryDelay;
+              if (err instanceof RetryableQwenStreamError && err.retryAfterMs !== undefined) {
+                useDelay = err.retryAfterMs;
+              }
+              const isRetryable = err instanceof RetryableQwenStreamError || err.message?.includes('in progress') || err.message?.includes('Bad_Request');
+              if (!isRetryable) {
+                lastError = err;
+                break;
+              }
+              console.warn(`[Chat] Qwen request failed for ${accountEmail}, retrying in ${useDelay}ms... (${retries} left)`);
+              await new Promise(r => setTimeout(r, useDelay));
+              retryDelay = Math.min(retryDelay * 2, 5000);
             }
-            const isRetryable = err instanceof RetryableQwenStreamError || err.message?.includes('in progress') || err.message?.includes('Bad_Request');
-            if (!isRetryable) {
-              lastError = err;
-              break;
-            }
-            console.warn(`[Chat] Qwen request failed for ${accountEmail}, retrying in ${useDelay}ms... (${retries} left)`);
-            await new Promise(r => setTimeout(r, useDelay));
-            retryDelay = Math.min(retryDelay * 2, 5000);
+          }
+        } finally {
+          if (!success) {
+            releaseAccountInUse(accountId);
           }
         }
 

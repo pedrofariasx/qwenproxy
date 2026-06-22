@@ -1,4 +1,6 @@
 import { config } from '../core/config.js';
+import { getActiveAccountCount } from '../core/account-manager.js';
+import { getBaseAccountId } from '../core/account-lanes.js';
 import {
   CHROME_UA,
   HEADERS_TTL,
@@ -52,9 +54,9 @@ export async function getBasicHeaders(accountId?: string): Promise<{ cookie: str
   let page = accountId ? accountPages.get(accountId) : getActivePage();
   if (accountId && !page) {
     const { getAccountCredentials } = await import('../core/accounts.js');
-    const creds = getAccountCredentials(accountId);
+    const creds = getAccountCredentials(getBaseAccountId(accountId));
     if (creds) {
-      await initPlaywrightForAccount(creds, config.browser.headless);
+      await initPlaywrightForAccount({ ...creds, id: accountId }, config.browser.headless);
       page = accountPages.get(accountId);
     }
   }
@@ -285,7 +287,7 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
     if (!forceNew && err?.message?.includes('Timeout waiting for Qwen headers for')) {
       console.warn(`[Playwright] Header capture timed out for ${cacheKey}; clearing browser profile and retrying once...`);
       await resetBrowserProfile(cacheKey, accountId);
-      if (!accountId) {
+      if (!accountId && getActiveAccountCount() === 0) {
         await initPlaywright(config.browser.headless, config.browser.type);
       }
       return await _getQwenHeadersInternalOnce(true, accountId);
@@ -323,9 +325,9 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
   if (accountId && !accountPages.has(accountId)) {
     const { getAccountCredentials } = await import('../core/accounts.js');
-    const creds = getAccountCredentials(accountId);
+    const creds = getAccountCredentials(getBaseAccountId(accountId));
     if (creds) {
-      await initPlaywrightForAccount(creds, config.browser.headless);
+      await initPlaywrightForAccount({ ...creds, id: accountId }, config.browser.headless);
     }
   }
 
@@ -366,13 +368,28 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
       }
     } else {
       const { getAccountCredentials } = await import('../core/accounts.js');
-      const creds = getAccountCredentials(accountId);
+      const creds = getAccountCredentials(getBaseAccountId(accountId));
       if (creds && creds.email && creds.password) {
         console.log(`[Playwright] Detected login page for account ${creds.email}. Attempting login...`);
         const acctContext = accountContexts.get(accountId);
         if (acctContext) {
-          const { loginToQwen } = await import('./browser-manager.js');
-          await loginToQwen(creds.email, creds.password);
+          const pageForLogin = accountPages.get(accountId);
+          if (pageForLogin) {
+            const hashedPassword = (await import('crypto')).createHash('sha256').update(creds.password).digest('hex');
+            await pageForLogin.evaluate(async ({ email, password }) => {
+              await fetch('https://chat.qwen.ai/api/v2/auths/signin', {
+                method: 'POST',
+                headers: {
+                  'accept': 'application/json, text/plain, */*',
+                  'content-type': 'application/json',
+                  'source': 'web',
+                  'timezone': new Date().toString().split(' (')[0],
+                  'x-request-id': crypto.randomUUID(),
+                },
+                body: JSON.stringify({ email, password, login_type: 'email' }),
+              });
+            }, { email: creds.email, password: hashedPassword });
+          }
         }
       }
     }

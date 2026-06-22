@@ -80,6 +80,7 @@ export function startSessionKeeper(): void {
       if (isMouseLocked()) {
         return;
       }
+      if (accountId.includes('::lane-') && !accountId.endsWith('::lane-1')) continue;
       if (page.isClosed()) continue;
       await performKeepAlive(accountId, page);
       await sleep(humanDelay(1000, 3000));

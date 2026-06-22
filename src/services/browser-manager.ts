@@ -5,6 +5,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import type { QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
+import { getBaseAccountId } from '../core/account-lanes.js';
 import { getStealthScript } from './stealth.js';
 import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
 
@@ -554,10 +555,11 @@ export async function closePlaywright() {
 
 export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = 'chromium') {
   const sharedBrowser = await getOrLaunchBrowser(browserType);
+  const baseAccountId = getBaseAccountId(account.id);
 
   console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
 
-  const storageState = loadStorageState(account.id);
+  const storageState = loadStorageState(baseAccountId);
   const acctProfile = getFingerprintProfile(account.id);
   const acctContext = await sharedBrowser.newContext({
     ...sharedContextOptions(account.id),
@@ -595,7 +597,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   }
 
   if (await hasValidAuthCookie(acctPage)) {
-    await saveStorageState(acctContext, account.id);
+    await saveStorageState(acctContext, baseAccountId);
   }
 }
 
