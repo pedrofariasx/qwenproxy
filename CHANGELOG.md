@@ -1,3 +1,10 @@
+## [1.12.3](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.2...v1.12.3) (2026-06-27)
+
+
+### Bug Fixes
+
+* repair docker volume permissions ([07633f8](https://github.com/pedrofariasx/qwenproxy/commit/07633f85544feedc0e6d38b1965b1c2ac823cc7f))
+
 ## [1.12.2](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.1...v1.12.2) (2026-06-23)
 
 
