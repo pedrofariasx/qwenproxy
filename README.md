@@ -226,22 +226,28 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data               # Banco SQLite
-      - ./qwen_profiles:/app/qwen_profiles  # Sessões dos navegadores
+      - qwenproxy_data:/app/data
+      - qwenproxy_profiles:/app/qwen_profiles
     restart: unless-stopped
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  qwenproxy_data:
+  qwenproxy_profiles:
 ```
 
 ### Volumes persistentes
 
 | Volume | Conteúdo |
 |--------|----------|
-| `./data` | Banco SQLite com as contas (`qwenproxy.db`) |
-| `./qwen_profiles` | Perfis de navegador por conta (cookies, sessões) |
+| `qwenproxy_data` | Banco SQLite com as contas (`qwenproxy.db`) |
+| `qwenproxy_profiles` | Perfis de navegador por conta (cookies, sessões) |
+
+O container ajusta automaticamente as permissões desses volumes no startup. Se usar bind mounts locais em vez dos volumes nomeados acima, garanta que os diretórios montados sejam graváveis pelo container.
 
 ---
 
