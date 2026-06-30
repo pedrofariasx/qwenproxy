@@ -163,7 +163,7 @@ npm run start:firefox      # Firefox
 npm run start:edge         # Microsoft Edge
 ```
 
-O servidor inicia em `http://localhost:3000` com as seguintes rotas:
+O servidor inicia em `http://127.0.1.0:3000/` com as seguintes rotas:
 
 | Rota | Método | Descrição |
 |------|--------|-----------|
@@ -185,7 +185,7 @@ O servidor inicia em `http://localhost:3000` com as seguintes rotas:
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
-  baseURL: 'http://localhost:3000/v1',
+  baseURL: 'http://127.0.1.0:3000/v1',
   apiKey: process.env.API_KEY || 'sk-no-key-required'
 });
 
@@ -200,7 +200,7 @@ console.log(completion.choices[0].message.content);
 ### cURL
 
 ```bash
-curl http://localhost:3000/v1/chat/completions \
+curl http://127.0.1.0:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sua-chave" \
   -d '{
