@@ -1,3 +1,10 @@
+## [1.12.7](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.6...v1.12.7) (2026-07-02)
+
+
+### Bug Fixes
+
+* prevent content duplication in non-streaming mode by tracking content length and suffix state ([05a8236](https://github.com/pedrofariasx/qwenproxy/commit/05a8236e879d03ca9c02a05778cb7a92c6d2b06b))
+
 ## [1.12.6](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.5...v1.12.6) (2026-07-02)
 
 
