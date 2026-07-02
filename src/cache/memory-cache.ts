@@ -90,11 +90,8 @@ export class MemoryCache {
   }
 
   async get<T>(key: CacheKey): Promise<T | null> {
-    const start = Date.now()
     const fullKey = this.prefix + key
     const entry = this.store.get(fullKey)
-    
-    metrics.histogram('cache.get.latency', Date.now() - start)
 
     if (!entry || entry.expiresAt <= Date.now()) {
       if (entry) {
@@ -104,9 +101,6 @@ export class MemoryCache {
       metrics.increment('cache.miss')
       return null
     }
-
-    this.store.delete(fullKey)
-    this.store.set(fullKey, entry)
 
     metrics.increment('cache.hit')
     return entry.value as T
@@ -172,10 +166,14 @@ export class MemoryCache {
   }
 
   async scan(pattern: string, _count: number = 100): Promise<string[]> {
-    const regex = new RegExp(this.prefix + pattern.replace(/\*/g, '.*'))
+    let regex = this.scanRegexCache.get(pattern)
+    if (!regex) {
+      regex = new RegExp(this.prefix + pattern.replace(/\*/g, '.*'))
+      this.scanRegexCache.set(pattern, regex)
+    }
     const now = Date.now()
     const keys: string[] = []
-    
+
     for (const [key, entry] of this.store.entries()) {
       if (regex.test(key) && entry.expiresAt > now) {
         keys.push(key)

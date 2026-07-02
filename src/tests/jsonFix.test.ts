@@ -125,3 +125,25 @@ test('robustParseJSON: handles unquoted string value with special chars', () => 
   assert.ok(typeof result.arguments.command === 'string');
   assert.ok(result.arguments.command.includes('git add'));
 });
+
+test('robustParseJSON: handles missing opening quote on string value', () => {
+  const result = robustParseJSON('{"name":read", "arguments": {"filePath": "/tmp/test.ts"}}');
+  assert.ok(result);
+  assert.strictEqual(result.name, 'read');
+  assert.strictEqual(result.arguments.filePath, '/tmp/test.ts');
+});
+
+test('robustParseJSON: handles missing opening quote on multiple values', () => {
+  const result = robustParseJSON('{"name":bash", "command":ls -la", "description": "List files"}');
+  assert.ok(result);
+  assert.strictEqual(result.name, 'bash');
+  assert.strictEqual(result.command, 'ls -la');
+  assert.strictEqual(result.description, 'List files');
+});
+
+test('robustParseJSON: handles missing opening quote with unquoted key', () => {
+  const result = robustParseJSON('{name:read", "arguments": {"filePath": "/tmp/test.ts"}}');
+  assert.ok(result);
+  assert.strictEqual(result.name, 'read');
+  assert.strictEqual(result.arguments.filePath, '/tmp/test.ts');
+});

@@ -70,6 +70,15 @@ app.get('/v1/models', async (c) => {
           capabilities: model.info?.meta?.capabilities,
         })),
         ...models.map((model: any) => ({
+          id: `${model.id}-thinking`,
+          name: `${model.name} (Thinking)`,
+          object: 'model',
+          owned_by: model.owned_by,
+          created: model.info?.created_at || Date.now(),
+          context_window: model.info?.meta?.max_context_length,
+          capabilities: model.info?.meta?.capabilities,
+        })),
+        ...models.map((model: any) => ({
           id: `${model.id}-no-thinking`,
           name: `${model.name} (No Thinking)`,
           object: 'model',
@@ -146,6 +155,15 @@ app.get('/v1/models/:model', async (c) => {
           ...rawModels.map((model: any) => ({
             id: model.id,
             name: model.name,
+            object: 'model',
+            owned_by: model.owned_by,
+            created: model.info?.created_at || Date.now(),
+            context_window: model.info?.meta?.max_context_length,
+            capabilities: model.info?.meta?.capabilities,
+          })),
+          ...rawModels.map((model: any) => ({
+            id: `${model.id}-thinking`,
+            name: `${model.name} (Thinking)`,
             object: 'model',
             owned_by: model.owned_by,
             created: model.info?.created_at || Date.now(),

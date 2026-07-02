@@ -125,6 +125,23 @@ function quoteUnquotedStringValues(input: string): string {
   return out;
 }
 
+function fixMissingOpeningQuotes(input: string): string {
+  let out = input;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(
+      /([{,[]\s*"[a-zA-Z_][\w]*"\s*:\s*)([^"\s,}\]][^"\n]*?)"([\s,}\]])/g,
+      '$1"$2"$3'
+    );
+    out = out.replace(
+      /([{,[]\s*[a-zA-Z_][\w]*\s*:\s*)([^"\s,}\]][^"\n]*?)"([\s,}\]])/g,
+      '$1"$2"$3'
+    );
+  } while (out !== prev);
+  return out;
+}
+
 function quoteUnquotedKeys(input: string): string {
   let out = '';
   let inString = false;
@@ -188,6 +205,7 @@ export function robustParseJSON(str: string): any {
   try { return JSON.parse(jsonPart); } catch { /* continue */ }
 
   let currentJson = quoteUnquotedKeys(jsonPart);
+  currentJson = fixMissingOpeningQuotes(currentJson);
   currentJson = quoteUnquotedStringValues(currentJson);
   currentJson = currentJson.replace(/([{,]\s*)"([a-zA-Z0-9_]+)"\s*:\s*"\2"\s*:/g, '$1"$2":');
   currentJson = currentJson.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:\s*\2\s*:/g, '$1$2:');

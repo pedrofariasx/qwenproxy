@@ -17,7 +17,7 @@ import {
   getToolChoiceMode,
 } from './tool-handler.js';
 import { handleStreamingResponse, handleNonStreamingResponse } from './stream-handler.js';
-import { uploadLargePromptAsFile, type QwenFileEntry } from './upload.js';
+
 
 export { getIncrementalDelta } from './sse-parser.js';
 export type { DeltaResult } from './sse-parser.js';
@@ -121,7 +121,7 @@ export async function chatCompletions(c: Context) {
         }
         return t;
       });
-      const toolsJson = JSON.stringify(formattedTools, null, 2);
+      const toolsJson = JSON.stringify(formattedTools);
       
       systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in <tool_call> tags:\n\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nEXAMPLE OF MULTIPLE TOOL CALLS:\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file1.txt"}}\n</tool_call>\n<tool_call>\n{"name": "read_file", "arguments": {"path": "file2.txt"}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text (explanations, chat, etc.) after your <tool_call> blocks. Wait for the user to provide the tool response.\n4. The JSON inside the tags MUST be valid and include ALL required braces and the "arguments" field.\n5. If you need to use a tool, do it IMMEDIATELY without preamble.\n6. NEVER invent, guess, or hallucinate tool names. You MUST ONLY use the exact tool names provided in the 'TOOLS AVAILABLE' list above. Calling an unlisted tool will result in a hard execution error.\n\n`;
       
@@ -131,7 +131,7 @@ export async function chatCompletions(c: Context) {
       }
     }
 
-    const modelId = body.model.replace('-no-thinking', '');
+    const modelId = body.model.replace('-no-thinking', '').replace('-thinking', '');
     const modelContextWindow = getModelContextWindow(modelId)
     const estimatedTokens = estimateTokenCount(systemPrompt + prompt, modelId);
     const forcedToolName = getForcedToolName(bodyAny.tool_choice);
@@ -162,28 +162,6 @@ export async function chatCompletions(c: Context) {
 
     const isThinkingModel = !body.model.includes('no-thinking');
 
-    const LARGE_PROMPT_THRESHOLD = 131072;
-    let largePromptFile: QwenFileEntry | null = null;
-    if (Buffer.byteLength(finalPrompt, 'utf-8') > LARGE_PROMPT_THRESHOLD) {
-      try {
-        const { headers: uploadHeaders } = await import('../services/playwright.js').then(m => m.getQwenHeaders(false));
-        const hdrs: Record<string, string> = {
-          cookie: uploadHeaders['cookie'] || '',
-          'user-agent': uploadHeaders['user-agent'] || '',
-          'bx-ua': uploadHeaders['bx-ua'],
-          'bx-umidtoken': uploadHeaders['bx-umidtoken'],
-          'bx-v': uploadHeaders['bx-v'] || '',
-        };
-        largePromptFile = await uploadLargePromptAsFile(finalPrompt, hdrs);
-        if (largePromptFile) {
-          console.log(`[Chat] Prompt exceeds ${LARGE_PROMPT_THRESHOLD} chars, uploaded as file: ${largePromptFile.name}`);
-          finalPrompt = `[The full prompt content has been uploaded as an attached document: ${largePromptFile.name}. Please read and follow the instructions in that document.]`;
-        }
-      } catch (err: any) {
-        console.warn('[Chat] Failed to upload large prompt as file, sending inline:', err.message);
-      }
-    }
-
     const isGuestModeOnly = process.env.QWEN_GUEST_MODE_ONLY?.toLowerCase() === 'true';
     let stream: ReadableStream | undefined;
     let uiSessionId = '';
@@ -193,14 +171,13 @@ export async function chatCompletions(c: Context) {
     if (isGuestModeOnly) {
       console.log('[Chat] Guest mode only enabled. Bypassing account rotation.');
       try {
-        const guestFiles = largePromptFile ? [largePromptFile] : undefined;
         const result = await createQwenStream(
           finalPrompt,
           isThinkingModel,
           body.model,
           null,
           'guest',
-          guestFiles,
+          undefined,
           pendingMultimodal.length > 0 ? pendingMultimodal : undefined
         );
         stream = result.stream;
@@ -255,14 +232,13 @@ export async function chatCompletions(c: Context) {
         try {
           while (retries > 0) {
             try {
-              const accountFiles = largePromptFile ? [largePromptFile] : undefined;
               const result = await createQwenStream(
                 finalPrompt,
                 isThinkingModel,
                 body.model,
                 null,
                 accountId === 'global' ? undefined : accountId,
-                accountFiles,
+                undefined,
                 pendingMultimodal.length > 0 ? pendingMultimodal : undefined
               );
               stream = result.stream;
@@ -334,14 +310,13 @@ export async function chatCompletions(c: Context) {
       if (allOnCooldown) {
         console.warn(`[Chat] CRITICAL: All accounts are rate-limited, on cooldown, or none configured! Falling back to GUEST mode.`);
         try {
-          const fallbackFiles = largePromptFile ? [largePromptFile] : undefined;
           const result = await createQwenStream(
             finalPrompt,
             isThinkingModel,
             body.model,
             null,
             'guest',
-            fallbackFiles,
+            undefined,
             pendingMultimodal.length > 0 ? pendingMultimodal : undefined
           );
           stream = result.stream;

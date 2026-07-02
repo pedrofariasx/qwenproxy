@@ -446,6 +446,7 @@ function processModelsJson(json: any): any[] {
 
     const extendedModels = [
       ...base,
+      ...base.map((m: any) => ({ ...m, id: `${m.id}-thinking` })),
       ...base.map((m: any) => ({ ...m, id: `${m.id}-no-thinking` }))
     ];
 
@@ -520,7 +521,7 @@ export async function createQwenStream(
     const guestPage = getPageForAccount('guest');
     const guestBody = JSON.stringify({
       title: 'Guest Chat',
-      models: [modelId.replace('-no-thinking', '')],
+      models: [modelId.replace('-no-thinking', '').replace('-thinking', '')],
       chat_mode: 'guest',
       chat_type: 't2t',
       timestamp: Date.now(),
@@ -660,7 +661,7 @@ export async function createQwenStream(
   try {
     const timestamp = Math.floor(Date.now() / 1000);
   const fid = crypto.randomUUID();
-  const model = modelId.replace('-no-thinking', '');
+  const model = modelId.replace('-no-thinking', '').replace('-thinking', '');
 
   const payload: QwenPayload = {
     stream: true,
@@ -687,7 +688,7 @@ export async function createQwenStream(
           output_schema: 'phase',
           research_mode: 'normal',
           auto_thinking: false,
-          thinking_mode: 'Thinking',
+          thinking_mode: modelId.endsWith('-thinking') ? 'Thinking' : 'Auto',
           thinking_format: 'summary',
           auto_search: false
         },
