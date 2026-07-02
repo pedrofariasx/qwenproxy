@@ -1,3 +1,11 @@
+## [1.12.6](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.5...v1.12.6) (2026-07-02)
+
+
+### Bug Fixes
+
+* recover malformed tool calls with missing opening quotes in JSON values ([9328bde](https://github.com/pedrofariasx/qwenproxy/commit/9328bde90ed66f0319e709073a4138d59e289e3d))
+* recover malformed tool calls with missing opening quotes; add -thinking model variant support; remove large prompt file upload; optimize memory cache scan ([a63f054](https://github.com/pedrofariasx/qwenproxy/commit/a63f0544dd788b3678ebcc86b7327493496ac232))
+
 ## [1.12.5](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.4...v1.12.5) (2026-07-02)
 
 
