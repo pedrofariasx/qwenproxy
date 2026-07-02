@@ -89,6 +89,8 @@ export class QwenStreamParser {
   private _state: StreamParserState;
   private toolParser: StreamingToolParser | null;
   private readonly bufferAccumulator: string[] = [];
+  private _contentLength: number = 0;
+  private _contentSuffix: string = '';
 
   constructor(uiSessionId: string, options: QwenStreamParseOptions = {}) {
     this.uiSessionId = uiSessionId;
@@ -167,16 +169,19 @@ export class QwenStreamParser {
       this._state.reasoningBuffer += delta.content;
       this.options.onThinking?.(delta.content);
     } else {
-      // Update incremental content tracking
-      const deltaResult = getIncrementalDelta(this._state.lastFullContent, delta.content);
+      const deltaResult = getIncrementalDelta(
+        this._state.lastFullContent,
+        delta.content,
+        this._contentLength,
+        this._contentSuffix
+      );
+      const actualDelta = deltaResult.delta;
       this._state.lastFullContent = deltaResult.matchedContent;
+      this._contentLength = deltaResult.contentLength;
+      this._contentSuffix = deltaResult.contentSuffix;
 
-      // Process through tool parser if enabled
       if (this.toolParser) {
-        const { text, toolCalls } = this.toolParser.feed(delta.content);
-        // text is the lead-in before any tool_call tag.
-        // In non-streaming mode, the lead-in is preserved and recovered only if tool calls fail.
-        // In streaming mode, the caller decides whether to emit it.
+        const { text, toolCalls } = this.toolParser.feed(actualDelta);
         for (const tc of toolCalls) {
           this.options.onToolCall?.({
             id: tc.id,
@@ -184,15 +189,14 @@ export class QwenStreamParser {
             arguments: tc.arguments,
           });
         }
-        // Accumulate non-tool text
         if (text) {
-          this._state.lastFullContent = this._state.lastFullContent.slice(0, this._state.lastFullContent.length - delta.content.length) + text + delta.content;
+          this.options.onAnswer?.(text);
         }
       } else {
-        // Fast path: no tools, content already tracked in lastFullContent via getIncrementalDelta
+        if (actualDelta) {
+          this.options.onAnswer?.(actualDelta);
+        }
       }
-
-      this.options.onAnswer?.(delta.content);
     }
 
     return delta;
@@ -225,6 +229,8 @@ export class QwenStreamParser {
       promptTokens: this._state.promptTokens,
       completionTokens: this._state.completionTokens,
     };
+    this._contentLength = 0;
+    this._contentSuffix = '';
     this.toolParser = this.options.tools && this.options.tools.length > 0
       ? new StreamingToolParser(this.options.tools)
       : null;
