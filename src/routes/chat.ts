@@ -18,7 +18,6 @@ import {
 } from './tool-handler.js';
 import { handleStreamingResponse, handleNonStreamingResponse } from './stream-handler.js';
 
-
 export { getIncrementalDelta } from './sse-parser.js';
 export type { DeltaResult } from './sse-parser.js';
 

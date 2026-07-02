@@ -138,6 +138,10 @@ function fixMissingOpeningQuotes(input: string): string {
       /([{,[]\s*[a-zA-Z_][\w]*\s*:\s*)([^"\s,}\]][^"\n]*?)"([\s,}\]])/g,
       '$1"$2"$3'
     );
+    out = out.replace(
+      /(:\s*)([A-Za-z_][\w.-]*?)"([\s,}\]])/g,
+      '$1"$2"$3'
+    );
   } while (out !== prev);
   return out;
 }
