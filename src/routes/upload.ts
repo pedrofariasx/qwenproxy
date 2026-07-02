@@ -735,3 +735,52 @@ export async function processImagesForQwen(
 
   return { text: textParts.join("\n"), files };
 }
+
+const LARGE_PROMPT_THRESHOLD = 131072;
+
+export async function uploadLargePromptAsFile(
+  promptText: string,
+  headers: Record<string, string>,
+): Promise<QwenFileEntry | null> {
+  const byteLength = Buffer.byteLength(promptText, "utf-8");
+  if (byteLength <= LARGE_PROMPT_THRESHOLD) return null;
+
+  const filename = `prompt_${Date.now()}.txt`;
+  const buffer = Buffer.from(promptText, "utf-8");
+
+  const stsData = await getSTSToken(filename, buffer.length, "file", headers);
+  const fileUrl = await uploadToOSS(buffer.buffer, stsData, filename);
+
+  return {
+    type: "file",
+    file: {
+      created_at: Date.now(),
+      data: {},
+      filename,
+      hash: null,
+      id: stsData.file_id,
+      user_id: "proxy-user",
+      meta: { name: filename, size: buffer.length, content_type: "text/plain" },
+      update_at: Date.now(),
+      lastModified: Date.now(),
+      name: filename,
+      webkitRelativePath: "",
+      size: buffer.length,
+      type: "text/plain",
+    },
+    id: stsData.file_id,
+    url: fileUrl,
+    name: filename,
+    collection_name: "",
+    progress: 100,
+    status: "uploaded",
+    greenNet: "success",
+    size: buffer.length,
+    error: "",
+    itemId: crypto.randomUUID(),
+    file_type: "text/plain",
+    showType: "file",
+    file_class: "file",
+    uploadTaskId: crypto.randomUUID(),
+  };
+}

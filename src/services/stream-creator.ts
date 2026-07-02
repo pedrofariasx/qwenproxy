@@ -7,6 +7,7 @@ import { getClientHintsHeaders, Mutex } from './browser-manager.js';
 import type { Page } from 'playwright';
 import { releaseAccountInUse } from '../core/account-manager.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
+import { uploadLargePromptAsFile } from '../routes/upload.js';
 import crypto from 'crypto';
 
 const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
@@ -159,11 +160,18 @@ function cleanupStaleSessions() {
   }
 }
 
+let lastSessionCleanup = Date.now();
+const SESSION_CLEANUP_INTERVAL_MS = 60_000;
+const SESSION_MAX_ENTRIES = 2000;
+
 export function updateSessionParent(sessionId: string, parentId: string | null) {
-  if (sessionId) {
-    if (sessionStates.size > 10000) cleanupStaleSessions();
-    sessionStates.set(sessionId, { parentId, timestamp: Date.now() });
+  if (!sessionId) return;
+  const now = Date.now();
+  if (now - lastSessionCleanup > SESSION_CLEANUP_INTERVAL_MS || sessionStates.size > SESSION_MAX_ENTRIES) {
+    cleanupStaleSessions();
+    lastSessionCleanup = now;
   }
+  sessionStates.set(sessionId, { parentId, timestamp: now });
 }
 
 function addIdleTimeoutToStream(
@@ -582,7 +590,41 @@ export async function createQwenStream(
   const actualParentId: string | null = null;
 
   const resolvedFiles = files || [];
-  if (pendingMultimodal && pendingMultimodal.length > 0 && resolvedFiles.length === 0) {
+  const LARGE_PROMPT_THRESHOLD = 131072;
+  let finalPrompt = prompt;
+  if (Buffer.byteLength(finalPrompt, 'utf-8') > LARGE_PROMPT_THRESHOLD) {
+    try {
+      const uploadHeaders: Record<string, string> = {
+        cookie: chatHeaders['cookie'] || '',
+        'user-agent': chatHeaders['user-agent'] || '',
+        'bx-ua': chatHeaders['bx-ua'] || '',
+        'bx-umidtoken': chatHeaders['bx-umidtoken'] || '',
+        'bx-v': chatHeaders['bx-v'] || '',
+      };
+      if (!uploadHeaders['bx-ua']) {
+        console.warn('[Qwen] Missing bx-ua header for large prompt upload, attempting forced refresh...');
+        const { headers: refreshedHeaders } = await getQwenHeaders(true, accountId);
+        Object.assign(uploadHeaders, {
+          cookie: refreshedHeaders['cookie'] || uploadHeaders['cookie'],
+          'user-agent': refreshedHeaders['user-agent'] || uploadHeaders['user-agent'],
+          'bx-ua': refreshedHeaders['bx-ua'],
+          'bx-umidtoken': refreshedHeaders['bx-umidtoken'],
+          'bx-v': refreshedHeaders['bx-v'] || uploadHeaders['bx-v'],
+        });
+      }
+      assertAntiBotHeaders(uploadHeaders, 'Large prompt upload');
+      const largePromptFile = await uploadLargePromptAsFile(finalPrompt, uploadHeaders);
+      if (largePromptFile) {
+        console.log(`[Qwen] Prompt exceeds ${LARGE_PROMPT_THRESHOLD} bytes, uploaded as file: ${largePromptFile.name}`);
+        resolvedFiles.push(largePromptFile);
+        finalPrompt = `[The full prompt content has been uploaded as an attached document: ${largePromptFile.name}. Please read and follow the instructions in that document.]`;
+      }
+    } catch (err: any) {
+      console.warn('[Qwen] Failed to upload large prompt as file, sending inline:', err.message);
+    }
+  }
+
+  if (pendingMultimodal && pendingMultimodal.length > 0) {
     try {
       const { processImagesForQwen } = await import('../routes/upload.js');
       const { headers: fullHeaders } = await getQwenHeaders(false, accountId);
@@ -634,7 +676,7 @@ export async function createQwenStream(
         parentId: actualParentId,
         childrenIds: [],
         role: 'user',
-        content: prompt,
+        content: finalPrompt,
         user_action: 'chat',
         files: resolvedFiles,
         timestamp: timestamp,

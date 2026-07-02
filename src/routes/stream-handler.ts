@@ -102,26 +102,27 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let targetResponseIdSet = false;
       let currentThoughtIndex = 0;
       const toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
-      let buffer = '';
-      let bufferOffset = 0;
+      const bufferChunks: string[] = [];
+      let bufferLen = 0;
+      let lineStart = 0;
       let completionTokens = 0;
       let promptTokens = Math.ceil(ctx.finalPrompt.length / 3.5);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        while (bufferOffset < buffer.length) {
-          const newlineIdx = buffer.indexOf('\n', bufferOffset);
-          if (newlineIdx === -1) break;
-          const line = buffer.slice(bufferOffset, newlineIdx);
-          bufferOffset = newlineIdx + 1;
+      const processLines = (fullBuffer: string) => {
+        let pos = lineStart;
+        while (pos < fullBuffer.length) {
+          const newlineIdx = fullBuffer.indexOf('\n', pos);
+          if (newlineIdx === -1) {
+            lineStart = pos;
+            return;
+          }
+          const line = fullBuffer.substring(pos, newlineIdx);
+          pos = newlineIdx + 1;
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
           const dataStr = trimmed.slice(6);
           if (dataStr === '[DONE]') {
-            streamWriter.write('data: [DONE]\n\n');
+            streamWriter.write('data: [DONE]\n');
             continue;
           }
 
@@ -211,14 +212,42 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
             }
           }
         }
+        lineStart = pos;
+      };
 
-        if (bufferOffset > 0) {
-          buffer = buffer.slice(bufferOffset);
-          bufferOffset = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const decoded = decoder.decode(value, { stream: true });
+        bufferChunks.push(decoded);
+        bufferLen += decoded.length;
+
+        if (bufferLen >= 4096 || decoded.includes('\n')) {
+          const fullBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
+          processLines(fullBuffer);
+
+          const remaining = fullBuffer.substring(lineStart);
+          bufferChunks.length = 0;
+          if (remaining) {
+            bufferChunks.push(remaining);
+            bufferLen = remaining.length;
+          } else {
+            bufferLen = 0;
+          }
+          lineStart = 0;
         }
       }
 
-      const upstreamError = parseQwenErrorPayload(buffer);
+      if (bufferLen > 0) {
+        const finalBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
+        processLines(finalBuffer);
+      }
+
+      const tailBuffer = bufferChunks.length > 0
+        ? (bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('')).substring(lineStart)
+        : '';
+
+      const upstreamError = parseQwenErrorPayload(tailBuffer);
       if (upstreamError) {
         writeEvent({
           id: ctx.completionId,

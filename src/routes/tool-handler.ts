@@ -3,6 +3,15 @@ import { robustParseJSON } from '../utils/json.js';
 import type { FunctionToolDefinition } from '../tools/types.js';
 import type { Message } from '../utils/types.js';
 
+const contractCache = new Map<string, string>();
+const manifestCache = new Map<string, string>();
+const CACHE_MAX_ENTRIES = 64;
+
+function toolCacheKey(tools: FunctionToolDefinition[], forcedToolName: string, extra?: string): string {
+  const names = tools.map(t => getToolName(t)).join('|');
+  return `${names}##${forcedToolName}##${extra ?? ''}`;
+}
+
 export function getToolFunction(tool: FunctionToolDefinition | any): any {
   return tool?.type === 'function' ? tool.function : tool;
 }
@@ -192,6 +201,10 @@ export function selectCandidateTools(
 export function buildCompactToolManifest(tools: FunctionToolDefinition[], forcedToolName = ''): string {
   if (tools.length === 0) return '';
 
+  const cacheKey = toolCacheKey(tools, forcedToolName);
+  const cached = manifestCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const lines = tools.map(tool => {
     const name = getToolName(tool);
     const description = compactPromptText(getToolDescription(tool), 140);
@@ -209,7 +222,11 @@ export function buildCompactToolManifest(tools: FunctionToolDefinition[], forced
     return `${name}(${signature})${description ? ` - ${description}` : ''}${marker}`;
   });
 
-  return `[COMPACT TOOL MANIFEST]\n${lines.join('\n')}`;
+  const result = `[COMPACT TOOL MANIFEST]
+${lines.join('\n')}`;
+  if (manifestCache.size >= CACHE_MAX_ENTRIES) manifestCache.clear();
+  manifestCache.set(cacheKey, result);
+  return result;
 }
 
 export function buildToolCallContract(
@@ -217,6 +234,10 @@ export function buildToolCallContract(
   forcedToolName = '',
   parallelToolCalls = true
 ): string {
+  const cacheKey = toolCacheKey(tools, forcedToolName, parallelToolCalls ? 'p' : 's');
+  const cached = contractCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
   const names = tools.map(getToolName).filter(Boolean);
   const toolList = names.length > 0 ? names.join(', ') : 'none';
   const forcedLine = forcedToolName
@@ -230,7 +251,7 @@ export function buildToolCallContract(
     ? `Workspace file mutation capabilities detected in these exact tools: ${fileMutationNames.join(', ')}. When the user asks to create, edit, patch, replace, rename, move, delete, or save files, choose the matching tool by its description and parameter schema, not by a preferred generic name.`
     : '';
 
-  return `[TOOL CALL CONTRACT - MUST FOLLOW]
+  const result = `[TOOL CALL CONTRACT - MUST FOLLOW]
 Available tool names: ${toolList}
 ${fileMutationLine}
 Format:
@@ -248,6 +269,9 @@ Rules:
 6. If no tool is needed, do not emit any tool call block.
 7. Put only valid JSON inside each <tool_call> block. No markdown fences, comments, or explanatory text inside the block.
 8. If you emit a tool call, stop after the closing </tool_call> tag and wait for the tool response.`;
+  if (contractCache.size >= CACHE_MAX_ENTRIES) contractCache.clear();
+  contractCache.set(cacheKey, result);
+  return result;
 }
 
 export function parseToolArguments(value: unknown): Record<string, unknown> {

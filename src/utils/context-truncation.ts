@@ -47,10 +47,11 @@ function stringifyToolArgs(args: unknown): string {
   }
 }
 
-function buildToolMemory(messages: Array<{ role: string; content: string | null | any[] | Record<string, unknown>; tool_calls?: any[]; name?: string; tool_call_id?: string }>): string {
+function buildToolMemory(messages: Array<{ role: string; content: string | null | any[] | Record<string, unknown>; tool_calls?: any[]; name?: string; tool_call_id?: string }>, cutoffIndex: number): string {
   const lines: string[] = [];
 
-  for (const msg of messages) {
+  for (let i = 0; i < cutoffIndex; i++) {
+    const msg = messages[i];
     if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
       for (const call of msg.tool_calls) {
         const name = call?.function?.name || call?.name || 'unknown_tool';
@@ -128,7 +129,7 @@ export function truncateMessages(
         const truncatedContent = truncateSemantically(msg.content, maxChars);
         result.push({ role: msg.role, content: `[Truncated] ${truncatedContent}` });
       }
-      droppedToolMemory = buildToolMemory(normalizedMessages.slice(0, i));
+      droppedToolMemory = buildToolMemory(normalizedMessages, i);
       break;
     }
   }
