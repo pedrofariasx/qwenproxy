@@ -1,3 +1,10 @@
+## [1.12.5](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.4...v1.12.5) (2026-07-02)
+
+
+### Performance Improvements
+
+* optimize streaming, tool resolution, and caching for long chats ([cb518e0](https://github.com/pedrofariasx/qwenproxy/commit/cb518e079e945af92b7ca5e4c99a7c8e38d4eac6))
+
 ## [1.12.4](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.3...v1.12.4) (2026-06-27)
 
 
