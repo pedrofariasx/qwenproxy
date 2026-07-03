@@ -233,7 +233,7 @@ async function refillPoolForAccount(accountId: string) {
   const stillNeed = Math.max(0, need - reused);
   for (let i = 0; i < stillNeed; i++) {
     if (i > 0) {
-      await sleep(800 + Math.floor(Math.random() * 2200));
+      await sleep(300 + Math.floor(Math.random() * 700));
     }
     try {
       const chatId = await createRealQwenChat(headers, acctId);

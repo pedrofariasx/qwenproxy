@@ -246,6 +246,7 @@ export async function chatCompletions(c: Context) {
                 headers: result.headers,
               });
               success = true;
+              releaseAccountInUse(accountId);
               break;
             } catch (err: any) {
               retries--;

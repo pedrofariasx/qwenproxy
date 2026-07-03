@@ -618,7 +618,7 @@ export async function createQwenStream(
       if (largePromptFile) {
         console.log(`[Qwen] Prompt exceeds ${LARGE_PROMPT_THRESHOLD} bytes, uploaded as file: ${largePromptFile.name}`);
         resolvedFiles.push(largePromptFile);
-        finalPrompt = `[The full prompt content has been uploaded as an attached document: ${largePromptFile.name}. Please read and follow the instructions in that document.]`;
+        finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
       }
     } catch (err: any) {
       console.warn('[Qwen] Failed to upload large prompt as file, sending inline:', err.message);

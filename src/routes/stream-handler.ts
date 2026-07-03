@@ -222,7 +222,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         bufferChunks.push(decoded);
         bufferLen += decoded.length;
 
-        if (bufferLen >= 4096 || decoded.includes('\n')) {
+        if (decoded.includes('\n')) {
           const fullBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
           processLines(fullBuffer);
 
