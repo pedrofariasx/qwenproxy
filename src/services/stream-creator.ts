@@ -196,7 +196,6 @@ function addIdleTimeoutToStream(
     idleTimer = setTimeout(() => {
       const message = `${label} idle timeout after ${idleTimeoutMs}ms without upstream data`;
       clearIdleTimer();
-      controller.abort();
       onTimeout?.();
       try { stream.cancel(message).catch(() => {}); } catch { /* ignore */ }
     }, idleTimeoutMs);
@@ -618,7 +617,40 @@ export async function createQwenStream(
       if (largePromptFile) {
         console.log(`[Qwen] Prompt exceeds ${LARGE_PROMPT_THRESHOLD} bytes, uploaded as file: ${largePromptFile.name}`);
         resolvedFiles.push(largePromptFile);
-        finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
+        
+        // For text files, read the content and prepend it to the prompt for better context
+        // This ensures the AI actually sees the file content, not just knows it exists
+        if (largePromptFile.name.endsWith('.txt') || largePromptFile.name.endsWith('.log') || largePromptFile.name.endsWith('.md')) {
+          try {
+            // Fetch the file content since it was uploaded
+            const fileResponse = await fetch(largePromptFile.url, {
+              headers: {
+                cookie: uploadHeaders['cookie'] || '',
+                'user-agent': uploadHeaders['user-agent'] || '',
+                'bx-ua': uploadHeaders['bx-ua'] || '',
+                'bx-umidtoken': uploadHeaders['bx-umidtoken'] || '',
+                'bx-v': uploadHeaders['bx-v'] || '',
+              }
+            });
+            
+            if (fileResponse.ok) {
+              const fileContent = await fileResponse.text();
+              // Prepend the file content to the prompt so it's part of the conversation context
+              finalPrompt = `${fileContent}\n\n---\n\n[SYSTEM INSTRUCTIONS — The above content is from the uploaded file "${largePromptFile.name}". Internalize this as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
+            } else {
+              console.warn(`[Qwen] Failed to fetch uploaded file content: ${fileResponse.status}`);
+              // Fallback to just the instruction if we can't fetch the content
+              finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
+            }
+          } catch (fileError) {
+            console.warn(`[Qwen] Error reading uploaded file content:`, fileError.message);
+            // Fallback to just the instruction if we can't read the file
+            finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
+          }
+        } else {
+          // For non-text files, just use the instruction
+          finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
+        }
       }
     } catch (err: any) {
       console.warn('[Qwen] Failed to upload large prompt as file, sending inline:', err.message);
@@ -660,211 +692,211 @@ export async function createQwenStream(
 
   try {
     const timestamp = Math.floor(Date.now() / 1000);
-  const fid = crypto.randomUUID();
-  const model = modelId.replace('-no-thinking', '').replace('-thinking', '');
+    const fid = crypto.randomUUID();
+    const model = modelId.replace('-no-thinking', '').replace('-thinking', '');
 
-  const payload: QwenPayload = {
-    stream: true,
-    version: '2.1',
-    incremental_output: true,
-    chat_id: chatId,
-    chat_mode: accountId === 'guest' ? 'guest' : 'normal',
-    model: model,
-    parent_id: actualParentId,
-    messages: [
-      {
-        fid: fid,
-        parentId: actualParentId,
-        childrenIds: [],
-        role: 'user',
-        content: finalPrompt,
-        user_action: 'chat',
-        files: resolvedFiles,
-        timestamp: timestamp,
-        models: [model],
-        chat_type: 't2t',
-        feature_config: {
-          thinking_enabled: enableThinking,
-          output_schema: 'phase',
-          research_mode: 'normal',
-          auto_thinking: false,
-          thinking_mode: modelId.endsWith('-thinking') ? 'Thinking' : 'Auto',
-          thinking_format: 'summary',
-          auto_search: false
-        },
-        extra: {
-          meta: {
-            subChatType: 't2t'
-          }
-        },
-        sub_chat_type: 't2t',
-        parent_id: actualParentId
-      }
-    ],
-    timestamp: timestamp + 1
-  };
-
-  const payloadJson = JSON.stringify(payload);
-  const payloadSize = Buffer.byteLength(payloadJson);
-  if (payloadSize > MAX_PAYLOAD_SIZE) {
-    throw new Error(`Payload too large: ${payloadSize} bytes exceeds limit of ${MAX_PAYLOAD_SIZE} bytes`);
-  }
-  const payloadMB = payloadSize / (1024 * 1024);
-  const timeoutMs = BASE_TIMEOUT_MS + Math.ceil(payloadMB * TIMEOUT_PER_MB);
-
-  const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
-
-  const page = getPageForAccount(accountId);
-  if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
-    const completionPage = page;
-    try {
-      const browserResult = await browserStreamFetch(completionPage, url, {
-        method: 'POST',
-        headers: buildBrowserCompletionHeaders(chatHeaders),
-        body: payloadJson,
-        timeoutMs,
-      });
-
-      if (browserResult.contentType.includes('text/event-stream') && browserResult.status < 400) {
-        const controller = new AbortController();
-        return {
-          stream: wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
-            browserResult.abort();
-          }),
-          headers: chatHeaders,
-          uiSessionId: chatId,
-          controller,
-          accountId: accountId || 'guest'
-        };
-      }
-
-      if (browserResult.body) {
-        const peekText = browserResult.body;
-        if (isTmdChallenge(peekText)) {
-          console.warn('[Qwen] TMD challenge detected via browser, attempting captcha solve before retry...');
-          try {
-            await solveTmdChallengeIfPresent(completionPage, `chat ${chatId}`);
-            const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
-            await sleep(500 + Math.floor(Math.random() * 1000));
-            const retryResult = await browserStreamFetch(completionPage, url, {
-              method: 'POST',
-              headers: buildBrowserCompletionHeaders(freshHeaders),
-              body: payloadJson,
-              timeoutMs,
-            });
-            if (retryResult.contentType.includes('text/event-stream') && retryResult.status < 400) {
-              const controller = new AbortController();
-              return {
-                stream: wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
-                  retryResult.abort();
-                }),
-                headers: freshHeaders,
-                uiSessionId: chatId,
-                controller,
-                accountId: accountId || 'guest'
-              };
+    const payload: QwenPayload = {
+      stream: true,
+      version: '2.1',
+      incremental_output: true,
+      chat_id: chatId,
+      chat_mode: accountId === 'guest' ? 'guest' : 'normal',
+      model: model,
+      parent_id: actualParentId,
+      messages: [
+        {
+          fid: fid,
+          parentId: actualParentId,
+          childrenIds: [],
+          role: 'user',
+          content: finalPrompt,
+          user_action: 'chat',
+          files: resolvedFiles,
+          timestamp: timestamp,
+          models: [model],
+          chat_type: 't2t',
+          feature_config: {
+            thinking_enabled: enableThinking,
+            output_schema: 'phase',
+            research_mode: 'normal',
+            auto_thinking: false,
+            thinking_mode: modelId.endsWith('-thinking') ? 'Thinking' : 'Auto',
+            thinking_format: 'summary',
+            auto_search: false
+          },
+          extra: {
+            meta: {
+              subChatType: 't2t'
             }
-            if (retryResult.body && isTmdChallenge(retryResult.body)) {
-              await solveTmdChallengeIfPresent(completionPage, `chat ${chatId} retry`);
-              throw new QwenUpstreamError('Qwen TMD challenge persists after captcha solve and header refresh.', 'FAIL_SYS_USER_VALIDATE', 403);
-            }
-            if (retryResult.body) {
-              handleErrorBody(retryResult.body, retryResult.status);
-            }
-          } catch (retryErr) {
-            if (retryErr instanceof QwenUpstreamError) throw retryErr;
-            console.error('[Qwen] Browser TMD retry failed:', (retryErr as Error).message);
-          }
-          throw new QwenUpstreamError('Qwen TMD anti-bot challenge detected. Captcha solve/header refresh was attempted but the challenge persists.', 'FAIL_SYS_USER_VALIDATE', 403);
+          },
+          sub_chat_type: 't2t',
+          parent_id: actualParentId
         }
-        handleErrorBody(peekText, browserResult.status);
-      }
-      throw new Error(`Browser stream fetch returned non-stream response without body: ${browserResult.status} ${browserResult.statusText}`);
-    } catch (browserErr: any) {
-      if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
-      throw new Error(`Browser stream fetch failed with active Qwen page: ${browserErr.message}`, { cause: browserErr });
+      ],
+      timestamp: timestamp + 1
+    };
+
+    const payloadJson = JSON.stringify(payload);
+    const payloadSize = Buffer.byteLength(payloadJson);
+    if (payloadSize > MAX_PAYLOAD_SIZE) {
+      throw new Error(`Payload too large: ${payloadSize} bytes exceeds limit of ${MAX_PAYLOAD_SIZE} bytes`);
     }
-  }
+    const payloadMB = payloadSize / (1024 * 1024);
+    const timeoutMs = BASE_TIMEOUT_MS + Math.ceil(payloadMB * TIMEOUT_PER_MB);
 
-  if (!process.env.TEST_MOCK_PLAYWRIGHT) {
-    throw new Error(`Cannot fetch Qwen completion outside an active Qwen browser page for ${accountId || 'global'}. Refusing direct fetch to avoid TMD challenge.`);
-  }
+    const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
-    body: payloadJson,
-    signal: controller.signal
-  });
-  clearTimeout(timeoutId);
-
-  const responseContentType = response.headers.get('content-type') || '';
-  if (process.env.TEST_MOCK_PLAYWRIGHT && response.ok && response.body) {
-    return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
-  }
-
-  if (response.ok && !responseContentType.includes('text/event-stream') && response.body) {
-    const peekText = await response.clone().text().catch(() => '');
-    if (isTmdChallenge(peekText)) {
-      console.warn('[Qwen] TMD challenge detected, attempting browser captcha solve before retry...');
+    const page = getPageForAccount(accountId);
+    if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
+      const completionPage = page;
       try {
-        const challengePage = getPageForAccount(accountId);
-        if (challengePage && !challengePage.isClosed() && challengePage.url().includes('chat.qwen.ai')) {
-          await solveTmdChallengeIfPresent(challengePage, `chat ${chatId}`);
-        }
-        const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
-        await sleep(500 + Math.floor(Math.random() * 1000));
-        const retryController = new AbortController();
-        const retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
-        const retryResponse = await fetch(url, {
+        const browserResult = await browserStreamFetch(completionPage, url, {
           method: 'POST',
-          headers: buildNodeCompletionHeaders(freshHeaders, chatId, accountId),
+          headers: buildBrowserCompletionHeaders(chatHeaders),
           body: payloadJson,
-          signal: retryController.signal
+          timeoutMs,
         });
-        clearTimeout(retryTimeoutId);
 
-        const retryContentType = retryResponse.headers.get('content-type') || '';
-        if (retryResponse.ok && retryContentType.includes('text/event-stream') && retryResponse.body) {
-          return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: accountId || 'guest' };
+        if (browserResult.contentType.includes('text/event-stream') && browserResult.status < 400) {
+          const controller = new AbortController();
+          return {
+            stream: wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
+              browserResult.abort();
+            }),
+            headers: chatHeaders,
+            uiSessionId: chatId,
+            controller,
+            accountId: accountId || 'guest'
+          };
         }
 
-        const retryPeek = await retryResponse.clone().text().catch(() => '');
-        if (isTmdChallenge(retryPeek)) {
+        if (browserResult.body) {
+          const peekText = browserResult.body;
+          if (isTmdChallenge(peekText)) {
+            console.warn('[Qwen] TMD challenge detected via browser, attempting captcha solve before retry...');
+            try {
+              await solveTmdChallengeIfPresent(completionPage, `chat ${chatId}`);
+              const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
+              await sleep(500 + Math.floor(Math.random() * 1000));
+              const retryResult = await browserStreamFetch(completionPage, url, {
+                method: 'POST',
+                headers: buildBrowserCompletionHeaders(freshHeaders),
+                body: payloadJson,
+                timeoutMs,
+              });
+              if (retryResult.contentType.includes('text/event-stream') && retryResult.status < 400) {
+                const controller = new AbortController();
+                return {
+                  stream: wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
+                    retryResult.abort();
+                  }),
+                  headers: freshHeaders,
+                  uiSessionId: chatId,
+                  controller,
+                  accountId: accountId || 'guest'
+                };
+              }
+              if (retryResult.body && isTmdChallenge(retryResult.body)) {
+                await solveTmdChallengeIfPresent(completionPage, `chat ${chatId} retry`);
+                throw new QwenUpstreamError('Qwen TMD challenge persists after captcha solve and header refresh.', 'FAIL_SYS_USER_VALIDATE', 403);
+              }
+              if (retryResult.body) {
+                handleErrorBody(retryResult.body, retryResult.status);
+              }
+            } catch (retryErr) {
+              if (retryErr instanceof QwenUpstreamError) throw retryErr;
+              console.error('[Qwen] Browser TMD retry failed:', (retryErr as Error).message);
+            }
+            throw new QwenUpstreamError('Qwen TMD anti-bot challenge detected. Captcha solve/header refresh was attempted but the challenge persists.', 'FAIL_SYS_USER_VALIDATE', 403);
+          }
+          handleErrorBody(peekText, browserResult.status);
+        }
+        throw new Error(`Browser stream fetch returned non-stream response without body: ${browserResult.status} ${browserResult.statusText}`);
+      } catch (browserErr: any) {
+        if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
+        throw new Error(`Browser stream fetch failed with active Qwen page: ${browserErr.message}`, { cause: browserErr });
+      }
+    }
+
+    if (!process.env.TEST_MOCK_PLAYWRIGHT) {
+      throw new Error(`Cannot fetch Qwen completion outside an active Qwen browser page for ${accountId || 'global'}. Refusing direct fetch to avoid TMD challenge.`);
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
+      body: payloadJson,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    const responseContentType = response.headers.get('content-type') || '';
+    if (process.env.TEST_MOCK_PLAYWRIGHT && response.ok && response.body) {
+      return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
+    }
+
+    if (response.ok && !responseContentType.includes('text/event-stream') && response.body) {
+      const peekText = await response.clone().text().catch(() => '');
+      if (isTmdChallenge(peekText)) {
+        console.warn('[Qwen] TMD challenge detected, attempting browser captcha solve before retry...');
+        try {
           const challengePage = getPageForAccount(accountId);
           if (challengePage && !challengePage.isClosed() && challengePage.url().includes('chat.qwen.ai')) {
-            await solveTmdChallengeIfPresent(challengePage, `chat ${chatId} retry`);
+            await solveTmdChallengeIfPresent(challengePage, `chat ${chatId}`);
           }
-          throw new QwenUpstreamError('Qwen TMD challenge persists after captcha solve and header refresh. The account may need manual captcha resolution.', 'FAIL_SYS_USER_VALIDATE', 403);
+          const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
+          await sleep(500 + Math.floor(Math.random() * 1000));
+          const retryController = new AbortController();
+          const retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
+          const retryResponse = await fetch(url, {
+            method: 'POST',
+            headers: buildNodeCompletionHeaders(freshHeaders, chatId, accountId),
+            body: payloadJson,
+            signal: retryController.signal
+          });
+          clearTimeout(retryTimeoutId);
+
+          const retryContentType = retryResponse.headers.get('content-type') || '';
+          if (retryResponse.ok && retryContentType.includes('text/event-stream') && retryResponse.body) {
+            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: accountId || 'guest' };
+          }
+
+          const retryPeek = await retryResponse.clone().text().catch(() => '');
+          if (isTmdChallenge(retryPeek)) {
+            const challengePage = getPageForAccount(accountId);
+            if (challengePage && !challengePage.isClosed() && challengePage.url().includes('chat.qwen.ai')) {
+              await solveTmdChallengeIfPresent(challengePage, `chat ${chatId} retry`);
+            }
+            throw new QwenUpstreamError('Qwen TMD challenge persists after captcha solve and header refresh. The account may need manual captcha resolution.', 'FAIL_SYS_USER_VALIDATE', 403);
+          }
+
+          if (retryResponse.ok && retryResponse.body) {
+            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: accountId || 'guest' };
+          }
+        } catch (retryErr) {
+          if (retryErr instanceof QwenUpstreamError) throw retryErr;
+          console.error('[Qwen] TMD retry failed:', (retryErr as Error).message);
         }
 
-        if (retryResponse.ok && retryResponse.body) {
-          return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: accountId || 'guest' };
-        }
-      } catch (retryErr) {
-        if (retryErr instanceof QwenUpstreamError) throw retryErr;
-        console.error('[Qwen] TMD retry failed:', (retryErr as Error).message);
+        throw new QwenUpstreamError('Qwen TMD anti-bot challenge detected. Captcha solve/header refresh was attempted but the challenge persists.', 'FAIL_SYS_USER_VALIDATE', 403);
+      } else {
+        handleErrorBody(peekText, response.status);
       }
-
-      throw new QwenUpstreamError('Qwen TMD anti-bot challenge detected. Captcha solve/header refresh was attempted but the challenge persists.', 'FAIL_SYS_USER_VALIDATE', 403);
-    } else {
-      handleErrorBody(peekText, response.status);
     }
-  }
 
-  if (!response.ok || !response.body) {
-    const errText = await response.text().catch(() => '');
-    const contentType = response.headers.get('content-type') || '';
+    if (!response.ok || !response.body) {
+      const errText = await response.text().catch(() => '');
+      const contentType = response.headers.get('content-type') || '';
 
-    if (contentType.includes('application/json')) {
-      handleJsonErrorBody(errText);
+      if (contentType.includes('application/json')) {
+        handleJsonErrorBody(errText);
+      }
+      throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
     }
-    throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
-  }
 
-  return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
+    return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'guest' };
   } catch (err) {
     releaseStreamResources();
     throw err;
