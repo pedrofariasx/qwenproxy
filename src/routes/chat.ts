@@ -78,10 +78,6 @@ export async function chatCompletions(c: Context) {
         prompt += `User: ${contentStr || ''}\n\n`;
       } else if (msg.role === 'assistant') {
         let assistantContent = contentStr || '';
-        const reasoning = (msg as any).reasoning_content;
-        if (reasoning) {
-          assistantContent = `<think>\n${reasoning}\n</think>\n${assistantContent}`;
-        }
         if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
            for (const tc of msg.tool_calls) {
              const args = tc.function?.arguments;
