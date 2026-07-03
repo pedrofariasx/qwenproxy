@@ -1,3 +1,10 @@
+## [1.12.9](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.8...v1.12.9) (2026-07-03)
+
+
+### Bug Fixes
+
+* release account lock on success, improve stream line processing, enhance prompt handling, optimize warm pool refill timing ([3806cf6](https://github.com/pedrofariasx/qwenproxy/commit/3806cf6119c267d0ee6131912cef06c881f4c716))
+
 ## [1.12.8](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.7...v1.12.8) (2026-07-03)
 
 
