@@ -1,3 +1,10 @@
+## [1.12.8](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.7...v1.12.8) (2026-07-03)
+
+
+### Bug Fixes
+
+* remove reasoning_content from prompt history to reduce token usage ([4f7702e](https://github.com/pedrofariasx/qwenproxy/commit/4f7702ed07b55f6e20297c4e50f3dd9593be480c))
+
 ## [1.12.7](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.6...v1.12.7) (2026-07-02)
 
 
