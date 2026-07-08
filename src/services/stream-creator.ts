@@ -643,7 +643,8 @@ export async function createQwenStream(
               finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
             }
           } catch (fileError) {
-            console.warn(`[Qwen] Error reading uploaded file content:`, fileError.message);
+            const fileErrorMessage = fileError instanceof Error ? fileError.message : String(fileError);
+            console.warn(`[Qwen] Error reading uploaded file content:`, fileErrorMessage);
             // Fallback to just the instruction if we can't read the file
             finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
           }

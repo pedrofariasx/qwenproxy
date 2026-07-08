@@ -1,4 +1,6 @@
 import { EventEmitter } from 'events'
+import fs from 'fs'
+import os from 'os'
 import { config } from './config.js'
 import { metrics } from './metrics.js'
 
@@ -50,12 +52,36 @@ export class Watchdog extends EventEmitter {
   }
 
   private checkRAM(): 'ok' | 'warning' | 'critical' {
-    const mem = process.memoryUsage()
-    const usagePercent = (mem.heapUsed / mem.heapTotal) * 100
+    const usagePercent = this.getMemoryUsagePercent()
 
     if (usagePercent > config.watchdog.ram.criticalThreshold) return 'critical'
     if (usagePercent > config.watchdog.ram.warningThreshold) return 'warning'
     return 'ok'
+  }
+
+  private readNumberFile(filePath: string): number | null {
+    try {
+      const value = fs.readFileSync(filePath, 'utf8').trim()
+      if (!value || value === 'max') return null
+      const parsed = Number.parseInt(value, 10)
+      return Number.isFinite(parsed) ? parsed : null
+    } catch {
+      return null
+    }
+  }
+
+  private getMemoryUsagePercent(): number {
+    const cgroupCurrent = this.readNumberFile('/sys/fs/cgroup/memory.current')
+      ?? this.readNumberFile('/sys/fs/cgroup/memory/memory.usage_in_bytes')
+    const cgroupMax = this.readNumberFile('/sys/fs/cgroup/memory.max')
+      ?? this.readNumberFile('/sys/fs/cgroup/memory/memory.limit_in_bytes')
+
+    if (cgroupCurrent && cgroupMax && cgroupMax > 0) {
+      return (cgroupCurrent / cgroupMax) * 100
+    }
+
+    const mem = process.memoryUsage()
+    return (mem.rss / os.totalmem()) * 100
   }
 
   private checkStreams(): 'ok' | 'congested' | 'blocked' {

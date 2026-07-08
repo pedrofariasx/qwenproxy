@@ -94,7 +94,8 @@ app.notFound((c) => c.json({ error: 'Not found' }, 404))
 export async function startServer(): Promise<void> {
   await cache.connect()
 
-  const { loadAccounts } = await import('../core/accounts.js')
+  const { loadAccounts, importAccountsFromEnv } = await import('../core/accounts.js')
+  importAccountsFromEnv()
   const accounts = loadAccounts()
 
   const { initPlaywright, initPlaywrightForAccount } = await import('../services/playwright.js')
