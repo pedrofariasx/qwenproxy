@@ -1,3 +1,10 @@
+## [1.12.12](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.11...v1.12.12) (2026-07-18)
+
+
+### Bug Fixes
+
+* inline chunk-flush logic in page.evaluate to avoid esbuild __name helper reference in browser context ([6e2b666](https://github.com/pedrofariasx/qwenproxy/commit/6e2b666e67763a93ee6087f0786f928cfcef1f97))
+
 ## [1.12.11](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.10...v1.12.11) (2026-07-18)
 
 
