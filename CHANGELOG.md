@@ -1,3 +1,10 @@
+## [1.12.13](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.12...v1.12.13) (2026-07-18)
+
+
+### Bug Fixes
+
+* stop leaking </environment_details> into content after tool call close tag ([bfe7d17](https://github.com/pedrofariasx/qwenproxy/commit/bfe7d1715042bb9b3a552254664de09089e30f60))
+
 ## [1.12.12](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.11...v1.12.12) (2026-07-18)
 
 
