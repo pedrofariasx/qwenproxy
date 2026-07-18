@@ -172,11 +172,11 @@ export async function browserStreamFetch(
           abortControllers.delete(reqId);
         };
 
-        page.evaluate(async ({ url, options, reqId }: any) => {
+        page.evaluate(async ({ url, options, reqId, evalTimeoutMs }: any) => {
           const controller = new AbortController();
           (window as any).__abortControllers = (window as any).__abortControllers || {};
           (window as any).__abortControllers[reqId] = controller;
-          const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || config.timeouts.chat);
+          const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || evalTimeoutMs);
           try {
             const resp = await fetch(url, {
               method: options.method || 'POST',
@@ -203,13 +203,37 @@ export async function browserStreamFetch(
 
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) {
-                (window as any).__streamRelay(reqId, 'end', null);
-                break;
+            // Coalesce chunks before crossing the CDP bridge. Each __streamRelay call
+            // is an expensive serialized round-trip; batching by time/size dramatically
+            // reduces bridge overhead while keeping first-token latency low.
+            const FLUSH_BYTES = 4096;
+            const FLUSH_INTERVAL_MS = 15;
+            let pending = '';
+            let flushTimer: any = null;
+            const flushPending = () => {
+              if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+              if (pending) {
+                (window as any).__streamRelay(reqId, 'chunk', pending);
+                pending = '';
               }
-              (window as any).__streamRelay(reqId, 'chunk', decoder.decode(value, { stream: true }));
+            };
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  flushPending();
+                  (window as any).__streamRelay(reqId, 'end', null);
+                  break;
+                }
+                pending += decoder.decode(value, { stream: true });
+                if (pending.length >= FLUSH_BYTES) {
+                  flushPending();
+                } else if (!flushTimer) {
+                  flushTimer = setTimeout(flushPending, FLUSH_INTERVAL_MS);
+                }
+              }
+            } finally {
+              if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
             }
             delete (window as any).__abortControllers[reqId];
           } catch (e: any) {
@@ -217,7 +241,7 @@ export async function browserStreamFetch(
             (window as any).__streamRelay(reqId, 'error', e.message);
             delete (window as any).__abortControllers[reqId];
           }
-        }, { url, options, reqId }).catch((e: any) => {
+        }, { url, options, reqId, evalTimeoutMs: metaTimeoutMs }).catch((e: any) => {
           const cb = streamCallbacks.get(reqId);
           if (cb) {
             cb.onError(e.message);
