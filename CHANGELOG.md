@@ -1,3 +1,15 @@
+## [1.12.14](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.13...v1.12.14) (2026-07-18)
+
+
+### Bug Fixes
+
+* correct ali-oss type import to resolve tsc error and consistent-type-imports lint error ([9ca87b0](https://github.com/pedrofariasx/qwenproxy/commit/9ca87b0d67db3fb8dd5295838844d24ba2a2abd6))
+
+
+### Performance Improvements
+
+* reduce streaming latency and speed up large-prompt handling ([357ec42](https://github.com/pedrofariasx/qwenproxy/commit/357ec427e5fce8645db4383e52d88329861f23c9))
+
 ## [1.12.12](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.11...v1.12.12) (2026-07-18)
 
 
