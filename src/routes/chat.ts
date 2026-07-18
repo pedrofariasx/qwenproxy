@@ -29,6 +29,10 @@ export async function chatCompletions(c: Context) {
     let prompt = '';
     const messages = body.messages || [];
     let systemPrompt = '';
+    // Accumulate into arrays and join once at the end. For long conversations this
+    // avoids repeated O(n) string reallocation on every `+=`.
+    const promptParts: string[] = [];
+    const systemPromptParts: string[] = [];
     const pendingMultimodal: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>> = [];
 
     const toolCallIdToName = new Map<string, string>();
@@ -73,9 +77,9 @@ export async function chatCompletions(c: Context) {
       }
 
       if (msg.role === 'system') {
-        systemPrompt += (contentStr || '') + '\n\n';
+        systemPromptParts.push((contentStr || '') + '\n');
       } else if (msg.role === 'user') {
-        prompt += `User: ${contentStr || ''}\n\n`;
+        promptParts.push(`User: ${contentStr || ''}\n`);
       } else if (msg.role === 'assistant') {
         let assistantContent = contentStr || '';
         if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
@@ -92,15 +96,18 @@ export async function chatCompletions(c: Context) {
              assistantContent = assistantContent ? assistantContent + toolCallStr : toolCallStr.trim();
            }
         }
-        prompt += `Assistant: ${assistantContent.trim()}\n\n`;
+        promptParts.push(`Assistant: ${assistantContent.trim()}\n`);
       } else if (msg.role === 'tool' || msg.role === 'function') {
         let toolName = msg.name;
         if (!toolName && msg.tool_call_id) {
           toolName = toolCallIdToName.get(msg.tool_call_id);
         }
-        prompt += `Tool Response (${toolName || 'tool'}): ${contentStr || ''}\n`;
+        promptParts.push(`Tool Response (${toolName || 'tool'}): ${contentStr || ''}`);
       }
     }
+
+    systemPrompt = systemPromptParts.length ? systemPromptParts.join('\n') + '\n' : '';
+    prompt = promptParts.length ? promptParts.join('\n') + '\n' : '';
 
     const bodyAny = body as any;
     const hasTools = Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0;

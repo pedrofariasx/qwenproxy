@@ -121,6 +121,15 @@ async function refreshUploadHeaders(): Promise<Record<string, string> | null> {
 /**
  * Upload file to Alibaba Cloud OSS using STS credentials
  */
+// Cache the heavy ali-oss module so we import it once, not on every upload.
+let cachedOSSModule: typeof import("ali-oss").default | null = null;
+async function getOSSModule() {
+  if (!cachedOSSModule) {
+    cachedOSSModule = (await import("ali-oss")).default;
+  }
+  return cachedOSSModule;
+}
+
 async function uploadToOSS(
   fileBuffer: ArrayBuffer,
   stsData: STSResponse["data"],
@@ -141,7 +150,7 @@ async function uploadToOSS(
     return stsData.file_url.split("?")[0];
   }
 
-  const OSS = (await import("ali-oss")).default;
+  const OSS = await getOSSModule();
   const client = new OSS({
     region,
     accessKeyId: access_key_id,

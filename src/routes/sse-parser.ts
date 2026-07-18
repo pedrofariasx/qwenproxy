@@ -19,8 +19,11 @@ export function getIncrementalDelta(oldStr: string, newStr: string, prevLength: 
   }
 
   if (newStr.length > prevLength && prevLength > 0) {
+    // Fast-path (O(1)): pure append. Qwen streams with incremental_output=true,
+    // so the vast majority of chunks are strict appends. Verify by comparing a
+    // short suffix window instead of scanning the whole accumulated content.
     const delta = newStr.slice(prevLength);
-    const checkLen = Math.min(64, prevLength);
+    const checkLen = Math.min(32, prevLength);
     const expectedSuffix = prevSuffix.slice(-checkLen);
     const actualSuffix = newStr.slice(prevLength - checkLen, prevLength);
 

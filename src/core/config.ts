@@ -45,6 +45,7 @@ const envSchema = z.object({
   SINGLE_ACCOUNT_ID: z.string().default(''),
   SINGLE_ACCOUNT_EMAIL: z.string().default(''),
   ACCOUNT_LANES: z.string().default('1'),
+  LARGE_PROMPT_THRESHOLD: z.string().default('524288'),
 })
 
 const env = envSchema.parse(process.env)
@@ -136,6 +137,7 @@ export const config = {
     staggerMinMs: parseInt(env.PRECAPTURE_HEADERS_STAGGER_MIN_MS),
     staggerMaxMs: parseInt(env.PRECAPTURE_HEADERS_STAGGER_MAX_MS),
   },
+  largePromptThreshold: parseInt(env.LARGE_PROMPT_THRESHOLD),
 }
 
 export type Config = typeof config

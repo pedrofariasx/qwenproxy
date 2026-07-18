@@ -31,6 +31,32 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
 
   return honoStream(c, async (streamWriter: any) => {
     let heartbeatInterval: any;
+    // Micro-buffer: coalesce many tiny SSE writes into fewer socket writes to cut
+    // syscall overhead on long responses. Ordering is preserved because EVERY write
+    // (content, reasoning, events, [DONE]) goes through this single buffer.
+    let writeBuffer = '';
+    let writeTimer: ReturnType<typeof setTimeout> | null = null;
+    const WRITE_FLUSH_BYTES = 8192;
+    const WRITE_FLUSH_MS = 3;
+
+    const flushWrites = () => {
+      if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; }
+      if (writeBuffer) {
+        const data = writeBuffer;
+        writeBuffer = '';
+        streamWriter.write(data);
+      }
+    };
+
+    const bufferedWrite = (data: string) => {
+      writeBuffer += data;
+      if (writeBuffer.length >= WRITE_FLUSH_BYTES) {
+        flushWrites();
+      } else if (!writeTimer) {
+        writeTimer = setTimeout(flushWrites, WRITE_FLUSH_MS);
+      }
+    };
+
     try {
       await streamWriter.write(': heartbeat\n\n');
       heartbeatInterval = setInterval(async () => {
@@ -41,7 +67,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       }, 15000);
 
       const writeEvent = (data: any) => {
-        streamWriter.write(`data: ${JSON.stringify(data)}\n\n`);
+        bufferedWrite(`data: ${JSON.stringify(data)}\n\n`);
       };
 
       const makeChoice = (delta: any, finishReason: string | null = null) => ({
@@ -56,7 +82,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       const emitStreamingToolCall = (tc: { id: string; name: string; arguments: Record<string, unknown> }, index: number) => {
         if (emittedStreamingToolIds.has(tc.id)) return;
         emittedStreamingToolIds.add(tc.id);
-        streamWriter.write(`data: ${JSON.stringify({
+        bufferedWrite(`data: ${JSON.stringify({
           id: ctx.completionId,
           object: 'chat.completion.chunk',
           created: createdTimestamp,
@@ -74,14 +100,31 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
 
       const createdTimestamp = Math.floor(Date.now() / 1000);
 
+      // Pre-compute the constant parts of the per-chunk SSE envelope once, and use a
+      // lightweight manual escaper instead of JSON.stringify().slice() on every chunk.
+      const contentPrefix = `data: {"id":"${ctx.completionId}","object":"chat.completion.chunk","created":${createdTimestamp},"model":${JSON.stringify(ctx.model)},"choices":[{"index":0,"delta":{"content":"`;
+      const reasoningPrefix = `data: {"id":"${ctx.completionId}","object":"chat.completion.chunk","created":${createdTimestamp},"model":${JSON.stringify(ctx.model)},"choices":[{"index":0,"delta":{"reasoning_content":"`;
+      const chunkSuffix = `"},"logprobs":null,"finish_reason":null}]}\n\n`;
+
+      // Detects chars that need JSON string escaping: backslash, double-quote, and
+      // control characters (U+0000–U+001F). Control chars are intentionally matched.
+      // eslint-disable-next-line no-control-regex
+      const ESCAPE_RE = /[\\"\u0000-\u001f]/;
+      const escapeJsonString = (s: string) => {
+        // Cheap check: most LLM text chunks have no chars needing escaping.
+        if (!ESCAPE_RE.test(s)) return s;
+        return JSON.stringify(s).slice(1, -1);
+      };
+
+      let firstPayloadFlushed = false;
       const fastWriteContent = (content: string) => {
-        const escaped = JSON.stringify(content).slice(1, -1);
-        streamWriter.write(`data: {"id":"${ctx.completionId}","object":"chat.completion.chunk","created":${createdTimestamp},"model":"${ctx.model}","choices":[{"index":0,"delta":{"content":"${escaped}"},"logprobs":null,"finish_reason":null}]}\n\n`);
+        bufferedWrite(contentPrefix + escapeJsonString(content) + chunkSuffix);
+        if (!firstPayloadFlushed) { firstPayloadFlushed = true; flushWrites(); }
       };
 
       const fastWriteReasoning = (content: string) => {
-        const escaped = JSON.stringify(content).slice(1, -1);
-        streamWriter.write(`data: {"id":"${ctx.completionId}","object":"chat.completion.chunk","created":${createdTimestamp},"model":"${ctx.model}","choices":[{"index":0,"delta":{"reasoning_content":"${escaped}"},"logprobs":null,"finish_reason":null}]}\n\n`);
+        bufferedWrite(reasoningPrefix + escapeJsonString(content) + chunkSuffix);
+        if (!firstPayloadFlushed) { firstPayloadFlushed = true; flushWrites(); }
       };
 
       writeEvent({
@@ -91,6 +134,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         model: ctx.model,
         choices: [makeChoice({ role: 'assistant', content: '' })]
       });
+      // Flush the opening role event immediately so clients see the stream begin.
+      flushWrites();
 
       const reader = ctx.stream.getReader();
       const decoder = new TextDecoder();
@@ -122,7 +167,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
           const dataStr = trimmed.slice(6);
           if (dataStr === '[DONE]') {
-            streamWriter.write('data: [DONE]\n');
+            bufferedWrite('data: [DONE]\n');
             continue;
           }
 
@@ -263,7 +308,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           model: ctx.model,
           choices: [makeChoice({}, 'stop')]
         });
-        streamWriter.write('data: [DONE]\n\n');
+        bufferedWrite('data: [DONE]\n\n');
+        flushWrites();
         return;
       }
 
@@ -321,8 +367,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           usage
         });
       }
-      streamWriter.write('data: [DONE]\n\n');
+      bufferedWrite('data: [DONE]\n\n');
+      flushWrites();
     } finally {
+      flushWrites();
       clearInterval(heartbeatInterval);
       removeStream(ctx.completionId);
     }

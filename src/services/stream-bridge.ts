@@ -204,14 +204,17 @@ export async function browserStreamFetch(
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
             // Coalesce chunks before crossing the CDP bridge. Each __streamRelay call
-            // is an expensive serialized round-trip; batching by time/size dramatically
-            // reduces bridge overhead while keeping first-token latency low.
+            // is an expensive serialized round-trip; batching by time/size reduces
+            // bridge overhead. Thresholds tuned for LOW LATENCY: small byte budget +
+            // short interval flush ~2-3 SSE events at a time, and the very first chunk
+            // is flushed immediately for minimum first-token latency (TTFT).
             // NOTE: keep this inline (no named functions) — code inside page.evaluate
             // runs in the browser where esbuild's __name helper does not exist.
-            const FLUSH_BYTES = 4096;
-            const FLUSH_INTERVAL_MS = 15;
+            const FLUSH_BYTES = 512;
+            const FLUSH_INTERVAL_MS = 8;
             let pending = '';
             let flushTimer: any = null;
+            let firstChunkSent = false;
             try {
               while (true) {
                 const { done, value } = await reader.read();
@@ -222,7 +225,13 @@ export async function browserStreamFetch(
                   break;
                 }
                 pending += decoder.decode(value, { stream: true });
-                if (pending.length >= FLUSH_BYTES) {
+                if (!firstChunkSent) {
+                  // Fast-path: flush the first byte(s) immediately to minimize TTFT.
+                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+                  (window as any).__streamRelay(reqId, 'chunk', pending);
+                  pending = '';
+                  firstChunkSent = true;
+                } else if (pending.length >= FLUSH_BYTES) {
                   if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
                   (window as any).__streamRelay(reqId, 'chunk', pending);
                   pending = '';
