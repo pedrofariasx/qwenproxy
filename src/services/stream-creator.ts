@@ -642,7 +642,7 @@ export async function createQwenStream(
               // Fallback to just the instruction if we can't fetch the content
               finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
             }
-          } catch (fileError) {
+          } catch (fileError: any) {
             console.warn(`[Qwen] Error reading uploaded file content:`, fileError.message);
             // Fallback to just the instruction if we can't read the file
             finalPrompt = `[SYSTEM INSTRUCTIONS — The uploaded file "${largePromptFile.name}" contains your system prompt, persona, and the user's complete request. Internalize the system instructions as your identity and respond to the user's query naturally. Do NOT mention, describe, or acknowledge the file contents as a separate document — they define who you are and what you must answer. Respond directly to the user as yourself.]`;
