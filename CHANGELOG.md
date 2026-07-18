@@ -1,3 +1,11 @@
+## [1.12.10](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.9...v1.12.10) (2026-07-18)
+
+
+### Bug Fixes
+
+* properly include uploaded file contents in chat context for better AI understanding of text files like chat history ([442c50e](https://github.com/pedrofariasx/qwenproxy/commit/442c50e687b035f3e08ee2b6d7b8dabde0215d42))
+* type catch variable in file content read error handling ([8304399](https://github.com/pedrofariasx/qwenproxy/commit/8304399b4e1f63f5b657541d10f79cc7add70cac))
+
 ## [1.12.9](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.8...v1.12.9) (2026-07-03)
 
 
