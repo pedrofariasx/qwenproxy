@@ -5,6 +5,7 @@
  */
 
 import type { Context } from "hono";
+import type OSSType from "ali-oss";
 import { getQwenHeaders } from "../services/playwright.js";
 import crypto from "crypto";
 
@@ -122,7 +123,9 @@ async function refreshUploadHeaders(): Promise<Record<string, string> | null> {
  * Upload file to Alibaba Cloud OSS using STS credentials
  */
 // Cache the heavy ali-oss module so we import it once, not on every upload.
-let cachedOSSModule: typeof import("ali-oss").default | null = null;
+// @types/ali-oss uses `export = OSS`, so the constructor type is `typeof OSSType`.
+// esModuleInterop exposes the class on the `.default` property at runtime.
+let cachedOSSModule: typeof OSSType | null = null;
 async function getOSSModule() {
   if (!cachedOSSModule) {
     cachedOSSModule = (await import("ali-oss")).default;
