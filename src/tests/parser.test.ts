@@ -240,3 +240,35 @@ test('StreamingToolParser: handles short close tag', () => {
   assert.strictEqual(res.toolCalls.length, 1);
   assert.strictEqual(res.toolCalls[0].name, 'write');
 });
+
+test('StreamingToolParser: does not leak </environment_details> after proper close tag', () => {
+  const parser = new StreamingToolParser();
+  const input = `${TC_OPEN}{"name":"edit","arguments":{"path":"a.txt","content":"hello"}}${TC_CLOSE}\n\n</environment_details>\nCurrent time: 2026-07-18T15:26:30-03:00\nWorking directory: /tmp/project\n</environment_details>`;
+  const res = parser.feed(input);
+  const flushed = parser.flush();
+  const text = res.text + flushed.text;
+
+  assert.strictEqual(res.toolCalls.length, 1);
+  assert.strictEqual(res.toolCalls[0].name, 'edit');
+  assert.deepStrictEqual(res.toolCalls[0].arguments, { path: 'a.txt', content: 'hello' });
+  assert.ok(!text.includes('environment_details'), `text should not leak environment_details, got: ${JSON.stringify(text)}`);
+  assert.strictEqual(text, '');
+});
+
+test('StreamingToolParser: does not leak environment_details when streamed char-by-char', () => {
+  const parser = new StreamingToolParser();
+  const full = `${TC_OPEN}{"name":"edit","arguments":{"path":"a.txt","content":"hi"}}${TC_CLOSE}\n</environment_details>\nCurrent time: x\n</environment_details>`;
+  let text = '';
+  let toolCalls = 0;
+  for (const ch of full) {
+    const r = parser.feed(ch);
+    text += r.text;
+    toolCalls += r.toolCalls.length;
+  }
+  const f = parser.flush();
+  text += f.text;
+  toolCalls += f.toolCalls.length;
+
+  assert.strictEqual(toolCalls, 1);
+  assert.ok(!text.includes('environment_details'), `text should not leak environment_details, got: ${JSON.stringify(text)}`);
+});

@@ -269,7 +269,11 @@ function findRecoverableTailEndMatch(buffer: string): { index: number; length: n
 }
 
 function startsWithEnvironmentDetails(buffer: string): boolean {
-  return /^\s*<environment_details\b/i.test(buffer);
+  // Match an <environment_details> block at the start of the buffer. Editor clients
+  // sometimes glue a stray/truncated closing fragment right before it (e.g.
+  // "</environment_details>", "</tool</environment_details>", "</<environment_details>"),
+  // so tolerate an optional leading "</...tool..." / "</" fragment before the tag.
+  return /^\s*(?:<\/(?:tool[a-z_]*)?<?\/?)?\s*<?\/?environment_details\b/i.test(buffer);
 }
 
 
