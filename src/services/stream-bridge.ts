@@ -206,30 +206,31 @@ export async function browserStreamFetch(
             // Coalesce chunks before crossing the CDP bridge. Each __streamRelay call
             // is an expensive serialized round-trip; batching by time/size dramatically
             // reduces bridge overhead while keeping first-token latency low.
+            // NOTE: keep this inline (no named functions) — code inside page.evaluate
+            // runs in the browser where esbuild's __name helper does not exist.
             const FLUSH_BYTES = 4096;
             const FLUSH_INTERVAL_MS = 15;
             let pending = '';
             let flushTimer: any = null;
-            const flushPending = () => {
-              if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-              if (pending) {
-                (window as any).__streamRelay(reqId, 'chunk', pending);
-                pending = '';
-              }
-            };
             try {
               while (true) {
                 const { done, value } = await reader.read();
                 if (done) {
-                  flushPending();
+                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+                  if (pending) { (window as any).__streamRelay(reqId, 'chunk', pending); pending = ''; }
                   (window as any).__streamRelay(reqId, 'end', null);
                   break;
                 }
                 pending += decoder.decode(value, { stream: true });
                 if (pending.length >= FLUSH_BYTES) {
-                  flushPending();
+                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+                  (window as any).__streamRelay(reqId, 'chunk', pending);
+                  pending = '';
                 } else if (!flushTimer) {
-                  flushTimer = setTimeout(flushPending, FLUSH_INTERVAL_MS);
+                  flushTimer = setTimeout(() => {
+                    flushTimer = null;
+                    if (pending) { (window as any).__streamRelay(reqId, 'chunk', pending); pending = ''; }
+                  }, FLUSH_INTERVAL_MS);
                 }
               }
             } finally {
