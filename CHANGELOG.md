@@ -1,3 +1,10 @@
+## [1.12.11](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.10...v1.12.11) (2026-07-18)
+
+
+### Performance Improvements
+
+* coalesce SSE chunks in browser before crossing CDP bridge to reduce streaming overhead ([3829f5f](https://github.com/pedrofariasx/qwenproxy/commit/3829f5f9b4d3ea7a4af835c932a0b81e4a28cea6))
+
 ## [1.12.10](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.9...v1.12.10) (2026-07-18)
 
 
