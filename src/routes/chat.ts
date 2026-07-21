@@ -201,10 +201,24 @@ export async function chatCompletions(c: Context) {
 
       if (!account) {
         const inUse = getInUseAccounts();
-        const message = inUse.length > 0
-          ? `All configured account lanes are busy: ${inUse.join(', ')}`
-          : 'No available account lanes';
-        throw new RetryableQwenStreamError(message, 1000);
+        if (inUse.length === 0) {
+          throw new RetryableQwenStreamError('No available account lanes', 1000);
+        }
+
+        const waitStart = Date.now();
+        const MAX_LANE_WAIT_MS = 30000;
+        while (!account) {
+          const elapsed = Date.now() - waitStart;
+          if (elapsed > MAX_LANE_WAIT_MS) {
+            throw new RetryableQwenStreamError(
+              `All configured account lanes are busy: ${getInUseAccounts().join(', ')}`,
+              1000
+            );
+          }
+          await new Promise(r => setTimeout(r, 300));
+          account = getNextAccount();
+        }
+        console.log(`[Chat] Waited ${Date.now() - waitStart}ms for a free lane`);
       }
 
       while (account) {
