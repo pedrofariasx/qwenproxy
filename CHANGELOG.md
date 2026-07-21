@@ -1,3 +1,10 @@
+## [1.12.16](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.15...v1.12.16) (2026-07-21)
+
+
+### Bug Fixes
+
+* retry browser stream fetch with fresh headers when Qwen returns empty 200 OK response ([6a96194](https://github.com/pedrofariasx/qwenproxy/commit/6a961946ea3c481f82ff24ba27099b0ba379d8a0))
+
 ## [1.12.15](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.14...v1.12.15) (2026-07-21)
 
 
