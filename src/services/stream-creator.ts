@@ -811,6 +811,38 @@ export async function createQwenStream(
           }
           handleErrorBody(peekText, browserResult.status);
         }
+
+        if (browserResult.status < 400 && !browserResult.contentType.includes('text/event-stream') && !browserResult.body) {
+          console.warn(`[Qwen] Browser stream returned 200 OK with empty non-stream body for ${chatId}. Retrying with fresh headers...`);
+          try {
+            await sleep(1000 + Math.floor(Math.random() * 1000));
+            const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
+            const retryResult = await browserStreamFetch(completionPage, url, {
+              method: 'POST',
+              headers: buildBrowserCompletionHeaders(freshHeaders),
+              body: payloadJson,
+              timeoutMs,
+            });
+            if (retryResult.contentType.includes('text/event-stream') && retryResult.status < 400) {
+              const controller = new AbortController();
+              return {
+                stream: wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
+                  retryResult.abort();
+                }),
+                headers: freshHeaders,
+                uiSessionId: chatId,
+                controller,
+                accountId: accountId || 'guest'
+              };
+            }
+            if (retryResult.body) {
+              handleErrorBody(retryResult.body, retryResult.status);
+            }
+          } catch (retryErr) {
+            console.error(`[Qwen] Retry with fresh headers also failed for ${chatId}:`, (retryErr as Error).message);
+          }
+        }
+
         throw new Error(`Browser stream fetch returned non-stream response without body: ${browserResult.status} ${browserResult.statusText}`);
       } catch (browserErr: any) {
         if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
