@@ -1,3 +1,10 @@
+## [1.12.15](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.14...v1.12.15) (2026-07-21)
+
+
+### Bug Fixes
+
+* wait for a free account lane instead of immediately rejecting when all lanes are busy ([02ad418](https://github.com/pedrofariasx/qwenproxy/commit/02ad4185b82a6c5189f2f4851580009589d6e7f7))
+
 ## [1.12.14](https://github.com/pedrofariasx/qwenproxy/compare/v1.12.13...v1.12.14) (2026-07-18)
 
 
