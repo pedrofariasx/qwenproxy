@@ -137,7 +137,7 @@ export async function startServer(): Promise<void> {
       const stagger = i === 0 ? 0 : randomDelay(config.accounts.initStaggerMinMs, config.accounts.initStaggerMaxMs)
       if (stagger > 0) await sleep(stagger)
       try {
-        await initPlaywrightForAccount({ ...creds, id: account.id, email: account.email }, config.browser.headless)
+        await initPlaywrightForAccount({ ...creds, id: account.id }, config.browser.headless)
       } catch (err: any) {
         console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
       }

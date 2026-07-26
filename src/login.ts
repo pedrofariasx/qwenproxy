@@ -1,11 +1,9 @@
+import 'dotenv/config'
 import type { QwenAccount } from './core/accounts.js';
 import { addAccount, removeAccount, listAccounts, getAccountCredentials } from './core/accounts.js'
 import type { BrowserType} from './services/playwright.js';
-import { initPlaywrightForAccount, closePlaywrightForAccount, launchManualLoginAccount, extractAccountInfoFromContext } from './services/playwright.js'
+import { initPlaywrightForAccount, closePlaywrightForAccount, launchManualLoginAccount, extractAccountInfoFromContext, saveStorageState } from './services/playwright.js'
 import * as readline from 'readline'
-import * as dotenv from 'dotenv'
-
-dotenv.config()
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -220,6 +218,8 @@ async function addAccountManualFlow(browserType: BrowserType) {
     console.log(`\nError: ${err.message}`)
   }
 
+  await saveStorageState(context, accountId)
+  console.log('[Login] Session state saved.')
   await context.close()
   await askQuestion('Press Enter to continue...')
 }

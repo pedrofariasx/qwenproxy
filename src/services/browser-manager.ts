@@ -2,7 +2,6 @@ import type { Browser, BrowserContext, BrowserContextOptions, Page } from 'playw
 import { chromium, firefox, webkit } from 'playwright';
 import path from 'path';
 import fs from 'fs';
-import crypto from 'crypto';
 import type { QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
@@ -324,42 +323,48 @@ async function checkValidSession(): Promise<boolean> {
   }
 }
 
-async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
-  await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
+async function loginToQwenWithContext(_acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
+  console.log(`[Playwright] Starting UI login for ${email}...`);
 
-  const hashedPassword = crypto.createHash('sha256').update(password).digest('hex');
+  try {
+    await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
 
-  const result = await acctPage.evaluate(async ({ email, password }) => {
-    try {
-      const response = await fetch("https://chat.qwen.ai/api/v2/auths/signin", {
-        method: "POST",
-        headers: {
-          "accept": "application/json, text/plain, */*",
-          "content-type": "application/json",
-          "source": "web",
-          "timezone": new Date().toString().split(' (')[0],
-          "x-request-id": crypto.randomUUID()
-        },
-        body: JSON.stringify({ email, password, login_type: "email" })
-      });
-      const data = await response.json();
-      return { ok: response.ok, data };
-    } catch (e: any) {
-      return { ok: false, error: e.message };
-    }
-  }, { email, password: hashedPassword });
+    // Wait for the email input to be visible and interactable
+    await acctPage.waitForSelector('input[name="email"]', { timeout: 15000 });
 
-  if (result.ok) {
-    await acctPage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
-    const isLogged = !(acctPage.url().includes('auth') || acctPage.url().includes('login'));
+    // Fill email
+    await acctPage.locator('input[name="email"]').fill(email);
+
+    // Fill password
+    await acctPage.locator('input[type="password"]').fill(password);
+
+    // Wait for submit button to become enabled (it starts as disabled)
+    await acctPage.waitForSelector('.qwenchat-auth-pc-submit-button:not([disabled])', { timeout: 5000 })
+      .catch(() => {}); // proceed even if still disabled — click anyway
+
+    // Click submit button
+    await acctPage.locator('.qwenchat-auth-pc-submit-button').click();
+
+    // Wait for navigation away from /auth (redirect to chat on success)
+    await acctPage.waitForURL((url) => !url.toString().includes('/auth'), { timeout: 20000 });
+
+    // Wait for JS routing to settle
+    await acctPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+    const finalUrl = acctPage.url();
+    const isLogged = !finalUrl.includes('/auth') && !finalUrl.includes('/login') && !finalUrl.includes('/guest');
+
     if (isLogged) {
-      console.log(`[Playwright] Login confirmed for ${email}.`);
+      console.log(`[Playwright] UI login confirmed for ${email}. URL: ${finalUrl}`);
       return true;
     }
-  }
 
-  console.error(`[Playwright] Login failed for ${email}:`, result.data || result.error);
-  return false;
+    console.error(`[Playwright] UI login failed for ${email}: ended up at ${finalUrl}`);
+    return false;
+  } catch (err: any) {
+    console.error(`[Playwright] UI login error for ${email}:`, err.message);
+    return false;
+  }
 }
 
 export async function loginToQwen(email: string, password: string): Promise<boolean> {
@@ -508,17 +513,18 @@ export async function initPlaywright(_headless = true, browserType: BrowserType 
   activePage = await context.newPage();
 
   const hasCredentials = !!(process.env.QWEN_EMAIL && process.env.QWEN_PASSWORD);
-  const hasValidSession = await checkValidSession();
+  let sessionValid = await checkValidSession();
 
-  if (!hasValidSession && !hasCredentials) {
+  if (!sessionValid && !hasCredentials) {
     console.warn('[Playwright] No valid session AND no credentials in .env. Manual login will be required.');
   }
 
-  if (!hasValidSession) {
+  if (!sessionValid) {
     await attemptAutoLogin();
+    sessionValid = await checkValidSession();
   }
 
-  if (await hasValidAuthCookie(activePage)) {
+  if (sessionValid || await hasValidAuthCookie(activePage)) {
     await saveStorageState(context, '_default');
   }
 }
@@ -529,7 +535,12 @@ export async function closePlaywright() {
     cache.refreshInProgress = false;
   }
   if (context) {
-    if (await hasValidAuthCookie(activePage)) {
+    const cookieOk = await hasValidAuthCookie(activePage);
+    const urlOk = !!(activePage && !activePage.isClosed() &&
+      activePage.url().includes('chat.qwen.ai') &&
+      !activePage.url().includes('/auth') &&
+      !activePage.url().includes('/login'));
+    if (cookieOk || urlOk) {
       await saveStorageState(context, '_default');
     }
     await context.close();
@@ -572,31 +583,55 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   accountContexts.set(account.id, acctContext);
   accountPages.set(account.id, acctPage);
 
-  const hasAuth = await hasValidAuthCookie(acctPage);
+  // Strip any lane suffix (e.g. "user@example.com#lane-1" → "user@example.com") before login.
+  const loginEmail = account.email.replace(/#lane-\d+$/, '').trim();
 
-  if (!hasAuth && account.email && account.password) {
-    await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
-  }
-
+  // Navigate and verify session. Qwen is a SPA — it may stay at the root URL
+  // while showing the guest/visitor screen with a "Fazer login" button instead
+  // of redirecting to /auth. We must detect both cases.
+  let sessionConfirmedByUrl = false;
   try {
     await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
-    const url = acctPage.url();
-    if (url.includes('auth') || url.includes('login')) {
-      if (account.email && account.password) {
-        console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
-        await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
-        await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    await acctPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+    const isSessionInvalid = async (): Promise<boolean> => {
+      const url = acctPage.url();
+      if (url.includes('auth') || url.includes('login') || url.includes('/guest')) return true;
+      // Qwen may stay at / or /c/new-chat but show a guest UI with a "Fazer login" button
+      const hasLoginButton = await acctPage.locator('.header-right-auth-button').count() > 0;
+      return hasLoginButton;
+    };
+
+    if (await isSessionInvalid()) {
+      if (loginEmail && account.password) {
+        const url = acctPage.url();
+        console.log(`[Playwright] Session not valid for ${account.email} (url: ${url}), attempting UI login...`);
+
+        // If there's a "Fazer login" button on the guest screen, click it first
+        // to navigate to the auth form, then wait 6s for the page to load fully.
+        const loginBtn = acctPage.locator('.header-right-auth-button').first();
+        if (await loginBtn.count() > 0) {
+          console.log(`[Playwright] Clicking "Fazer login" button on guest screen...`);
+          await loginBtn.click();
+          await new Promise(r => setTimeout(r, 6000));
+        }
+
+        await loginToQwenWithContext(acctContext, acctPage, loginEmail, account.password);
+        await acctPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+        const postLoginInvalid = await isSessionInvalid();
+        sessionConfirmedByUrl = !postLoginInvalid;
       } else {
-        console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
+        console.warn(`[Playwright] Session invalid for account ${account.id} but no credentials available for re-login.`);
       }
     } else {
-      console.log(`[Playwright] Session validated for ${account.email}.`);
+      sessionConfirmedByUrl = true;
+      console.log(`[Playwright] Session validated for ${account.email} (url: ${acctPage.url()}).`);
     }
   } catch (err: any) {
     console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
   }
 
-  if (await hasValidAuthCookie(acctPage)) {
+  if (sessionConfirmedByUrl || await hasValidAuthCookie(acctPage)) {
     await saveStorageState(acctContext, baseAccountId);
   }
 }
@@ -644,11 +679,17 @@ export async function extractAccountInfoFromContext(page: Page): Promise<{ email
 }
 
 export async function closePlaywrightForAccount(accountId: string) {
+  const baseAccountId = getBaseAccountId(accountId);
   const acctContext = accountContexts.get(accountId);
   const acctPage = accountPages.get(accountId);
   if (acctContext) {
-    if (await hasValidAuthCookie(acctPage || null)) {
-      await saveStorageState(acctContext, accountId);
+    const cookieOk = await hasValidAuthCookie(acctPage || null);
+    const urlOk = !!(acctPage && !acctPage.isClosed() &&
+      acctPage.url().includes('chat.qwen.ai') &&
+      !acctPage.url().includes('/auth') &&
+      !acctPage.url().includes('/login'));
+    if (cookieOk || urlOk) {
+      await saveStorageState(acctContext, baseAccountId);
     }
     await acctContext.close();
     accountContexts.delete(accountId);

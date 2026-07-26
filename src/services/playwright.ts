@@ -13,6 +13,7 @@ export {
   extractAccountInfoFromContext,
   closePlaywrightForAccount,
   getPageForAccount,
+  saveStorageState,
 } from './browser-manager.js';
 
 export {
