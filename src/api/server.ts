@@ -100,14 +100,29 @@ app.post('/v1/messages/count_tokens', bodyLimit({
   } catch {
     return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400)
   }
+  if (!body || typeof body !== 'object') {
+    return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400)
+  }
   const promptParts: string[] = []
-  if (typeof body.system === 'string') promptParts.push(body.system)
+  if (typeof body.system === 'string') {
+    promptParts.push(body.system)
+  } else if (Array.isArray(body.system)) {
+    for (const s of body.system) {
+      if (s && typeof s === 'object' && typeof s.text === 'string') {
+        promptParts.push(s.text)
+      }
+    }
+  }
   if (Array.isArray(body.messages)) {
     for (const m of body.messages) {
-      if (typeof m.content === 'string') promptParts.push(m.content)
-      else if (Array.isArray(m.content)) {
+      if (!m || typeof m !== 'object') continue
+      if (typeof m.content === 'string') {
+        promptParts.push(m.content)
+      } else if (Array.isArray(m.content)) {
         for (const b of m.content) {
-          if (b.text) promptParts.push(b.text)
+          if (b && typeof b === 'object' && typeof b.text === 'string') {
+            promptParts.push(b.text)
+          }
         }
       }
     }

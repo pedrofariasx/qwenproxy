@@ -3,10 +3,10 @@ import { stream as honoStream } from "hono/streaming";
 import crypto from "crypto";
 import type { OpenAIRequest } from "../utils/types.js";
 import { createQwenStream } from "../services/qwen.js";
-import { getNextAccount, getAccountById, markAccountRateLimited, releaseAccountInUse } from "../core/account-manager.js";
+import { getNextAccount, markAccountRateLimited, releaseAccountInUse } from "../core/account-manager.js";
 import { loadAccounts } from "../core/accounts.js";
-import { registerStream, removeStream } from "../core/stream-registry.js";
-import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams } from "../core/user-manager.js";
+import { registerStream, removeStream, abortStream } from "../core/stream-registry.js";
+import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot } from "../core/user-manager.js";
 import type { UserIdentity } from "../core/user-manager.js";
 import { countTokens } from "../core/tokenizer.js";
 import { QwenStreamParser } from "../utils/qwen-stream-parser.js";
@@ -34,7 +34,7 @@ export async function anthropicMessages(c: Context) {
   const user = (c as any).get?.("user") as UserIdentity | undefined;
   let userSlotHeld = false;
   let userSlotReleased = false;
-  let completionId = `comp_${crypto.randomUUID().replace(/-/g, "")}`;
+  const completionId = `comp_${crypto.randomUUID().replace(/-/g, "")}`;
 
   const releaseUserSlotOnce = () => {
     if (!userSlotHeld || userSlotReleased || !user) return;
@@ -42,12 +42,17 @@ export async function anthropicMessages(c: Context) {
     userSlotReleased = true;
   };
 
+  let body: any;
   try {
-    const body = await c.req.json();
+    body = await c.req.json();
     if (!body || typeof body !== "object") {
       return c.json({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON body" } }, 400);
     }
+  } catch {
+    return c.json({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON body" } }, 400);
+  }
 
+  try {
     const isStream = Boolean(body.stream);
     const rawModel = body.model || "qwen3.7-plus";
     const targetModel = resolveModelName(rawModel);
@@ -83,18 +88,20 @@ export async function anthropicMessages(c: Context) {
       if (typeof body.system === "string") {
         openAIMessages.push({ role: "system", content: body.system });
       } else if (Array.isArray(body.system)) {
-        const sysText = body.system.map((s: any) => s.text || "").join("\n");
+        const sysText = body.system.map((s: any) => s?.text || "").join("\n");
         openAIMessages.push({ role: "system", content: sysText });
       }
     }
 
     for (const msg of messages) {
+      if (!msg || typeof msg !== "object") continue;
       const role = msg.role === "assistant" ? "assistant" : "user";
       if (typeof msg.content === "string") {
         openAIMessages.push({ role, content: msg.content });
       } else if (Array.isArray(msg.content)) {
         let textParts = "";
         for (const block of msg.content) {
+          if (!block || typeof block !== "object") continue;
           if (block.type === "text") {
             textParts += (block.text || "") + "\n";
           } else if (block.type === "tool_result") {
@@ -287,7 +294,7 @@ function handleAnthropicStream(
 
   return honoStream(c, async (streamWriter: any) => {
     streamWriter.onAbort?.(() => {
-      removeStream(completionId);
+      abortStream(completionId);
     });
 
     let heartbeatInterval: any;
@@ -492,7 +499,7 @@ async function handleAnthropicNonStreaming(
     }
   }
 
-  const outTokens = Math.ceil((result.content || "").length / 4);
+  const outTokens = result.body?.usage?.completion_tokens || Math.ceil((result.content || "").length / 4);
   onComplete?.(Math.max(1, outTokens));
 
   return c.json({

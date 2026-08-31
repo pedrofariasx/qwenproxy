@@ -607,14 +607,17 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
     await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
   }
 
+  let navigated = false;
   try {
     await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    navigated = true;
     const url = acctPage.url();
     if (url.includes('auth') || url.includes('login')) {
       if (account.email && account.password) {
         console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
         await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
         await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+        navigated = true;
       } else {
         console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
       }
@@ -626,7 +629,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   }
 
   const finalUrl = acctPage.url();
-  const sessionOk = !finalUrl.includes("auth") && !finalUrl.includes("login");
+  const sessionOk = navigated && !finalUrl.includes("auth") && !finalUrl.includes("login") && finalUrl.startsWith("http");
   if (sessionOk && (await hasValidAuthCookie(acctPage))) {
     await saveStorageState(acctContext, baseAccountId);
     const { markAccountReady } = await import("../core/account-manager.js");
