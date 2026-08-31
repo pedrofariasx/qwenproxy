@@ -45,7 +45,7 @@ export async function anthropicMessages(c: Context) {
   let body: any;
   try {
     body = await c.req.json();
-    if (!body || typeof body !== "object") {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return c.json({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON body" } }, 400);
     }
   } catch {
