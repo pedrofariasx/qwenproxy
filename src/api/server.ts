@@ -90,21 +90,31 @@ app.post('/v1/messages', bodyLimit({
   maxSize: 52 * 1024 * 1024,
   onError: (c: Context) => c.json({ error: { message: 'Request body too large' } }, 413),
 }), anthropicMessages)
-app.post('/v1/messages/count_tokens', async (c) => {
-  const body = await c.req.json()
-  let chars = 0
-  if (typeof body.system === 'string') chars += body.system.length
+app.post('/v1/messages/count_tokens', bodyLimit({
+  maxSize: 52 * 1024 * 1024,
+  onError: (c: Context) => c.json({ error: { message: 'Request body too large' } }, 413),
+}), async (c) => {
+  let body: any
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400)
+  }
+  const promptParts: string[] = []
+  if (typeof body.system === 'string') promptParts.push(body.system)
   if (Array.isArray(body.messages)) {
     for (const m of body.messages) {
-      if (typeof m.content === 'string') chars += m.content.length
+      if (typeof m.content === 'string') promptParts.push(m.content)
       else if (Array.isArray(m.content)) {
         for (const b of m.content) {
-          if (b.text) chars += b.text.length
+          if (b.text) promptParts.push(b.text)
         }
       }
     }
   }
-  return c.json({ input_tokens: Math.max(1, Math.ceil(chars / 4)) })
+  const { countTokens } = await import('../core/tokenizer.js')
+  const fullText = promptParts.join('\n')
+  return c.json({ input_tokens: Math.max(1, countTokens(fullText)) })
 })
 
 // Admin dashboard (served at /admin).
