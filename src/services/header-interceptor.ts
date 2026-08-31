@@ -182,7 +182,7 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
           await humanType(guestPage!, inputSelector, 'Hello');
           await sleep(humanDelay(800, 1500));
 
-          const selectors = ['.message-input-right-button-send .send-button', '.chat-prompt-send-button', 'button.send-button', 'button[type="submit"]', 'button:has(svg)'];
+          const selectors = ['.message-input-right-button-send .send-button', '.chat-prompt-send-button', 'button.send-button', 'button[type="submit"]', 'button[aria-label*="Send"]', 'button[aria-label*="Enviar"]', 'button[data-testid*="send"]'];
           let clicked = false;
           for (const selector of selectors) {
             const btn = await guestPage!.$(selector);
