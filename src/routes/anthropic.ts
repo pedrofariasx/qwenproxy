@@ -13,6 +13,14 @@ import { QwenStreamParser } from "../utils/qwen-stream-parser.js";
 import { collectNonStreamingResult } from "./stream-handler.js";
 import { trackUsage, trackModelUsage } from "../core/usage-tracker.js";
 
+import {
+  buildToolCallContract,
+  buildCompactToolManifest,
+  getToolChoiceMode,
+  getForcedToolName,
+  selectCandidateTools,
+} from "./tool-handler.js";
+
 function resolveModelName(model?: string): string {
   if (!model) return "qwen3.7-plus";
   const m = model.toLowerCase();
@@ -58,6 +66,11 @@ export async function anthropicMessages(c: Context) {
     const targetModel = resolveModelName(rawModel);
     const isThinkingModel = targetModel.includes("thinking");
 
+    const toolNames = Array.isArray(body.tools) ? body.tools.map((t: any) => t?.name).filter(Boolean) : [];
+    const msgCount = Array.isArray(body.messages) ? body.messages.length : 0;
+    const systemLen = typeof body.system === "string" ? body.system.length : (Array.isArray(body.system) ? JSON.stringify(body.system).length : 0);
+    console.log(`[Anthropic] Model: ${rawModel} (${targetModel}) | Stream: ${isStream} | Tools (${toolNames.length}): ${toolNames.join(", ") || "none"} | Messages: ${msgCount} | System: ${systemLen} chars`);
+
     if (user) {
       if (!checkUserRateLimit(user.id, user.rateLimitRpm)) {
         return c.json({
@@ -93,6 +106,18 @@ export async function anthropicMessages(c: Context) {
       }
     }
 
+    const toolIdToName = new Map<string, string>();
+    for (const msg of messages) {
+      if (!msg || typeof msg !== "object") continue;
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block?.type === "tool_use" && block.id && block.name) {
+            toolIdToName.set(block.id, block.name);
+          }
+        }
+      }
+    }
+
     for (const msg of messages) {
       if (!msg || typeof msg !== "object") continue;
       const role = msg.role === "assistant" ? "assistant" : "user";
@@ -105,13 +130,68 @@ export async function anthropicMessages(c: Context) {
           if (block.type === "text") {
             textParts += (block.text || "") + "\n";
           } else if (block.type === "tool_result") {
+            const toolName = toolIdToName.get(block.tool_use_id) || block.tool_use_id || "tool";
             const contentStr = typeof block.content === "string" ? block.content : JSON.stringify(block.content || "");
-            textParts += `[Tool Result for ${block.tool_use_id}]: ${contentStr}\n`;
+            textParts += `Tool Response (${toolName}): ${contentStr}\n`;
           } else if (block.type === "tool_use") {
-            textParts += `[Tool Use: ${block.name} (${block.id})]: ${JSON.stringify(block.input || {})}\n`;
+            const inputObj = block.input || {};
+            textParts += `\n<tool_call>\n${JSON.stringify({ name: block.name, arguments: inputObj })}\n</tool_call>\n`;
           }
         }
         openAIMessages.push({ role, content: textParts.trim() });
+      }
+    }
+
+    const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+    const formattedTools: any[] = (body.tools || []).map((t: any) => ({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description || "",
+        parameters: t.input_schema || t.parameters || {},
+      },
+    }));
+
+    const forcedToolName = getForcedToolName(body.tool_choice) || (body.tool_choice?.type === "tool" ? body.tool_choice.name : "");
+    const toolChoiceMode = getToolChoiceMode(body.tool_choice);
+
+    if (hasTools && toolChoiceMode !== "none") {
+      // Select up to 12 most relevant tools (same approach as chat.ts)
+      // to avoid overwhelming the model with 40+ tool definitions
+      const toolContextText = openAIMessages.map(m => m.content).join("\n");
+      const recentToolNames = new Set<string>();
+      // Collect recently used tool names from message history
+      for (const msg of body.messages || []) {
+        if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === "tool_use" && block.name) recentToolNames.add(block.name);
+            if (block.type === "tool_result" && block.tool_use_id) {
+              // Find the tool_use block that matches
+              for (const m2 of body.messages || []) {
+                if (Array.isArray(m2.content)) {
+                  for (const b2 of m2.content) {
+                    if (b2.type === "tool_use" && b2.id === block.tool_use_id && b2.name) {
+                      recentToolNames.add(b2.name);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      const candidateTools = selectCandidateTools(formattedTools, toolContextText, forcedToolName, recentToolNames);
+      const parallelToolCalls = true;
+      const toolContract = buildToolCallContract(candidateTools, forcedToolName, parallelToolCalls);
+      const compactManifest = buildCompactToolManifest(candidateTools, forcedToolName);
+      // Only append contract + compact manifest (no full JSON dump)
+      const toolSystemInstruction = `\n\n${toolContract}\n\n${compactManifest}\n`;
+
+      const sysIndex = openAIMessages.findIndex((m) => m.role === "system");
+      if (sysIndex >= 0) {
+        openAIMessages[sysIndex].content += toolSystemInstruction;
+      } else {
+        openAIMessages.unshift({ role: "system", content: toolSystemInstruction.trim() });
       }
     }
 
@@ -128,7 +208,6 @@ export async function anthropicMessages(c: Context) {
     };
 
     const stopToken = crypto.randomUUID();
-    const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
 
     let streamResult: { stream: ReadableStream; uiSessionId: string };
     const accounts = loadAccounts();
@@ -422,6 +501,49 @@ function handleAnthropicStream(
         qwenParser.parseLine(rawBuffer.trim().slice(6));
       }
 
+      // Flush any remaining buffered content (tool calls or text) from the parser
+      const flushed = qwenParser.flush();
+      if (flushed.toolCalls && flushed.toolCalls.length > 0) {
+        for (const tc of flushed.toolCalls) {
+          stopReason = "tool_use";
+          if (textBlockOpen) {
+            sendEvent("content_block_stop", { type: "content_block_stop", index: blockIndex });
+            textBlockOpen = false;
+            blockIndex++;
+          }
+          const toolId = tc.id || `toolu_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+          const argsStr = typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments || {});
+          sendEvent("content_block_start", {
+            type: "content_block_start",
+            index: blockIndex,
+            content_block: { type: "tool_use", id: toolId, name: tc.name, input: {} },
+          });
+          sendEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: blockIndex,
+            delta: { type: "input_json_delta", partial_json: argsStr },
+          });
+          sendEvent("content_block_stop", { type: "content_block_stop", index: blockIndex });
+          blockIndex++;
+          totalOutputTokens += Math.ceil(argsStr.length / 4);
+        }
+      }
+      if (flushed.text && flushed.text.trim()) {
+        if (!textBlockOpen) {
+          textBlockOpen = true;
+          sendEvent("content_block_start", {
+            type: "content_block_start",
+            index: blockIndex,
+            content_block: { type: "text", text: "" },
+          });
+        }
+        sendEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: blockIndex,
+          delta: { type: "text_delta", text: flushed.text },
+        });
+      }
+
       if (textBlockOpen) {
         sendEvent("content_block_stop", { type: "content_block_stop", index: blockIndex });
       }
@@ -479,11 +601,24 @@ async function handleAnthropicNonStreaming(
   );
 
   const contentBlocks: any[] = [];
+  const hasToolCalls = result.toolCalls && Array.isArray(result.toolCalls) && result.toolCalls.length > 0;
   if (result.content) {
-    contentBlocks.push({ type: "text", text: result.content });
+    let textContent = result.content;
+    // Strip raw <tool_call>...</tool_call> markup from the text content
+    // when tool calls were successfully parsed, so the Claude Code client
+    // doesn't see the raw tags as assistant text.
+    if (hasToolCalls) {
+      textContent = textContent
+        .replace(/<tool_call>\s*[\s\S]*?<\/tool_call>/gi, "")
+        .replace(/<tool_call>\s*[\s\S]*$/gi, "") // unclosed trailing block
+        .trim();
+    }
+    if (textContent) {
+      contentBlocks.push({ type: "text", text: textContent });
+    }
   }
-  if (result.toolCalls && Array.isArray(result.toolCalls)) {
-    for (const tc of result.toolCalls) {
+  if (hasToolCalls) {
+    for (const tc of result.toolCalls!) {
       let inputObj = {};
       try {
         inputObj = typeof tc.function?.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function?.arguments || {};
