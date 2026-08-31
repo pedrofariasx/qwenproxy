@@ -100,7 +100,7 @@ app.post('/v1/messages/count_tokens', bodyLimit({
   } catch {
     return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400)
   }
-  if (!body || typeof body !== 'object') {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400)
   }
   const promptParts: string[] = []

@@ -614,7 +614,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
     const url = acctPage.url();
     if (url.includes('auth') || url.includes('login')) {
       if (account.email && account.password) {
-        console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
+        console.log(`[Playwright] Session expired for account ${account.id}, re-logging in...`);
         await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
         await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
         navigated = true;
@@ -622,10 +622,10 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
         console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
       }
     } else {
-      console.log(`[Playwright] Session validated for ${account.email}.`);
+      console.log(`[Playwright] Session validated for account ${account.id}.`);
     }
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
+    console.warn(`[Playwright] Failed to validate session for account ${account.id}: ${err.message}`);
   }
 
   const finalUrl = acctPage.url();
