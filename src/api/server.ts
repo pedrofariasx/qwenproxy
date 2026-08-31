@@ -9,6 +9,7 @@ import { cache } from '../cache/memory-cache.js'
 import { Watchdog } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
 import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
+import { anthropicMessages } from '../routes/anthropic.js'
 import { uploadFile } from '../routes/upload.js'
 import { adminApp } from './admin.js'
 import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js'
@@ -63,10 +64,11 @@ app.use('/v1/*', async (c, next) => {
     if (!apiKey) {
       return c.json({ error: 'AUTH_REQUIRED=true but no API_KEY is configured' }, 500)
     }
-    const auth = c.req.header('Authorization')
-    if (!auth?.startsWith('Bearer ')) {
+    const rawAuth = c.req.header('Authorization') || c.req.header('x-api-key')
+    if (!rawAuth) {
       return c.json({ error: 'Missing or invalid Authorization header' }, 401)
     }
+    const auth = rawAuth.startsWith('Bearer ') ? rawAuth : `Bearer ${rawAuth}`
     const { resolveUserFromAuthHeader } = await import('../core/user-manager.js')
     const identity = resolveUserFromAuthHeader(auth)
     if (!identity) {
@@ -84,6 +86,26 @@ app.post('/v1/chat/completions', bodyLimit({
 }), chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
 app.post('/v1/upload', uploadFile)
+app.post('/v1/messages', bodyLimit({
+  maxSize: 52 * 1024 * 1024,
+  onError: (c: Context) => c.json({ error: { message: 'Request body too large' } }, 413),
+}), anthropicMessages)
+app.post('/v1/messages/count_tokens', async (c) => {
+  const body = await c.req.json()
+  let chars = 0
+  if (typeof body.system === 'string') chars += body.system.length
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) {
+      if (typeof m.content === 'string') chars += m.content.length
+      else if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b.text) chars += b.text.length
+        }
+      }
+    }
+  }
+  return c.json({ input_tokens: Math.max(1, Math.ceil(chars / 4)) })
+})
 
 // Admin dashboard (served at /admin).
 app.route('/admin', adminApp)

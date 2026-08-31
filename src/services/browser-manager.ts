@@ -501,10 +501,15 @@ export async function resetBrowserProfile(cacheKey: string, accountId?: string):
     }
     markAccountNotReady(accountId || cacheKey);
     markAccountNotReady(profileId);
-    fs.rmSync(profilePath, { recursive: true, force: true });
-    fs.rmSync(storageStatePath(profileId), { force: true });
-
-    console.warn(`[Playwright] Cleared browser profile for ${cacheKey}: ${profilePath}`);
+    const { getAccountCredentials } = await import("../core/accounts.js");
+    const hasCreds = accountId ? !!getAccountCredentials(getBaseAccountId(accountId))?.password : false;
+    if (accountId === "guest" || hasCreds) {
+      fs.rmSync(profilePath, { recursive: true, force: true });
+      fs.rmSync(storageStatePath(profileId), { force: true });
+      console.warn(`[Playwright] Cleared browser profile for ${cacheKey}: ${profilePath}`);
+    } else {
+      console.warn(`[Playwright] Preserving cookies/storage for manual login account: ${cacheKey}`);
+    }
   } catch (err: any) {
     console.warn(`[Playwright] Failed to clear browser profile for ${cacheKey}: ${err.message}`);
   }
@@ -620,8 +625,11 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   }
 
   if (await hasValidAuthCookie(acctPage)) {
-    await saveStorageState(acctContext, baseAccountId);
-  }
+      await saveStorageState(acctContext, baseAccountId);
+      const { markAccountReady } = await import("../core/account-manager.js");
+      markAccountReady(account.id);
+      markAccountReady(baseAccountId);
+    }
 }
 
 export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = 'chromium'): Promise<{ context: BrowserContext, page: Page }> {

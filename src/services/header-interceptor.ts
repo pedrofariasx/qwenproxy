@@ -78,8 +78,8 @@ export async function getBasicHeaders(accountId?: string): Promise<{ cookie: str
   let bxUmidtoken = cache.currentHeaders['bx-umidtoken'];
   const bxV = cache.currentHeaders['bx-v'] || '2.5.36';
 
-  if (!bxUa || !bxUmidtoken) {
-    console.log(`[Playwright] Missing bx-ua/bx-umidtoken for ${cacheKey}, triggering header interception...`);
+  if (!cache.cachedQwenHeaders && config.directFetch.enabled && (!bxUa || !bxUmidtoken)) {
+    console.log(`[Playwright] Capturing initial headers for ${cacheKey}...`);
     try {
       const result = await getQwenHeaders(true, accountId);
       bxUa = result.headers['bx-ua'];
@@ -97,9 +97,7 @@ export async function getBasicHeaders(accountId?: string): Promise<{ cookie: str
     }
   }
 
-  if (bxUa && bxUmidtoken) {
-    markAccountReady(cacheKey);
-  }
+  markAccountReady(cacheKey);
 
   return { cookie, userAgent, bxV, bxUa, bxUmidtoken };
 }
@@ -184,7 +182,7 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
           await humanType(guestPage!, inputSelector, 'Hello');
           await sleep(humanDelay(800, 1500));
 
-          const selectors = ['.message-input-right-button-send .send-button', '.chat-prompt-send-button', 'button.send-button'];
+          const selectors = ['.message-input-right-button-send .send-button', '.chat-prompt-send-button', 'button.send-button', 'button[type="submit"]', 'button:has(svg)'];
           let clicked = false;
           for (const selector of selectors) {
             const btn = await guestPage!.$(selector);
@@ -463,8 +461,8 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           'user-agent': reqHeaders['user-agent'] || ''
         };
 
-        if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-          console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}, skipping...`);
+        if (!extractedHeaders.cookie) {
+          console.log(`[Playwright] Intercepted request missing cookie for ${cacheKey}, skipping...`);
           await route.continue();
           return;
         }
