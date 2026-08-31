@@ -22,8 +22,8 @@ const BASE_TIMEOUT_MS = 120000;
 const TIMEOUT_PER_MB = 30000;
 
 function assertAntiBotHeaders(headers: Record<string, string>, label: string): void {
-  if (!headers['cookie'] || !headers['user-agent'] || !headers['bx-ua'] || !headers['bx-umidtoken'] || !headers['bx-v']) {
-    throw new Error(`${label} missing required browser anti-bot headers`);
+  if (!headers["cookie"] || !headers["user-agent"]) {
+    throw new Error(`${label} missing required cookie or user-agent`);
   }
 }
 
