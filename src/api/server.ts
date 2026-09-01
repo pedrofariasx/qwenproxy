@@ -120,10 +120,23 @@ app.post('/v1/messages/count_tokens', bodyLimit({
         promptParts.push(m.content)
       } else if (Array.isArray(m.content)) {
         for (const b of m.content) {
-          if (b && typeof b === 'object' && typeof b.text === 'string') {
+          if (!b || typeof b !== 'object') continue
+          if (typeof b.text === 'string') {
             promptParts.push(b.text)
+          } else if (b.type === 'tool_result') {
+            const contentStr = typeof b.content === 'string' ? b.content : JSON.stringify(b.content || '')
+            promptParts.push(contentStr)
+          } else if (b.type === 'tool_use') {
+            promptParts.push(JSON.stringify({ name: b.name, arguments: b.input || {} }))
           }
         }
+      }
+    }
+  }
+  if (Array.isArray(body.tools)) {
+    for (const t of body.tools) {
+      if (t && typeof t === 'object') {
+        promptParts.push(JSON.stringify({ name: t.name, description: t.description || '', parameters: t.input_schema || t.parameters || {} }))
       }
     }
   }

@@ -143,6 +143,9 @@ export async function anthropicMessages(c: Context) {
     }
 
     const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+    if (body.tools !== undefined && !Array.isArray(body.tools)) {
+      return c.json({ type: "error", error: { type: "invalid_request_error", message: "'tools' must be an array" } }, 400);
+    }
     const formattedTools: any[] = (body.tools || []).map((t: any) => ({
       type: "function",
       function: {
@@ -154,8 +157,11 @@ export async function anthropicMessages(c: Context) {
 
     const forcedToolName = getForcedToolName(body.tool_choice) || (body.tool_choice?.type === "tool" ? body.tool_choice.name : "");
     const toolChoiceMode = getToolChoiceMode(body.tool_choice);
+    // Respect Anthropic's tool_choice.type === "none" to disable tool parsing
+    const anthropicToolNone = body.tool_choice?.type === "none";
+    const toolsEnabled = hasTools && toolChoiceMode !== "none" && !anthropicToolNone;
 
-    if (hasTools && toolChoiceMode !== "none") {
+    if (toolsEnabled) {
       // Select up to 12 most relevant tools (same approach as chat.ts)
       // to avoid overwhelming the model with 40+ tool definitions
       const toolContextText = openAIMessages.map(m => m.content).join("\n");
@@ -166,16 +172,8 @@ export async function anthropicMessages(c: Context) {
           for (const block of msg.content) {
             if (block.type === "tool_use" && block.name) recentToolNames.add(block.name);
             if (block.type === "tool_result" && block.tool_use_id) {
-              // Find the tool_use block that matches
-              for (const m2 of body.messages || []) {
-                if (Array.isArray(m2.content)) {
-                  for (const b2 of m2.content) {
-                    if (b2.type === "tool_use" && b2.id === block.tool_use_id && b2.name) {
-                      recentToolNames.add(b2.name);
-                    }
-                  }
-                }
-              }
+              const toolName = toolIdToName.get(block.tool_use_id);
+              if (toolName) recentToolNames.add(toolName);
             }
           }
         }
@@ -307,7 +305,7 @@ export async function anthropicMessages(c: Context) {
       }
     }
 
-    const onComplete = (outputTokens = 1) => {
+    const onComplete = (_outputTokens = 1) => {
       removeStream(completionId);
       releaseUserSlotOnce();
       if (user?.id) {
@@ -324,7 +322,7 @@ export async function anthropicMessages(c: Context) {
         completionId,
         streamResult.uiSessionId,
         inputTokens,
-        hasTools,
+        toolsEnabled,
         body.tools || [],
         onComplete
       );
@@ -336,7 +334,7 @@ export async function anthropicMessages(c: Context) {
         completionId,
         streamResult.uiSessionId,
         inputTokens,
-        hasTools,
+        toolsEnabled,
         body.tools || [],
         onComplete
       );
