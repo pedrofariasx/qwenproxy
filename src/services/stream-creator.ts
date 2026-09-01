@@ -32,22 +32,23 @@ function isTmdChallenge(text: string): boolean {
 }
 
 function buildBrowserCompletionHeaders(headers: Record<string, string>): Record<string, string> {
-  return {
+  const h: Record<string, string> = {
     'accept': 'application/json',
     'content-type': 'application/json',
     'timezone': CACHED_TIMEZONE,
     'version': QWEN_WEB_VERSION,
     'x-accel-buffering': 'no',
     'x-request-id': crypto.randomUUID(),
-    'bx-v': headers['bx-v'],
-    'bx-ua': headers['bx-ua'],
-    'bx-umidtoken': headers['bx-umidtoken'],
     'source': 'web',
   };
+  if (headers['bx-v']) h['bx-v'] = headers['bx-v'];
+  if (headers['bx-ua']) h['bx-ua'] = headers['bx-ua'];
+  if (headers['bx-umidtoken']) h['bx-umidtoken'] = headers['bx-umidtoken'];
+  return h;
 }
 
 function buildNodeCompletionHeaders(headers: Record<string, string>, chatId: string, accountId?: string): Record<string, string> {
-  return {
+  const h: Record<string, string> = {
     'accept': 'application/json',
     'accept-language': 'pt-BR,pt;q=0.9',
     'content-type': 'application/json',
@@ -62,12 +63,13 @@ function buildNodeCompletionHeaders(headers: Record<string, string>, chatId: str
     'version': QWEN_WEB_VERSION,
     'x-accel-buffering': 'no',
     'x-request-id': crypto.randomUUID(),
-    'bx-v': headers['bx-v'],
-    'bx-ua': headers['bx-ua'],
-    'bx-umidtoken': headers['bx-umidtoken'],
     'source': 'web',
     ...getClientHintsHeaders(accountId),
   };
+  if (headers['bx-v']) h['bx-v'] = headers['bx-v'];
+  if (headers['bx-ua']) h['bx-ua'] = headers['bx-ua'];
+  if (headers['bx-umidtoken']) h['bx-umidtoken'] = headers['bx-umidtoken'];
+  return h;
 }
 
 // ---------------------------------------------------------------------------

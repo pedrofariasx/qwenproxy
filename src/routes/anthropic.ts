@@ -167,9 +167,10 @@ export async function anthropicMessages(c: Context) {
       const toolContextText = openAIMessages.map(m => m.content).join("\n");
       const recentToolNames = new Set<string>();
       // Collect recently used tool names from message history
-      for (const msg of body.messages || []) {
-        if (Array.isArray(msg.content)) {
+      for (const msg of messages) {
+        if (msg && typeof msg === "object" && Array.isArray(msg.content)) {
           for (const block of msg.content) {
+            if (!block || typeof block !== "object") continue;
             if (block.type === "tool_use" && block.name) recentToolNames.add(block.name);
             if (block.type === "tool_result" && block.tool_use_id) {
               const toolName = toolIdToName.get(block.tool_use_id);
