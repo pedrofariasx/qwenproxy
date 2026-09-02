@@ -9,6 +9,7 @@ import { cache } from '../cache/memory-cache.js'
 import { Watchdog } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
 import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
+import { anthropicMessages } from '../routes/anthropic.js'
 import { uploadFile } from '../routes/upload.js'
 import { adminApp } from './admin.js'
 import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js'
@@ -63,10 +64,11 @@ app.use('/v1/*', async (c, next) => {
     if (!apiKey) {
       return c.json({ error: 'AUTH_REQUIRED=true but no API_KEY is configured' }, 500)
     }
-    const auth = c.req.header('Authorization')
-    if (!auth?.startsWith('Bearer ')) {
+    const rawAuth = c.req.header('Authorization') || c.req.header('x-api-key')
+    if (!rawAuth) {
       return c.json({ error: 'Missing or invalid Authorization header' }, 401)
     }
+    const auth = rawAuth.startsWith('Bearer ') ? rawAuth : `Bearer ${rawAuth}`
     const { resolveUserFromAuthHeader } = await import('../core/user-manager.js')
     const identity = resolveUserFromAuthHeader(auth)
     if (!identity) {
@@ -84,6 +86,51 @@ app.post('/v1/chat/completions', bodyLimit({
 }), chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
 app.post('/v1/upload', uploadFile)
+app.post('/v1/messages', bodyLimit({
+  maxSize: 52 * 1024 * 1024,
+  onError: (c: Context) => c.json({ error: { message: 'Request body too large' } }, 413),
+}), anthropicMessages)
+app.post('/v1/messages/count_tokens', bodyLimit({
+  maxSize: 52 * 1024 * 1024,
+  onError: (c: Context) => c.json({ error: { message: 'Request body too large' } }, 413),
+}), async (c) => {
+  let body: any
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400)
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return c.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Invalid JSON body' } }, 400)
+  }
+  const promptParts: string[] = []
+  if (typeof body.system === 'string') {
+    promptParts.push(body.system)
+  } else if (Array.isArray(body.system)) {
+    for (const s of body.system) {
+      if (s && typeof s === 'object' && typeof s.text === 'string') {
+        promptParts.push(s.text)
+      }
+    }
+  }
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) {
+      if (!m || typeof m !== 'object') continue
+      if (typeof m.content === 'string') {
+        promptParts.push(m.content)
+      } else if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b && typeof b === 'object' && typeof b.text === 'string') {
+            promptParts.push(b.text)
+          }
+        }
+      }
+    }
+  }
+  const { countTokens } = await import('../core/tokenizer.js')
+  const fullText = promptParts.join('\n')
+  return c.json({ input_tokens: Math.max(1, countTokens(fullText)) })
+})
 
 // Admin dashboard (served at /admin).
 app.route('/admin', adminApp)

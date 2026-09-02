@@ -64,15 +64,15 @@ function isWarmChatInFlight(accountId: string, chatId: string) {
 
 async function getBasicQwenHeaders(accountId?: string): Promise<Record<string, string>> {
   const { cookie, userAgent, bxV, bxUa, bxUmidtoken } = await getBasicHeaders(accountId);
-  if (!cookie || !userAgent || !bxV || !bxUa || !bxUmidtoken) {
-    throw new Error('Missing required browser anti-bot headers for warm pool');
+  if (!cookie || !userAgent) {
+    throw new Error("Missing required cookie or user-agent for warm pool");
   }
   return {
     cookie,
-    'user-agent': userAgent,
-    'bx-v': bxV,
-    'bx-ua': bxUa,
-    'bx-umidtoken': bxUmidtoken,
+    "user-agent": userAgent,
+    "bx-v": bxV || "2.5.36",
+    "bx-ua": bxUa || "",
+    "bx-umidtoken": bxUmidtoken || "",
   };
 }
 
