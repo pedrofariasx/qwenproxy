@@ -1,3 +1,10 @@
+# [1.28.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.27.0...v1.28.0) (2026-09-06)
+
+
+### Features
+
+* overhaul TUI UI/UX with card layout, progress bars, toast notifications, and console suppression ([88dd572](https://github.com/pedrofariasx/qwenproxy/commit/88dd5722dc5f5a0d4ddfb3013589477b52baefb9))
+
 # [1.27.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.26.0...v1.27.0) (2026-09-06)
 
 
