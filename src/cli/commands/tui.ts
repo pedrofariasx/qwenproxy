@@ -377,7 +377,9 @@ export async function tuiCommand(options: { port: number }): Promise<void> {
           }
         }
       }
-    } catch { void 0; }
+    } catch {
+      void 0;
+    }
 
     return false;
   }
@@ -505,9 +507,7 @@ export async function tuiCommand(options: { port: number }): Promise<void> {
       lines.push(chalk.hex(SURFACE_LIGHT)("\u2501".repeat(w)));
       lines.push(...renderLogo(w));
       lines.push("");
-      const tagline =
-        chalk.hex(TEXT_MUTED)("Qwen Proxy Dashboard") +
-        chalk.hex(BRAND)(` v${version}`);
+      const tagline = chalk.hex(BRAND)(`v${version}`);
       lines.push(centerText(tagline, w));
       lines.push("");
 
@@ -542,9 +542,7 @@ export async function tuiCommand(options: { port: number }): Promise<void> {
       lines.push(chalk.hex(SURFACE_LIGHT)("\u2501".repeat(w)));
       lines.push(...renderLogo(w));
       lines.push("");
-      const tagline =
-        chalk.hex(TEXT_MUTED)("Qwen Proxy Dashboard") +
-        chalk.hex(BRAND)(` v${version}`);
+      const tagline = chalk.hex(BRAND)(`v${version}`);
       lines.push(centerText(tagline, w));
       lines.push("");
 

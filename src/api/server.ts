@@ -1,3 +1,5 @@
+import chalk from 'chalk'
+import { renderBanner } from '../cli/banner.js'
 import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
@@ -114,11 +116,35 @@ app.onError((err, c) => {
 
 app.notFound((c) => c.json({ error: 'Not found' }, 404))
 
-export async function startServer(): Promise<void> {
+export interface ServerOverrides {
+  port?: number
+  browser?: string
+  quiet?: boolean
+}
+
+export let serverPort = 0
+export let accountCount = 0
+
+export async function startServer(overrides?: ServerOverrides): Promise<void> {
+  if (overrides?.port != null) {
+    process.env.PORT = String(overrides.port)
+  }
+  if (overrides?.browser != null) {
+    process.env.BROWSER = overrides.browser
+  }
   await cache.connect()
 
   const { loadAccounts } = await import('../core/accounts.js')
   const accounts = loadAccounts()
+  accountCount = accounts.length
+
+  if (!overrides?.quiet) {
+    console.log(renderBanner({
+      port: overrides?.port ?? Number(process.env.PORT || 3000),
+      browser: overrides?.browser || process.env.BROWSER || 'chromium',
+      accountCount,
+    }))
+  }
 
   const { initPlaywright, initPlaywrightForAccount } = await import('../services/playwright.js')
 
@@ -161,8 +187,9 @@ export async function startServer(): Promise<void> {
       if (stagger > 0) await sleep(stagger)
       try {
         await initPlaywrightForAccount({ ...creds, id: account.id, email: account.email }, config.browser.headless)
+        if (!overrides?.quiet) console.log(`${chalk.green('●')} [Account] ${account.email} → ${chalk.green('Online')}`)
       } catch (err: any) {
-        console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
+        console.error(`${chalk.red('●')} [Account] ${account.email} → ${chalk.red('Offline')} (${err.message})`)
       }
     })
     if (config.precapture.headersStartup) {
@@ -202,6 +229,7 @@ export async function startServer(): Promise<void> {
     port: config.server.port,
     hostname: config.server.host,
   }, (info) => {
+    serverPort = info.port
     console.log(`Server listening on http://${info.address}:${info.port}`)
   })
 
