@@ -1,3 +1,10 @@
+# [1.25.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.24.0...v1.25.0) (2026-09-06)
+
+
+### Features
+
+* **web:** add i18n support with i18next (pt-BR, en) and dynamic language selector ([df02378](https://github.com/pedrofariasx/qwenproxy/commit/df02378affc3d3530e7a4510cd903b6c74c1f51b))
+
 # [1.24.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.23.2...v1.24.0) (2026-09-01)
 
 
