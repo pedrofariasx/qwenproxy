@@ -1,3 +1,10 @@
+# [1.26.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.25.0...v1.26.0) (2026-09-06)
+
+
+### Features
+
+* **web:** add Simplified Chinese (zh-CN) locale support ([cb11ce1](https://github.com/pedrofariasx/qwenproxy/commit/cb11ce197468d1b5b6cdb30d0a63e0a7d290c3c6))
+
 # [1.25.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.24.0...v1.25.0) (2026-09-06)
 
 
