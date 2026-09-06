@@ -1,3 +1,10 @@
+# [1.27.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.26.0...v1.27.0) (2026-09-06)
+
+
+### Features
+
+* **web:** add Buy Me a Coffee button to sidebar ([0730a33](https://github.com/pedrofariasx/qwenproxy/commit/0730a33ab2e5b1d177141e3472342e852837b520))
+
 # [1.26.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.25.0...v1.26.0) (2026-09-06)
 
 
