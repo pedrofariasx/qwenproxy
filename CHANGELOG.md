@@ -1,3 +1,10 @@
+# [1.29.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.28.0...v1.29.0) (2026-09-06)
+
+
+### Features
+
+* add CLI commands, TUI console suppression, and fix version path resolution ([9b9e618](https://github.com/pedrofariasx/qwenproxy/commit/9b9e618402ce4e3cba75c3f3a615373d74c33e9c))
+
 # [1.28.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.27.0...v1.28.0) (2026-09-06)
 
 
