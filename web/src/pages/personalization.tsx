@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { useTranslation } from 'react-i18next'
 
 const STYLE_OPTIONS = ['Default', 'Balanced', 'Concise', 'Socratic', 'Formal']
 
@@ -22,42 +23,43 @@ interface Preset {
 const PRESETS: Preset[] = [
   {
     id: 'padrao',
-    label: 'Padrão',
+    label: 'personalization.presetDefault',
     style: 'Default',
-    blurb: 'Respostas normais do Qwen, sem instrução extra.',
+    blurb: 'personalization.presetDefaultBlurb',
     instruction: '',
   },
   {
     id: 'equilibrio',
-    label: 'Equilíbrio',
+    label: 'personalization.presetBalanced',
     style: 'Balanced',
-    blurb: 'Equilíbrio entre profissionalismo e simpatia.',
-    instruction: 'Mantenha um equilíbrio entre profissionalismo e simpatia nas respostas.',
+    blurb: 'personalization.presetBalancedBlurb',
+    instruction: 'personalization.presetBalancedInstruction',
   },
   {
     id: 'conciso',
-    label: 'Conciso',
+    label: 'personalization.presetConcise',
     style: 'Concise',
-    blurb: 'Curto, direto, ao ponto.',
-    instruction: 'Seja curto, direto e vá ao ponto. Evite rodeios e explicações desnecessárias.',
+    blurb: 'personalization.presetConciseBlurb',
+    instruction: 'personalization.presetConciseInstruction',
   },
   {
     id: 'socratico',
-    label: 'Socrático',
+    label: 'personalization.presetSocratic',
     style: 'Socratic',
-    blurb: 'Guia com perguntas de investigação.',
-    instruction: 'Ao invés de dar a resposta diretamente, guie o usuário com perguntas investigativas que o ajudem a chegar à conclusão.',
+    blurb: 'personalization.presetSocraticBlurb',
+    instruction: 'personalization.presetSocraticInstruction',
   },
   {
     id: 'formal',
-    label: 'Formal',
+    label: 'personalization.presetFormal',
     style: 'Formal',
-    blurb: 'Tom académico / profissional.',
-    instruction: 'Utilize um tom académico e profissional, com linguagem formal e precisa.',
+    blurb: 'personalization.presetFormalBlurb',
+    instruction: 'personalization.presetFormalInstruction',
   },
 ]
 
 export function PersonalizationPage() {
+  const { t } = useTranslation()
   const [cfg, setCfg] = useState<PersonalizationConfig>({ name: '', description: '', style: 'Default', instruction: '' })
   const [busy, setBusy] = useState(false)
   const [applying, setApplying] = useState(false)
@@ -68,7 +70,7 @@ export function PersonalizationPage() {
     try {
       setCfg(await api.personalization())
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao carregar personalização')
+      toast.error(err?.message || t('personalization.loadFailed'))
     }
   }
 
@@ -77,7 +79,7 @@ export function PersonalizationPage() {
   }, [])
 
   function applyPreset(p: Preset) {
-    setCfg((c) => ({ ...c, style: p.style, instruction: p.instruction }))
+    setCfg((c) => ({ ...c, style: p.style, instruction: p.instruction ? t(p.instruction) : '' }))
     setActivePreset(p.id)
   }
 
@@ -86,9 +88,9 @@ export function PersonalizationPage() {
     try {
       const r = await api.savePersonalization(cfg)
       setCfg(r.config)
-      toast.success('Personalização salva')
+      toast.success(t('personalization.saved'))
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao salvar')
+      toast.error(err?.message || t('personalization.saveFailed'))
     } finally {
       setBusy(false)
     }
@@ -100,10 +102,10 @@ export function PersonalizationPage() {
     try {
       const r = await api.applyPersonalization()
       setLastApply(r.results)
-      if (r.failed === 0) toast.success(`Personalização aplicada em ${r.succeeded} conta(s)`)
-      else toast.warning(`Aplicada em ${r.succeeded}, falhou em ${r.failed} conta(s)`)
+      if (r.failed === 0) toast.success(t('personalization.appliedAll', { count: r.succeeded }))
+      else toast.warning(t('personalization.appliedPartial', { succeeded: r.succeeded, failed: r.failed }))
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao aplicar')
+      toast.error(err?.message || t('personalization.applyFailed'))
     } finally {
       setApplying(false)
     }
@@ -114,27 +116,25 @@ export function PersonalizationPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <Sparkles className="text-sky-400" /> Personalização do Qwen
-          </CardTitle>
+            <Sparkles className="text-sky-400" />{t('personalization.title')}</CardTitle>
           <CardDescription>
-            Perfil único e compartilhado. Ao aplicar, todas as contas passam a responder com o mesmo
-            nome, conhecimento e estilo. Os perfis pré-definidos preenchem os campos abaixo.
+            {t('personalization.description')}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-2">
-              <Label htmlFor="pers-name">Como o Qwen deve chamá-lo? <span className="text-muted-foreground">(0/128)</span></Label>
+              <Label htmlFor="pers-name">{t('personalization.nameLabel')}<span className="text-muted-foreground">(0/128)</span></Label>
               <Input
                 id="pers-name"
                 value={cfg.name}
                 maxLength={128}
-                placeholder="Ex.: Ana"
+                placeholder={t('personalization.namePlaceholder')}
                 onChange={(e) => { setCfg((c) => ({ ...c, name: e.target.value })); setActivePreset(null) }}
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="pers-style">Estilo</Label>
+              <Label htmlFor="pers-style">{t('personalization.styleLabel')}</Label>
               <div className="flex flex-wrap gap-2">
                 {STYLE_OPTIONS.map((s) => (
                   <Button
@@ -152,37 +152,35 @@ export function PersonalizationPage() {
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="pers-desc">
-              O que o Qwen deve saber sobre si? <span className="text-muted-foreground">(0/500)</span>
+            <Label htmlFor="pers-desc">{t('personalization.descLabel')}<span className="text-muted-foreground">(0/500)</span>
             </Label>
             <Textarea
               id="pers-desc"
               value={cfg.description}
               maxLength={500}
               rows={3}
-              placeholder="Ex.: Trabalho com marketing digital e prefiro exemplos práticos do Brasil."
+              placeholder={t('personalization.descPlaceholder')}
               onChange={(e) => { setCfg((c) => ({ ...c, description: e.target.value })); setActivePreset(null) }}
             />
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="pers-inst">Instrução personalizada: como o Qwen deve agir? <span className="text-muted-foreground">(0/2000)</span></Label>
+            <Label htmlFor="pers-inst">{t('personalization.instructionLabel')}<span className="text-muted-foreground">(0/2000)</span></Label>
             <Textarea
               id="pers-inst"
               value={cfg.instruction}
               maxLength={2000}
               rows={4}
-              placeholder="Ex.: Responda sempre em português do Brasil, com tom amigável."
+              placeholder={t('personalization.instructionPlaceholder')}
               onChange={(e) => { setCfg((c) => ({ ...c, instruction: e.target.value })); setActivePreset(null) }}
             />
           </div>
 
           <div className="flex flex-wrap gap-2">
             <Button onClick={save} disabled={busy} className="gap-2">
-              <Save /> Salvar
-            </Button>
+              <Save />{t('personalization.save')}</Button>
             <Button onClick={applyAll} disabled={applying} variant="secondary" className="gap-2">
-              {applying ? <Loader2 className="animate-spin" /> : <Wand2 />} Aplicar a todas as contas
+              {applying ? <Loader2 className="animate-spin" /> : <Wand2 />} {t('personalization.applyToAllAccounts')}
             </Button>
           </div>
         </CardContent>
@@ -190,8 +188,8 @@ export function PersonalizationPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Perfis pré-definidos</CardTitle>
-          <CardDescription>Clique para preencher os campos acima. Você pode editar livremente depois.</CardDescription>
+          <CardTitle className="text-base">{t('personalization.presetsTitle')}</CardTitle>
+          <CardDescription>{t('personalization.presetsDescription')}</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -205,10 +203,10 @@ export function PersonalizationPage() {
                 }`}
               >
                 <div className="flex w-full items-center justify-between">
-                  <span className="text-sm font-semibold">{p.label}</span>
+                  <span className="text-sm font-semibold">{t(p.label)}</span>
                   {activePreset === p.id && <Check className="size-4 text-sky-400" />}
                 </div>
-                <span className="text-xs text-muted-foreground">{p.blurb}</span>
+                <span className="text-xs text-muted-foreground">{t(p.blurb)}</span>
               </button>
             ))}
           </div>
@@ -218,8 +216,8 @@ export function PersonalizationPage() {
       {lastApply && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Resultado da aplicação</CardTitle>
-            <CardDescription>{lastApply.filter((r) => r.ok).length} com sucesso · {lastApply.filter((r) => !r.ok).length} falharam</CardDescription>
+            <CardTitle className="text-base">{t('personalization.applyResultTitle')}</CardTitle>
+            <CardDescription>{t('personalization.applyResultDescription', { succeeded: lastApply.filter((r) => r.ok).length, failed: lastApply.filter((r) => !r.ok).length })}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="flex max-h-72 flex-col gap-1 overflow-y-auto pr-1">
@@ -227,10 +225,10 @@ export function PersonalizationPage() {
                 <div key={r.accountId} className="flex items-center justify-between gap-2 border-b py-1.5 text-xs last:border-0">
                   <span className="truncate font-mono text-muted-foreground">{r.email || r.accountId.slice(0, 8)}</span>
                   {r.ok ? (
-                    <Badge variant="outline" className="text-emerald-400">ok</Badge>
+                    <Badge variant="outline" className="text-emerald-400">{t('personalization.ok')}</Badge>
                   ) : (
                     <Badge variant="outline" className="text-amber-400" title={r.error}>
-                      falhou{r.status ? ` (${r.status})` : ''}
+                      {t('personalization.failedBadge')}{r.status ? ` (${r.status})` : ''}
                     </Badge>
                   )}
                 </div>

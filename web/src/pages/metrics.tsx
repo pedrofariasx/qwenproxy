@@ -6,8 +6,10 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useTranslation } from 'react-i18next'
 
 export function MetricsPage() {
+  const { t } = useTranslation()
   const [text, setText] = useState('')
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState('')
@@ -17,7 +19,7 @@ export function MetricsPage() {
     try {
       setText(await api.metrics())
     } catch (err: any) {
-      setText(`Erro: ${err?.message || 'falha ao buscar métricas'}`)
+      setText(`${t('metrics.errorPrefix')} ${t('metrics.fetchFailed')}`)
     } finally {
       setLoading(false)
     }
@@ -56,9 +58,9 @@ export function MetricsPage() {
   async function copy() {
     try {
       await navigator.clipboard.writeText(text)
-      toast.success('Métricas copiadas')
+      toast.success(t('metrics.copied'))
     } catch {
-      toast.error('Não foi possível copiar')
+      toast.error(t('metrics.copyFailed'))
     }
   }
 
@@ -67,15 +69,13 @@ export function MetricsPage() {
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-full max-w-xs">
           <Search className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filtrar métricas… (ex: requests, cache)" className="pl-8 font-mono text-xs" />
+          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('metrics.filterPlaceholder')} className="pl-8 font-mono text-xs" />
         </div>
         <div className="ml-auto flex gap-2">
           <Button variant="outline" size="sm" onClick={copy}>
-            <Copy /> Copiar
-          </Button>
+            <Copy />{t('metrics.copy')}</Button>
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-            <RefreshCw className={loading ? 'animate-spin' : ''} /> Atualizar
-          </Button>
+            <RefreshCw className={loading ? 'animate-spin' : ''} />{t('metrics.refresh')}</Button>
         </div>
       </div>
 
@@ -101,7 +101,7 @@ export function MetricsPage() {
           ))}
           {lines.length === 0 ? (
             <Card>
-              <CardContent className="py-6 text-sm text-muted-foreground">Nenhuma métrica encontrada para “{query}”.</CardContent>
+              <CardContent className="py-6 text-sm text-muted-foreground">{t('metrics.noMetricsFound', { query: query })}</CardContent>
             </Card>
           ) : null}
         </div>

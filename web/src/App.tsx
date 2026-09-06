@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import {
   Activity, KeyRound, Layers, LogOut, Server, Settings, TerminalSquare,
   ScrollText, Database, Box, Terminal, TrendingUp, Waves,
@@ -9,6 +10,9 @@ import { cn } from '@/lib/utils'
 import { Toaster } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue
+} from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import {
   CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem
@@ -31,46 +35,22 @@ import { StreamsPage } from '@/pages/streams'
 import { PersonalizationPage } from '@/pages/personalization'
 
 const NAV = [
-  { path: '/overview', label: 'Visão geral', icon: Activity },
-  { path: '/accounts', label: 'Contas', icon: Server },
-  { path: '/users', label: 'API Keys', icon: KeyRound },
-  { path: '/streams', label: 'Streams', icon: Waves },
-  { path: '/models', label: 'Modelos', icon: Box },
-  { path: '/sessions', label: 'Sessões', icon: Database },
-  { path: '/playground', label: 'Playground', icon: Terminal },
-  { path: '/usage', label: 'Uso', icon: TrendingUp },
-  { path: '/metrics', label: 'Métricas', icon: TerminalSquare },
-  { path: '/logs', label: 'Logs', icon: ScrollText },
-  { path: '/personalization', label: 'Personalização', icon: Sparkles },
-  { path: '/settings', label: 'Configuração', icon: Settings },
-]
-
-const ACTIONS = [
-  {
-    label: 'Reiniciar servidor', icon: RefreshCw,
-    run: () => { fetch('/admin/api/restart', { method: 'POST' }); toast.success('Reiniciando…') },
-  },
-  {
-    label: 'Limpar cooldowns', icon: Snowflake,
-    run: () => api.clearCooldowns().then((r) => toast.success(`Cooldowns limpos (${r.cleared})`)).catch((e) => toast.error(e?.message || 'Falha')),
-  },
-  {
-    label: 'Baixar métricas', icon: Download,
-    run: async () => {
-      try {
-        const text = await api.exportMetrics()
-        const a = document.createElement('a')
-        a.href = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`
-        a.download = 'qwenproxy-metrics.txt'
-        a.click()
-      } catch (e: any) {
-        toast.error(e?.message || 'Falha ao baixar')
-      }
-    },
-  },
+  { path: '/overview', key: 'nav.overview', icon: Activity },
+  { path: '/accounts', key: 'nav.accounts', icon: Server },
+  { path: '/users', key: 'nav.apiKeys', icon: KeyRound },
+  { path: '/streams', key: 'nav.streams', icon: Waves },
+  { path: '/models', key: 'nav.models', icon: Box },
+  { path: '/sessions', key: 'nav.sessions', icon: Database },
+  { path: '/playground', key: 'nav.playground', icon: Terminal },
+  { path: '/usage', key: 'nav.usage', icon: TrendingUp },
+  { path: '/metrics', key: 'nav.metrics', icon: TerminalSquare },
+  { path: '/logs', key: 'nav.logs', icon: ScrollText },
+  { path: '/personalization', key: 'nav.personalization', icon: Sparkles },
+  { path: '/settings', key: 'nav.settings', icon: Settings },
 ]
 
 function Clock() {
+  const { i18n } = useTranslation()
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000)
@@ -78,17 +58,18 @@ function Clock() {
   }, [])
   return (
     <Badge variant="outline" className="font-mono text-xs">
-      {now.toLocaleTimeString('pt-BR')}
+      {now.toLocaleTimeString(i18n.language)}
     </Badge>
   )
 }
 
-function getActiveLabel(pathname: string) {
-  if (pathname === '/' || pathname === '/overview') return 'Visão geral'
-  return NAV.find((n) => n.path === pathname)?.label ?? ''
+function getActiveKey(pathname: string) {
+  if (pathname === '/' || pathname === '/overview') return 'nav.overview'
+  return NAV.find((n) => n.path === pathname)?.key ?? ''
 }
 
 export function App() {
+  const { t, i18n } = useTranslation()
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [uptime, setUptime] = useState<string>('—')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -97,6 +78,31 @@ export function App() {
   const [cmdOpen, setCmdOpen] = useState(false)
   const location = useLocation()
   const navigate = useNavigate()
+
+  const ACTIONS = [
+    {
+      key: 'common.restartServer', icon: RefreshCw,
+      run: () => { fetch('/admin/api/restart', { method: 'POST' }); toast.success(t('common.restarting')) },
+    },
+    {
+      key: 'common.clearCooldowns', icon: Snowflake,
+      run: () => api.clearCooldowns().then((r) => toast.success(t('common.cooldownsCleared', { count: r.cleared }))).catch((e) => toast.error(e?.message || t('common.failed'))),
+    },
+    {
+      key: 'common.downloadMetrics', icon: Download,
+      run: async () => {
+        try {
+          const text = await api.exportMetrics()
+          const a = document.createElement('a')
+          a.href = `data:text/plain;charset=utf-8,${encodeURIComponent(text)}`
+          a.download = 'qwenproxy-metrics.txt'
+          a.click()
+        } catch (e: any) {
+          toast.error(e?.message || t('common.downloadFailed'))
+        }
+      },
+    },
+  ]
 
   useEffect(() => {
     const stored = localStorage.getItem('qwenproxy-theme')
@@ -108,6 +114,10 @@ export function App() {
     window.dispatchEvent(new Event('qwenproxy:themechange'))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    document.documentElement.lang = i18n.language
+  }, [i18n.language])
 
   const handleToggleTheme = () => {
     setDark((v) => {
@@ -192,10 +202,10 @@ export function App() {
                   collapsed && 'justify-center px-2'
                 )}
                 onClick={() => navigate(item.path)}
-                title={collapsed ? item.label : undefined}
+                title={collapsed ? t(item.key) : undefined}
               >
                 <Icon className="size-4 shrink-0" />
-                {!collapsed && item.label}
+                {!collapsed && t(item.key)}
               </button>
             )
           })}
@@ -212,10 +222,10 @@ export function App() {
                   collapsed && 'justify-center px-2'
                 )}
                 onClick={() => navigate(item.path)}
-                title={collapsed ? item.label : undefined}
+                title={collapsed ? t(item.key) : undefined}
               >
                 <Icon className="size-4 shrink-0" />
-                {!collapsed && item.label}
+                {!collapsed && t(item.key)}
               </button>
             )
           })}
@@ -223,14 +233,14 @@ export function App() {
         <div className={cn('space-y-3 border-t p-4 text-xs text-muted-foreground', collapsed && 'space-y-2 p-2')}>
           <div className={cn('flex items-center gap-2', collapsed && 'justify-center')}>
             <Layers className="size-3" />
-            {!collapsed && <>uptime {uptime}</>}
+            {!collapsed && <>{t('common.uptime')} {uptime}</>}
           </div>
           <div className={cn('flex items-center gap-2', collapsed && 'justify-center')}>
             <span className="relative flex size-2">
               <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-60" />
               <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
             </span>
-            {!collapsed && 'online'}
+            {!collapsed && t('common.online')}
           </div>
           <form
             onSubmit={(e) => {
@@ -239,7 +249,7 @@ export function App() {
             }}
           >
             <Button type="submit" variant="outline" size="sm" className={cn('w-full', collapsed && 'px-0')}>
-              {collapsed ? <LogOut className="size-4" /> : 'Sair'}
+              {collapsed ? <LogOut className="size-4" /> : t('common.logout')}
             </Button>
           </form>
         </div>
@@ -265,7 +275,7 @@ export function App() {
               <Menu className="size-5" />
             </Button>
             <h1 className="text-sm font-semibold uppercase tracking-widest text-foreground">
-              {getActiveLabel(location.pathname)}
+              {t(getActiveKey(location.pathname))}
             </h1>
           </div>
           <div className="flex items-center gap-2">
@@ -275,6 +285,21 @@ export function App() {
             <Button variant="ghost" size="icon" onClick={handleToggleTheme}>
               {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
             </Button>
+            <Select value={i18n.language} onValueChange={(v) => i18n.changeLanguage(v)}>
+              <SelectTrigger
+                className="h-9 w-auto gap-1 px-2 text-xs font-medium ghost"
+                aria-label={t('common.switchLanguage')}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {(i18n.options.supportedLngs || []).map((lng: string) => (
+                  <SelectItem key={lng} value={lng}>
+                    {lng.toUpperCase()}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Clock />
           </div>
         </header>
@@ -299,36 +324,36 @@ export function App() {
 
       <Toaster position="top-center" theme={dark ? 'dark' : 'light'} />
 
-      <CommandDialog open={cmdOpen} onOpenChange={setCmdOpen} title="Command Palette" description="Buscar comando ou página...">
-        <CommandInput placeholder="Buscar..." />
+      <CommandDialog open={cmdOpen} onOpenChange={setCmdOpen} title="Command Palette" description={t('common.searchCommandOrPage')}>
+        <CommandInput placeholder={t('common.search')} />
         <CommandList>
-          <CommandEmpty>Nenhum resultado.</CommandEmpty>
-          <CommandGroup heading="Páginas">
+          <CommandEmpty>{t('common.noResults')}</CommandEmpty>
+          <CommandGroup heading={t('common.pages')}>
             {NAV.map((item) => {
               const Icon = item.icon
               return (
                 <CommandItem
                   key={item.path}
-                  value={item.label}
+                  value={t(item.key)}
                   onSelect={() => handleCmdSelect(() => navigate(item.path))}
                 >
                   <Icon className="size-4" />
-                  {item.label}
+                  {t(item.key)}
                 </CommandItem>
               )
             })}
           </CommandGroup>
-          <CommandGroup heading="Ações">
+          <CommandGroup heading={t('common.actions')}>
             {ACTIONS.map((a) => {
               const Icon = a.icon
               return (
                 <CommandItem
-                  key={a.label}
-                  value={a.label}
+                  key={a.key}
+                  value={t(a.key)}
                   onSelect={() => handleCmdSelect(a.run)}
                 >
                   <Icon className="size-4" />
-                  {a.label}
+                  {t(a.key)}
                 </CommandItem>
               )
             })}

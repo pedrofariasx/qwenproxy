@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { useTranslation } from 'react-i18next'
 
 function timeAgo(timestamp: number): string {
   const diff = Math.floor((Date.now() - timestamp) / 1000)
@@ -17,6 +18,7 @@ function timeAgo(timestamp: number): string {
 }
 
 export function SessionsPage() {
+  const { t } = useTranslation()
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [search, setSearch] = useState('')
 
@@ -25,7 +27,7 @@ export function SessionsPage() {
       const data = await api.sessions()
       setSessions(data)
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao carregar sessões')
+      toast.error(err?.message || t('sessions.loadFailed'))
     }
   }, [])
 
@@ -38,21 +40,21 @@ export function SessionsPage() {
   async function deleteSession(key: string) {
     try {
       await api.deleteSession(key)
-      toast.success('Sessão removida')
+      toast.success(t('sessions.sessionRemoved'))
       load()
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao remover sessão')
+      toast.error(err?.message || t('sessions.removeFailed'))
     }
   }
 
   async function clearAll() {
-    if (!confirm('Remover todas as sessões?')) return
+    if (!confirm(t('sessions.confirmRemoveAll'))) return
     try {
       await api.clearSessions()
-      toast.success('Todas as sessões removidas')
+      toast.success(t('sessions.allRemoved'))
       load()
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao limpar sessões')
+      toast.error(err?.message || t('sessions.clearFailed'))
     }
   }
 
@@ -68,15 +70,14 @@ export function SessionsPage() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle className="text-base">Sessões</CardTitle>
-              <CardDescription>{sessions.length} sessão(ões) ativa(s)</CardDescription>
+              <CardTitle className="text-base">{t('sessions.title')}</CardTitle>
+              <CardDescription>{t('sessions.activeSessions', { count: sessions.length })}</CardDescription>
             </div>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" onClick={load}>
-                <RefreshCw /> Atualizar
-              </Button>
+                <RefreshCw />{t('metrics.refresh')}</Button>
               <Button size="sm" variant="destructive" onClick={clearAll}>
-                <Trash2 /> Limpar todas
+                <Trash2 /> {t("sessions.clearAll")}
               </Button>
             </div>
           </div>
@@ -86,7 +87,7 @@ export function SessionsPage() {
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Buscar por session key ou chat ID…"
+                placeholder={t('sessions.searchPlaceholder')}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pl-8"
@@ -96,20 +97,20 @@ export function SessionsPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Session Key</TableHead>
-                <TableHead>Chat ID</TableHead>
-                <TableHead>Account ID</TableHead>
-                <TableHead>History</TableHead>
+                <TableHead>{t("sessions.tableSessionKey")}</TableHead>
+                <TableHead>{t("sessions.tableChatId")}</TableHead>
+                <TableHead>{t("sessions.account")}</TableHead>
+                <TableHead>{t("sessions.history")}</TableHead>
                 <TableHead>TTL</TableHead>
-                <TableHead>Atualizado</TableHead>
-                <TableHead className="text-right">Ações</TableHead>
+                <TableHead>{t("sessions.updated")}</TableHead>
+                <TableHead className="text-right">{t('sessions.actions')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filtered.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={7} className="text-muted-foreground">
-                    {sessions.length === 0 ? 'Nenhuma sessão ativa' : 'Nenhum resultado encontrado'}
+                    {sessions.length === 0 ? t('sessions.noSessions') : t('common.noResults')}
                   </TableCell>
                 </TableRow>
               ) : (

@@ -6,8 +6,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { useTranslation } from 'react-i18next'
 
 export function StreamsPage() {
+  const { t } = useTranslation()
   const [streams, setStreams] = useState<ActiveStream[]>([])
   const [stopping, setStopping] = useState<string | null>(null)
 
@@ -27,14 +29,14 @@ export function StreamsPage() {
   }, [load])
 
   async function stop(key: string) {
-    if (!confirm('Encerrar este stream?')) return
+    if (!confirm(t('streams.confirmTerminate'))) return
     setStopping(key)
     try {
       const res = await api.stopStream(key)
-      toast.success(res.ok ? 'Stream encerrado' : 'Stream não encontrado')
+      toast.success(res.ok ? t('streams.streamTerminated') : t('streams.streamNotFound'))
       load()
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao encerrar')
+      toast.error(err?.message || t('streams.terminateFailed'))
     } finally {
       setStopping(null)
     }
@@ -45,26 +47,24 @@ export function StreamsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <Waves className="size-4" />
-            Streams ativos
-          </CardTitle>
-          <CardDescription>{streams.length} geração(ões) em execução agora</CardDescription>
+            <Waves className="size-4" />{t('streams.title')}</CardTitle>
+          <CardDescription>{t('streams.activeGenerations', { count: streams.length })}</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Conta</TableHead>
-                <TableHead>Sessão</TableHead>
-                <TableHead>Idade</TableHead>
-                <TableHead className="text-right">Ação</TableHead>
+                <TableHead>{t('sessions.account')}</TableHead>
+                <TableHead>{t('streams.session')}</TableHead>
+                <TableHead>{t('streams.age')}</TableHead>
+                <TableHead className="text-right">{t('streams.action')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {streams.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={4} className="text-muted-foreground">
-                    Nenhum stream em execução
+                    {t('streams.noStreams')}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -79,9 +79,7 @@ export function StreamsPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <Button size="sm" variant="destructive" disabled={stopping === s.key} onClick={() => stop(s.key)}>
-                        <Square className="size-3.5" />
-                        Parar
-                      </Button>
+                        <Square className="size-3.5" />{t('playground.stop')}</Button>
                     </TableCell>
                   </TableRow>
                 ))

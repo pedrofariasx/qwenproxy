@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { useTranslation } from 'react-i18next'
 
 interface EditorState {
   mode: 'create' | 'edit'
@@ -19,6 +20,7 @@ interface EditorState {
 }
 
 export function UsersPage() {
+  const { t } = useTranslation()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [busy, setBusy] = useState(false)
@@ -27,7 +29,7 @@ export function UsersPage() {
     try {
       setUsers(await api.users())
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao carregar usuários')
+      toast.error(err?.message || t('users.loadFailed'))
     }
   }, [])
 
@@ -47,15 +49,15 @@ export function UsersPage() {
       }
       if (editor.mode === 'create') {
         await api.createUser(payload)
-        toast.success(`Key criada: ${editor.apiKey}`)
+        toast.success(t('users.keyCreated', { key: editor.apiKey }))
       } else {
         await api.updateUser(editor.id!, payload)
-        toast.success('Usuário atualizado')
+        toast.success(t('users.userUpdated'))
       }
       setEditor(null)
       load()
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao salvar')
+      toast.error(err?.message || t('users.saveFailed'))
     } finally {
       setBusy(false)
     }
@@ -65,26 +67,26 @@ export function UsersPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">API Keys de usuários</CardTitle>
-          <CardDescription>{users.length} chave(s)</CardDescription>
+          <CardTitle className="text-base">{t('users.title')}</CardTitle>
+          <CardDescription>{users.length} {t('users.keysCount')}</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Usuário</TableHead>
-                <TableHead>API Key</TableHead>
-                <TableHead className="text-right">RPM</TableHead>
-                <TableHead className="text-right">Concorrência</TableHead>
-                <TableHead className="text-right">Streams</TableHead>
-                <TableHead className="text-right">Ações</TableHead>
+                <TableHead>{t('users.user')}</TableHead>
+                <TableHead>{t('users.apiKey')}</TableHead>
+                <TableHead className="text-right">{t("users.rpm")}</TableHead>
+                <TableHead className="text-right">{t('users.concurrency')}</TableHead>
+                <TableHead className="text-right">{t('nav.streams')}</TableHead>
+                <TableHead className="text-right">{t('users.actions')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {users.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={6} className="text-muted-foreground">
-                    Nenhuma chave — crie a primeira abaixo
+                    {t('users.noKeyCreateBelow')}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -98,7 +100,7 @@ export function UsersPage() {
                           className="rounded p-0.5 hover:bg-accent"
                           onClick={() => {
                             navigator.clipboard.writeText(u.apiKey)
-                            toast.success('Chave copiada')
+                            toast.success(t('users.keyCopied'))
                           }}
                         >
                           <Copy className="size-3" />
@@ -115,13 +117,13 @@ export function UsersPage() {
                           <Pencil />
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => api.updateUser(u.id, { apiKey: genKey() }).then(() => {
-                          toast.success('Nova chave gerada. Copie antes de fechar.')
+                          toast.success(t('users.newKeyGenerated'))
                           load()
                         })}>
                           <RefreshCw />
                         </Button>
                         <Button size="sm" variant="destructive" onClick={async () => {
-                          if (!confirm(`Remover usuário ${u.email ?? u.id}?`)) return
+                          if (!confirm(t('users.confirmRemove', { email: u.email ?? u.id }))) return
                           await api.deleteUser(u.id)
                           load()
                         }}>
@@ -139,8 +141,8 @@ export function UsersPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Nova chave</CardTitle>
-          <CardDescription>Limites por usuário: RPM e concorrência máxima simultânea</CardDescription>
+          <CardTitle className="text-base">{t("users.newKeyTitle")}</CardTitle>
+          <CardDescription>{t('users.limitsDescription')}</CardDescription>
         </CardHeader>
         <CardContent>
           <Button
@@ -154,7 +156,7 @@ export function UsersPage() {
               })
             }
           >
-            <KeyRound /> Criar nova chave
+            <KeyRound /> {t("users.createNewKey")}
           </Button>
         </CardContent>
       </Card>
@@ -162,19 +164,19 @@ export function UsersPage() {
       <Dialog open={!!editor} onOpenChange={(open) => !open && setEditor(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{editor?.mode === 'create' ? 'Nova API key' : 'Editar usuário'}</DialogTitle>
+            <DialogTitle>{editor?.mode === 'create' ? t('users.dialogTitleCreate') : t('users.editUser')}</DialogTitle>
             <DialogDescription>
-              {editor?.mode === 'create' ? 'Copie a chave gerada antes de fechar esta janela.' : 'Ajuste os limites do usuário.'}
+              {editor?.mode === 'create' ? t('users.copyKeyHint') : t('users.adjustLimitsHint')}
             </DialogDescription>
           </DialogHeader>
           {editor ? (
             <div className="grid gap-4">
               <div className="grid gap-2">
-                <Label>Rótulo / e-mail</Label>
+                <Label>{t('users.labelEmail')}</Label>
                 <Input value={editor.email} onChange={(e) => setEditor({ ...editor, email: e.target.value })} placeholder="usuario1" />
               </div>
               <div className="grid gap-2">
-                <Label>API Key</Label>
+                <Label>{t('users.apiKey')}</Label>
                 <div className="flex gap-2">
                   <Input className="font-mono" value={editor.apiKey} readOnly={editor.mode === 'create'} onChange={(e) => setEditor({ ...editor, apiKey: e.target.value })} />
                   {editor.mode === 'create' ? (
@@ -186,23 +188,20 @@ export function UsersPage() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="grid gap-2">
-                  <Label>RPM</Label>
+                  <Label>{t("users.rpm")}</Label>
                   <Input type="number" value={editor.rateLimitRpm} onChange={(e) => setEditor({ ...editor, rateLimitRpm: e.target.value })} />
                 </div>
                 <div className="grid gap-2">
-                  <Label>Concorrência</Label>
+                  <Label>{t('users.concurrency')}</Label>
                   <Input type="number" value={editor.maxConcurrency} onChange={(e) => setEditor({ ...editor, maxConcurrency: e.target.value })} />
                 </div>
               </div>
             </div>
           ) : null}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEditor(null)}>
-              Cancelar
-            </Button>
+            <Button variant="outline" onClick={() => setEditor(null)}>{t('common.cancel')}</Button>
             <Button disabled={busy} onClick={save}>
-              <Plus /> Salvar
-            </Button>
+              <Plus />{t('common.save')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

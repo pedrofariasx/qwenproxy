@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { useTranslation } from 'react-i18next'
 
 function fmtContext(n?: number): string {
   if (!n) return ''
@@ -22,6 +23,7 @@ function variantOf(id: string): 'base' | 'thinking' | 'no-thinking' {
 }
 
 export function PlaygroundPage() {
+  const { t } = useTranslation()
   const [catalog, setCatalog] = useState<CatalogModel[]>([])
   const [model, setModel] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
@@ -169,7 +171,7 @@ export function PlaygroundPage() {
       const curl = [
         'curl -N http://localhost:3000/v1/chat/completions \\',
         '  -H "Content-Type: application/json" \\',
-        '  -H "Authorization: Bearer SUA_API_KEY" \\',
+        `  -H "Authorization: Bearer ${t('playground.yourApiKey')}" \\`,
         `  -d '${JSON.stringify({ ...payload, stream: payload.stream ?? true })}'`,
       ].join('\n')
       await navigator.clipboard.writeText(curl)
@@ -187,21 +189,21 @@ export function PlaygroundPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <MessageSquare className="size-4" />
-              Requisição
+              {t('playground.request')}
             </CardTitle>
-            <CardDescription>Teste o endpoint /v1/chat/completions</CardDescription>
+            <CardDescription>{t('playground.requestDescription')}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="grid gap-2">
-              <Label>Modelo</Label>
+              <Label>{t('playground.model')}</Label>
               <Select value={model || undefined} onValueChange={setModel}>
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Selecione um modelo…" />
+                  <SelectValue placeholder={t('playground.selectModel')} />
                 </SelectTrigger>
                 <SelectContent>
                   {topModels.length > 0 && (
                     <SelectGroup>
-                      <SelectLabel>Mais usados</SelectLabel>
+                      <SelectLabel>{t("playground.mostUsedGroup")}</SelectLabel>
                       {topModels.map((m) => (
                         <SelectItem key={m.id} value={m.id}>
                           <span className="font-mono">{m.id}</span>
@@ -210,7 +212,7 @@ export function PlaygroundPage() {
                     </SelectGroup>
                   )}
                   <SelectGroup>
-                    <SelectLabel>Todos os modelos</SelectLabel>
+                    <SelectLabel>{t("playground.allModelsGroup")}</SelectLabel>
                     {catalog.map((m) => (
                       <SelectItem key={m.id} value={m.id}>
                         <span className="font-mono">{m.id}</span>
@@ -231,24 +233,24 @@ export function PlaygroundPage() {
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="psys">System Prompt {systemPrompt ? <span className="text-muted-foreground">(opcional)</span> : null}</Label>
+              <Label htmlFor="psys">{t('playground.systemPrompt')} {systemPrompt ? <span className="text-muted-foreground">{t('playground.optional')}</span> : null}</Label>
               <textarea
                 id="psys"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
-                placeholder="Você é um assistente prestativo…"
+                placeholder={t('playground.systemPromptPlaceholder')}
                 rows={3}
                 className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs resize-none placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               />
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="pusr">Mensagem do usuário</Label>
+              <Label htmlFor="pusr">{t('playground.userMessage')}</Label>
               <textarea
                 id="pusr"
                 value={userMessage}
                 onChange={(e) => setUserMessage(e.target.value)}
-                placeholder="Escreva sua mensagem…"
+                placeholder={t('playground.userMessagePlaceholder')}
                 rows={6}
                 className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs resize-none placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 onKeyDown={(e) => {
@@ -263,11 +265,11 @@ export function PlaygroundPage() {
             <div className="flex flex-wrap items-center gap-6">
               <div className="flex items-center gap-2">
                 <Switch id="strm" checked={stream} onCheckedChange={setStream} />
-                <Label htmlFor="strm" className="cursor-pointer">Stream</Label>
+                <Label htmlFor="strm" className="cursor-pointer">{t('playground.stream')}</Label>
               </div>
               <div className="flex items-center gap-2">
                 <Switch id="thk" checked={thinking} onCheckedChange={setThinking} />
-                <Label htmlFor="thk" className="cursor-pointer">Thinking</Label>
+                <Label htmlFor="thk" className="cursor-pointer">{t("playground.thinkingLabel")}</Label>
               </div>
             </div>
 
@@ -275,20 +277,20 @@ export function PlaygroundPage() {
               {loading ? (
                 <Button variant="destructive" onClick={handleStop}>
                   <Square className="size-4" />
-                  Parar
+                  {t('playground.stop')}
                 </Button>
               ) : (
                 <Button onClick={handleSend} disabled={!userMessage.trim()}>
                   <Send className="size-4" />
-                  Enviar
+                  {t('playground.send')}
                 </Button>
               )}
               <Button variant="outline" onClick={handleClear} disabled={!hasResponse && !userMessage}>
                 <Trash2 className="size-4" />
-                Limpar
+                {t('playground.clear')}
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground">Dica: Ctrl/⌘ + Enter envia a mensagem.</p>
+            <p className="text-xs text-muted-foreground">{t('playground.tipCtrlEnter')}</p>
           </CardContent>
         </Card>
 
@@ -297,7 +299,7 @@ export function PlaygroundPage() {
             <div className="flex items-center justify-between gap-2">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Terminal className="size-4" />
-                Resposta
+                {t('playground.response')}
               </CardTitle>
               <div className="flex items-center gap-2">
                 {model && hasResponse ? <Badge variant="secondary" className="font-mono">{model}</Badge> : null}
@@ -308,8 +310,8 @@ export function PlaygroundPage() {
             </div>
             <CardDescription>
               {hasResponse
-                ? `${thinkingContent ? 'raciocínio + ' : ''}${response.length.toLocaleString('pt-BR')} caracteres`
-                : 'A resposta aparecerá aqui após o envio.'}
+                ? `${thinkingContent ? t('playground.reasoningPrefix') : ''}${t('playground.characters', { count: response.length })}`
+                : t('playground.responsePlaceholder')}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -317,14 +319,14 @@ export function PlaygroundPage() {
               <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
                 <MessageSquare className="size-10 text-muted-foreground" />
                 <p className="text-sm text-muted-foreground">
-                  Nenhuma resposta ainda. Configure a requisição e clique em Enviar.
+                  {t('playground.noResponseHint')}
                 </p>
               </div>
             ) : (
               <div className="flex flex-col gap-4">
                 {thinkingContent && (
                   <div>
-                    <Label className="mb-2 block text-xs text-muted-foreground">Raciocínio</Label>
+                    <Label className="mb-2 block text-xs text-muted-foreground">{t('playground.reasoningLabel')}</Label>
                     <div className="max-h-72 overflow-auto rounded-md border bg-muted/20 p-4">
                       <pre className="font-mono text-xs whitespace-pre-wrap break-words text-muted-foreground">{thinkingContent}</pre>
                     </div>
@@ -332,7 +334,7 @@ export function PlaygroundPage() {
                 )}
                 {response && (
                   <div>
-                    <Label className="mb-2 block text-xs text-muted-foreground">Conteúdo</Label>
+                    <Label className="mb-2 block text-xs text-muted-foreground">{t('playground.contentLabel')}</Label>
                     <div className="max-h-96 overflow-auto rounded-md border bg-muted/20 p-4">
                       <pre className="font-mono text-sm whitespace-pre-wrap break-words">{response}</pre>
                     </div>
@@ -341,11 +343,11 @@ export function PlaygroundPage() {
                 <div className="flex flex-wrap gap-2">
                   <Button variant="outline" size="sm" onClick={handleCopy} disabled={!response}>
                     <Copy className="size-3.5" />
-                    Copiar resposta
+                    {t('playground.copyResponse')}
                   </Button>
                   <Button variant="outline" size="sm" onClick={handleCopyCurl} disabled={!userMessage.trim()}>
                     <Terminal className="size-3.5" />
-                    Copiar cURL
+                    {t('playground.copyCurl')}
                   </Button>
                 </div>
               </div>

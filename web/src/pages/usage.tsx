@@ -6,16 +6,18 @@ import { Badge } from '@/components/ui/badge'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ChartCard, BarTrend } from '@/components/charts'
+import { useTranslation } from 'react-i18next'
+import i18next from 'i18next'
 
 function timeAgo(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000)
-  if (seconds < 60) return `${seconds}s atrás`
+  if (seconds < 60) return i18next.t('usage.secondsAgo', { count: seconds })
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}min atrás`
+  if (minutes < 60) return i18next.t('usage.minutesAgo', { count: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h atrás`
+  if (hours < 24) return i18next.t('usage.hoursAgo', { count: hours })
   const days = Math.floor(hours / 24)
-  return `${days}d atrás`
+  return i18next.t('usage.daysAgo', { count: days })
 }
 
 function Kpi({ icon: Icon, label, value }: { icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode }) {
@@ -33,6 +35,7 @@ function Kpi({ icon: Icon, label, value }: { icon: React.ComponentType<{ classNa
 }
 
 export function UsagePage() {
+  const { t, i18n } = useTranslation()
   const [data, setData] = useState<UsageData | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -83,7 +86,7 @@ export function UsagePage() {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <BarChart3 className="size-12 text-muted-foreground" />
-        <p className="text-lg text-muted-foreground">Nenhum dado de uso disponível</p>
+        <p className="text-lg text-muted-foreground">{t('usage.noData')}</p>
       </div>
     )
   }
@@ -91,37 +94,35 @@ export function UsagePage() {
   return (
     <div className="flex flex-col gap-6">
       <div className="grid gap-4 md:grid-cols-5">
-        <Kpi icon={Users} label="Total de Usuários" value={sortedUsers.length.toLocaleString('pt-BR')} />
-        <Kpi icon={TrendingUp} label="Total de Requisições" value={totalRequests.toLocaleString('pt-BR')} />
-        <Kpi icon={Clock} label="Tokens de Entrada" value={totalInputTokens.toLocaleString('pt-BR')} />
-        <Kpi icon={Clock} label="Tokens de Saída" value={totalOutputTokens.toLocaleString('pt-BR')} />
-        <Kpi icon={Clock} label="Tokens Totais" value={totalTokens.toLocaleString('pt-BR')} />
+        <Kpi icon={Users} label={t('usage.totalUsers')} value={sortedUsers.length.toLocaleString(i18n.language)} />
+        <Kpi icon={TrendingUp} label={t('usage.totalRequests')} value={totalRequests.toLocaleString(i18n.language)} />
+        <Kpi icon={Clock} label={t('usage.inputTokens')} value={totalInputTokens.toLocaleString(i18n.language)} />
+        <Kpi icon={Clock} label={t('usage.outputTokens')} value={totalOutputTokens.toLocaleString(i18n.language)} />
+        <Kpi icon={Clock} label={t('usage.totalTokens')} value={totalTokens.toLocaleString(i18n.language)} />
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Top Usuários</CardTitle>
-          <CardDescription>Ordenado por número de requisições</CardDescription>
+          <CardTitle className="text-base">{t('usage.topUsers')}</CardTitle>
+          <CardDescription>{t('usage.sortedByRequests')}</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Usuário</TableHead>
-                <TableHead className="text-right">Requisições</TableHead>
-                <TableHead className="text-right">Erros</TableHead>
-                  <TableHead className="text-right">Tokens In</TableHead>
-                  <TableHead className="text-right">Tokens Out</TableHead>
-                  <TableHead className="text-right">Tokens Total</TableHead>
-                  <TableHead className="text-right">Último Acesso</TableHead>
+                <TableHead>{t('usage.user')}</TableHead>
+                <TableHead className="text-right">{t('usage.requests')}</TableHead>
+                <TableHead className="text-right">{t('usage.errors')}</TableHead>
+                  <TableHead className="text-right">{t('usage.tokensIn')}</TableHead>
+                  <TableHead className="text-right">{t('usage.tokensOut')}</TableHead>
+                  <TableHead className="text-right">{t('usage.tokensTotal')}</TableHead>
+                  <TableHead className="text-right">{t('usage.lastAccess')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {sortedUsers.length === 0 ? (
                 <TableRow>
-                    <TableCell colSpan={7} className="text-muted-foreground">
-                    Nenhum usuário encontrado
-                  </TableCell>
+                    <TableCell colSpan={7} className="text-muted-foreground">{t('usage.noUsersFound')}</TableCell>
                 </TableRow>
               ) : (
                 sortedUsers.map((u) => {
@@ -139,17 +140,17 @@ export function UsagePage() {
                           ) : null}
                         </div>
                       </TableCell>
-                      <TableCell className="text-right font-mono">{u.requestCount.toLocaleString('pt-BR')}</TableCell>
+                      <TableCell className="text-right font-mono">{u.requestCount.toLocaleString(i18n.language)}</TableCell>
                       <TableCell className="text-right">
                         {u.errorCount > 0 ? (
-                          <Badge variant="destructive">{u.errorCount.toLocaleString('pt-BR')}</Badge>
+                          <Badge variant="destructive">{u.errorCount.toLocaleString(i18n.language)}</Badge>
                         ) : (
                           <span className="text-muted-foreground">0</span>
                         )}
                       </TableCell>
-                    <TableCell className="text-right font-mono">{(u.inputTokens ?? 0).toLocaleString('pt-BR')}</TableCell>
-                    <TableCell className="text-right font-mono">{(u.outputTokens ?? 0).toLocaleString('pt-BR')}</TableCell>
-                    <TableCell className="text-right font-mono">{u.totalTokens.toLocaleString('pt-BR')}</TableCell>
+                    <TableCell className="text-right font-mono">{(u.inputTokens ?? 0).toLocaleString(i18n.language)}</TableCell>
+                    <TableCell className="text-right font-mono">{(u.outputTokens ?? 0).toLocaleString(i18n.language)}</TableCell>
+                    <TableCell className="text-right font-mono">{u.totalTokens.toLocaleString(i18n.language)}</TableCell>
                     <TableCell className="text-right text-muted-foreground">{timeAgo(u.lastRequestAt)}</TableCell>
                     </TableRow>
                   )
@@ -161,7 +162,7 @@ export function UsagePage() {
       </Card>
 
       {modelEntries.length > 0 ? (
-        <ChartCard title="Uso por Modelo" icon={BarChart3} badge={<Badge variant="secondary" className="font-mono">{modelEntries.length} modelos</Badge>}>
+        <ChartCard title={t('usage.usageByModel')} icon={BarChart3} badge={<Badge variant="secondary" className="font-mono">{t('usage.modelCount_other', { count: modelEntries.length })}</Badge>}>
           <BarTrend data={modelChartData} color="#a78bfa" unit="req" height={160} />
           <div className="mt-4 flex flex-col gap-2">
             {modelEntries.map(([model, count]) => (
@@ -173,7 +174,7 @@ export function UsagePage() {
                     style={{ width: `${maxModelCount > 0 ? (count / maxModelCount) * 100 : 0}%` }}
                   />
                 </div>
-                <span className="w-16 text-right font-mono text-xs">{count.toLocaleString('pt-BR')}</span>
+                <span className="w-16 text-right font-mono text-xs">{count.toLocaleString(i18n.language)}</span>
               </div>
             ))}
           </div>

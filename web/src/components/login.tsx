@@ -1,10 +1,12 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
 export function Login() {
+  const { t } = useTranslation()
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -21,12 +23,12 @@ export function Login() {
       })
       const json = await res.json().catch(() => null)
       if (!res.ok || !json?.ok) {
-        setError(json?.error || 'Falha ao autenticar')
+        setError(json?.error || t('login.authFailed'))
         return
       }
       window.location.reload()
     } catch (err: any) {
-      setError(err?.message || 'Erro de rede')
+      setError(err?.message || t('login.networkError'))
     } finally {
       setBusy(false)
     }
@@ -50,7 +52,7 @@ export function Login() {
             </div>
             {error ? <p className="text-center text-sm text-destructive">{error}</p> : null}
             <Button type="submit" disabled={busy}>
-              {busy ? 'Entrando…' : 'Entrar'}
+              {busy ? t('login.signingIn') : t('login.signIn')}
             </Button>
           </form>
         </CardContent>

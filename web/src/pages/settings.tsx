@@ -9,8 +9,10 @@ import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { useTranslation } from 'react-i18next'
 
 export function SettingsPage() {
+  const { t } = useTranslation()
   const [data, setData] = useState<SettingsData | null>(null)
   const [values, setValues] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -21,7 +23,7 @@ export function SettingsPage() {
       setData(d)
       setValues({ ...d.settings })
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao carregar configuração')
+      toast.error(err?.message || t('settings.loadFailed'))
     }
   }, [])
 
@@ -47,8 +49,8 @@ export function SettingsPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Configuração essencial</CardTitle>
-          <CardDescription>Chaves destacadas em verde aplicam <b>na hora</b>; as demais exigem restart</CardDescription>
+          <CardTitle className="text-base">{t('settings.essentialConfig')}</CardTitle>
+          <CardDescription>{t('settings.configDescription')}</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -62,9 +64,9 @@ export function SettingsPage() {
                       {key}
                     </Label>
                     {(data.liveKeys || []).includes(key) ? (
-                      <span className="rounded border border-emerald-400/40 px-1.5 py-0.5 text-[10px] text-emerald-400">instantâneo</span>
+                      <span className="rounded border border-emerald-400/40 px-1.5 py-0.5 text-[10px] text-emerald-400">{t('settings.instant')}</span>
                     ) : (
-                      <span className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">restart</span>
+                      <span className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{t('settings.restart')}</span>
                     )}
                   </div>
                   {type === 'bool' ? (
@@ -93,51 +95,47 @@ export function SettingsPage() {
                   }
                   const res = await api.saveSettings(patch)
                   if (res.live?.length && !res.restartRequired) {
-                    toast.success('Aplicado instantaneamente (sem restart)')
+                    toast.success(t('settings.appliedInstant'))
                   } else if (res.live?.length && res.restartRequired) {
-                    toast.success('Chaves instantâneas aplicadas. Demais exigem restart.')
+                    toast.success(t('settings.appliedPartialRestart'))
                   } else {
-                    toast.success('Salvo. Reinicie o servidor para aplicar.')
+                    toast.success(t('settings.savedRestartRequired'))
                   }
                   load()
                 } catch (err: any) {
-                  toast.error(err?.message || 'Falha ao salvar')
+                  toast.error(err?.message || t('settings.saveFailed'))
                 } finally {
                   setSaving(false)
                 }
               }}
             >
-              <Save /> Salvar
-            </Button>
+              <Save />{t('settings.save')}</Button>
             <Button
               variant="outline"
               disabled={saving}
               onClick={() => setValues({ ...data.settings })}
             >
-              <RotateCcw /> Descartar
-            </Button>
+              <RotateCcw />{t('settings.discard')}</Button>
           </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Ações</CardTitle>
+          <CardTitle className="text-base">{t('settings.actionsTitle')}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-3">
             <Button
               variant="destructive"
               onClick={() => {
-                if (!confirm('Reiniciar o servidor agora?')) return
+                if (!confirm(t('settings.confirmRestart'))) return
                 fetch('/admin/api/restart', { method: 'POST' })
-                  .then(() => toast.success('Reiniciando…'))
+                  .then(() => toast.success(t('common.restarting')))
                   .catch((e) => toast.error(e.message))
                 setTimeout(() => window.location.reload(), 1500)
               }}
-            >
-              Reiniciar servidor
-            </Button>
+            >{t('settings.restartServer')}</Button>
             <Button
               variant="outline"
               onClick={async () => {
@@ -148,8 +146,7 @@ export function SettingsPage() {
                 a.click()
               }}
             >
-              <Download /> Baixar métricas
-            </Button>
+              <Download />{t('settings.downloadMetrics')}</Button>
           </div>
         </CardContent>
       </Card>

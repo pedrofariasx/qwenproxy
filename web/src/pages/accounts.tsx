@@ -9,8 +9,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { useTranslation } from 'react-i18next'
 
 export function AccountsPage() {
+  const { t } = useTranslation()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [inUse, setInUse] = useState<string[]>([])
   const [maxLoad, setMaxLoad] = useState(2)
@@ -40,7 +42,7 @@ export function AccountsPage() {
       setInUse(d.inUse)
       if (d.maxStreamsPerAccount) setMaxLoad(d.maxStreamsPerAccount)
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao carregar contas')
+      toast.error(err?.message || t('accounts.loadFailed'))
     }
   }, [])
 
@@ -57,19 +59,19 @@ export function AccountsPage() {
       await api.addAccount(email.trim(), password)
       setEmail('')
       setPassword('')
-      toast.success('Conta adicionada')
+      toast.success(t('accounts.accountAdded'))
       load()
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao adicionar')
+      toast.error(err?.message || t('accounts.addFailed'))
     } finally {
       setBusy(false)
     }
   }
 
   async function remove(id: string) {
-    if (!confirm('Remover esta conta?')) return
+    if (!confirm(t('accounts.confirmRemove'))) return
     await api.removeAccount(id)
-    toast.success('Conta removida')
+    toast.success(t('accounts.accountRemoved'))
     load()
   }
 
@@ -78,7 +80,7 @@ export function AccountsPage() {
     try {
       setFp(await api.accountFingerprint(id))
     } catch (err: any) {
-      toast.error(err?.message || 'Falha ao carregar fingerprint')
+      toast.error(err?.message || t('accounts.fingerprintLoadFailed'))
     } finally {
       setFpLoading(false)
     }
@@ -88,28 +90,28 @@ export function AccountsPage() {
     <div className="flex flex-col gap-6">
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Contas Qwen</CardTitle>
-          <CardDescription>{accounts.length} conta(s) configurada(s)</CardDescription>
+          <CardTitle className="text-base">{t("accounts.qwenAccounts")}</CardTitle>
+          <CardDescription>{accounts.length} {t('accounts.accountsConfigured')}</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>E-mail</TableHead>
-                <TableHead>ID</TableHead>
-                <TableHead className="text-right">Carga</TableHead>
+                <TableHead>{t('accounts.email')}</TableHead>
+                <TableHead>{t("accounts.tableId")}</TableHead>
+                <TableHead className="text-right">{t("accounts.tableLoad")}</TableHead>
                 <TableHead className="w-20">Streams</TableHead>
-                <TableHead>Cooldown</TableHead>
-                <TableHead>Em uso</TableHead>
-                <TableHead className="w-28">Fingerprint</TableHead>
-                <TableHead className="text-right">Ações</TableHead>
+                <TableHead>{t("overview.cooldown")}</TableHead>
+                <TableHead>{t("accounts.tableInUse")}</TableHead>
+                <TableHead className="w-28">{t('accounts.fingerprint')}</TableHead>
+                <TableHead className="text-right">{t('accounts.actions')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {accounts.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={8} className="text-muted-foreground">
-                    Nenhuma conta — adicione abaixo
+                    {t('accounts.noAccountAddBelow')}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -136,10 +138,10 @@ export function AccountsPage() {
                     <TableCell>
                       <div className="flex flex-col gap-1">
                         <Badge variant="outline" className={inUse.includes(a.id) ? 'text-amber-400' : 'text-emerald-400'}>
-                          {inUse.includes(a.id) ? 'em uso' : 'livre'}
+                          {inUse.includes(a.id) ? t('accounts.inUse') : t('accounts.free')}
                         </Badge>
                         <Badge variant="outline" className={a.ready ? 'text-emerald-400' : 'text-amber-400'}>
-                          {a.ready ? 'pronta' : 'aquecendo'}
+                          {a.ready ? t('accounts.ready') : t('accounts.warmingUp')}
                         </Badge>
                       </div>
                     </TableCell>
@@ -148,7 +150,7 @@ export function AccountsPage() {
                         size="sm"
                         variant="ghost"
                         className="gap-2"
-                        title="Ver fingerprint do dispositivo"
+                        title={t('accounts.viewDeviceFingerprint')}
                         onClick={() => showFp(a.id)}
                       >
                         <Fingerprint className={a.cooldownReason === 'CaptchaBlocked' || a.cooldownReason === 'Flagged' ? 'text-amber-400' : 'text-sky-400'} />
@@ -157,10 +159,10 @@ export function AccountsPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" onClick={() => api.clearCooldown(a.id).then(() => { toast.success('Cooldown limpo'); load() })}>
+                        <Button size="sm" variant="outline" onClick={() => api.clearCooldown(a.id).then(() => { toast.success(t('accounts.cooldownCleared')); load() })}>
                           <X /> limpar cooldown
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => api.refreshHeaders(a.id).then(() => toast.success('Headers atualizados')).catch((e) => toast.error(e.message))}>
+                        <Button size="sm" variant="outline" onClick={() => api.refreshHeaders(a.id).then(() => toast.success(t('accounts.headersUpdated'))).catch((e) => toast.error(e.message))}>
                           <RefreshCw /> headers
                         </Button>
                         <Button size="sm" variant="destructive" onClick={() => remove(a.id)}>
@@ -178,20 +180,20 @@ export function AccountsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Adicionar conta</CardTitle>
+          <CardTitle className="text-base">{t('accounts.addAccount')}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
             <div className="grid gap-2">
-              <Label htmlFor="acc-email">E-mail</Label>
+              <Label htmlFor="acc-email">{t('accounts.email')}</Label>
               <Input id="acc-email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@qwen.example" />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="acc-pass">Senha</Label>
-              <Input id="acc-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="senha da conta" />
+              <Label htmlFor="acc-pass">{t("accounts.password")}</Label>
+              <Input id="acc-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('accounts.password')} />
             </div>
             <Button className="gap-2" disabled={busy || !email.trim() || !password} onClick={add}>
-              <Plus /> Adicionar
+              <Plus /> {t('accounts.add')}
             </Button>
           </div>
         </CardContent>
@@ -201,26 +203,26 @@ export function AccountsPage() {
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Fingerprint className="text-sky-400" /> Fingerprint do dispositivo
+              <Fingerprint className="text-sky-400" /> {t("accounts.fingerprintDialogTitle")}
             </DialogTitle>
             <DialogDescription>
-              Identidade do navegador usada por esta conta para driblar a detecção de automação.
-              {fp && fp.salt > 0 && ' Sal já rotacionado — esta identidade foi renovada por contingência de bloqueio.'}
+              {t('accounts.fingerprintDescription')}
+              {fp && fp.salt > 0 && t('accounts.saltRotated')}
             </DialogDescription>
           </DialogHeader>
           {fpLoading || !fp ? (
-            <div className="py-8 text-center text-sm text-muted-foreground">Carregando fingerprint…</div>
+            <div className="py-8 text-center text-sm text-muted-foreground">{t('accounts.loadingFingerprint')}</div>
           ) : (
             <div className="flex max-h-[60vh] flex-col gap-4 overflow-y-auto pr-1">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">salt: {fp.salt}</Badge>
-                <Badge variant="outline">versão de identidade: {fp.resourceVersion}</Badge>
+                <Badge variant="outline">{t('accounts.salt')}: {fp.salt}</Badge>
+                <Badge variant="outline">{t('accounts.identityVersion', { version: fp.resourceVersion })}</Badge>
               </div>
               <FpProfile profile={fp.profile} />
               {fp.lanes && fp.lanes.length > 0 && (
                 <div className="flex flex-col gap-3">
                   <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Lanes isoladas ({fp.lanes.length}) — cada uma com fingerprint próprio
+                    {t('accounts.isolatedLanes', { count: fp.lanes.length })}
                   </div>
                   {fp.lanes.map((l) => (
                     <div key={l.lane} className="rounded-md border p-3">
@@ -248,15 +250,16 @@ function FpRow({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 function FpProfile({ profile }: { profile: FingerprintProfile }) {
+  const { t } = useTranslation()
   return (
     <div className="rounded-md border p-3">
       <FpRow label="User-Agent" value={profile.userAgent} />
-      <FpRow label="Plataforma" value={`${profile.platform} ${profile.platformVersion} (${profile.architecture} ${profile.bitness})`} />
+      <FpRow label={t('accounts.fpPlatform')} value={`${profile.platform} ${profile.platformVersion} (${profile.architecture} ${profile.bitness})`} />
       <FpRow label="Chrome" value={`${profile.chromeVersion} (major ${profile.chromeMajor})`} />
       <FpRow label="Viewport" value={`${profile.viewport.width}×${profile.viewport.height} (outer +${profile.outerWidthOffset}/+${profile.outerHeightOffset})`} />
       <FpRow label="Hardware Concurrency" value={profile.hardwareConcurrency} />
       <FpRow label="Device Memory" value={`${profile.deviceMemory} GB`} />
-      <FpRow label="Idiomas" value={profile.languages.join(', ')} />
+      <FpRow label={t('accounts.fpLanguages')} value={profile.languages.join(', ')} />
       <FpRow label="WebGL" value={`${profile.webglVendor} / ${profile.webglRenderer}`} />
       <FpRow label="Color / Pixel depth" value={`${profile.colorDepth} / ${profile.pixelDepth}`} />
       <FpRow label="Canvas noise seed" value={profile.canvasNoiseSeed} />

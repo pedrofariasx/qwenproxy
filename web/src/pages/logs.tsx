@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { useTranslation } from 'react-i18next'
 
 const LEVEL_STYLES: Record<LogEntry['level'], string> = {
   error: 'bg-red-500/15 text-red-600 border-red-500/30 dark:text-red-400',
@@ -23,6 +24,7 @@ function formatTime(iso: string): string {
 }
 
 export function LogsPage() {
+  const { t } = useTranslation()
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [buffer, setBuffer] = useState<LogEntry[]>([])
   const [paused, setPaused] = useState(false)
@@ -35,7 +37,7 @@ export function LogsPage() {
   useEffect(() => {
     api.logs()
       .then(setLogs)
-      .catch(() => toast.error('Failed to load logs'))
+      .catch(() => toast.error(t('logs.loadFailed')))
   }, [])
 
   useEffect(() => {
@@ -86,7 +88,7 @@ export function LogsPage() {
       setLogs([])
       setBuffer([])
     } catch {
-      toast.error('Failed to clear logs')
+      toast.error(t('logs.clearFailed'))
     }
   }, [])
 
@@ -97,11 +99,11 @@ export function LogsPage() {
   })
 
   const levels: { key: LevelFilter; label: string }[] = [
-    { key: 'all', label: 'All' },
-    { key: 'debug', label: 'Debug' },
-    { key: 'info', label: 'Info' },
-    { key: 'warn', label: 'Warn' },
-    { key: 'error', label: 'Error' },
+    { key: 'all', label: t('logs.all') },
+    { key: 'debug', label: t('logs.debug') },
+    { key: 'info', label: t('logs.info') },
+    { key: 'warn', label: t('logs.warn') },
+    { key: 'error', label: t('logs.error') },
   ]
 
   return (
@@ -113,7 +115,7 @@ export function LogsPage() {
           onClick={togglePause}
         >
           {paused ? <Play className="size-4 mr-1" /> : <Pause className="size-4 mr-1" />}
-          {paused ? 'Resume' : 'Pause'}
+          {paused ? t('logs.resume') : t('logs.pause')}
           {buffer.length > 0 && paused && (
             <Badge variant="secondary" className="ml-2">{buffer.length}</Badge>
           )}
@@ -124,13 +126,11 @@ export function LogsPage() {
           size="sm"
           onClick={() => setAutoScroll((v) => !v)}
         >
-          Auto-scroll {autoScroll ? 'ON' : 'OFF'}
+          {autoScroll ? t('logs.autoScrollOn') : t('logs.autoScrollOff')}
         </Button>
 
         <Button variant="outline" size="sm" onClick={clearLogs}>
-          <Trash2 className="size-4 mr-1" />
-          Clear
-        </Button>
+          <Trash2 className="size-4 mr-1" />{t('logs.clear')}</Button>
 
         <div className="flex items-center gap-1 ml-auto">
           <Filter className="size-4 text-muted-foreground" />
@@ -150,7 +150,7 @@ export function LogsPage() {
       <div className="relative">
         <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
-          placeholder="Search logs..."
+          placeholder={t('logs.searchPlaceholder')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="pl-9"
@@ -161,7 +161,7 @@ export function LogsPage() {
         <ScrollArea ref={scrollRef} className="h-[calc(100vh-12rem)]">
           <div className="p-3 space-y-0.5 font-mono text-sm">
             {filteredLogs.length === 0 && (
-              <p className="text-muted-foreground text-center py-8">No logs</p>
+              <p className="text-muted-foreground text-center py-8">{t("logs.noLogs")}</p>
             )}
             {filteredLogs.map((log) => (
               <div key={log.id} className="flex items-start gap-2 py-1 px-2 rounded hover:bg-muted/50">
