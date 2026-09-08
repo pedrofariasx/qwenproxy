@@ -1,6 +1,6 @@
 {
   "name": "@pedrofariasx/qwenproxy",
-  "version": "1.29.0",
+  "version": "1.30.0",
   "description": "Local OpenAI-compatible proxy API that routes requests to Qwen (chat.qwen.ai) via Playwright browser automation.",
   "scripts": {
     "prestart": "npm run build:admin",

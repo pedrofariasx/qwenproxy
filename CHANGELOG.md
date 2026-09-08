@@ -1,3 +1,10 @@
+# [1.30.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.29.0...v1.30.0) (2026-09-08)
+
+
+### Features
+
+* **web:** complete Simplified Chinese (zh-CN) translations ([1fb196d](https://github.com/pedrofariasx/qwenproxy/commit/1fb196dbcda6591dcc934a2d14e91f48619cc2c4))
+
 # [1.29.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.28.0...v1.29.0) (2026-09-06)
 
 
