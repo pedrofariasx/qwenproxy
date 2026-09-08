@@ -507,10 +507,16 @@ export async function resetBrowserProfile(cacheKey: string, accountId?: string):
     }
     markAccountNotReady(accountId || cacheKey);
     markAccountNotReady(profileId);
-    fs.rmSync(profilePath, { recursive: true, force: true });
-    fs.rmSync(storageStatePath(profileId), { force: true });
-
-    console.warn(`[Playwright] Cleared browser profile for ${cacheKey}: ${profilePath}`);
+    const { getAccountCredentials } = await import("../core/accounts.js");
+    const hasCreds = accountId ? !!getAccountCredentials(getBaseAccountId(accountId))?.password : false;
+    const isManualNamedAccount = Boolean(accountId && accountId !== "guest" && !hasCreds);
+    if (isManualNamedAccount) {
+      console.warn(`[Playwright] Preserving cookies/storage for manual login account: ${cacheKey}`);
+    } else {
+      fs.rmSync(profilePath, { recursive: true, force: true });
+      fs.rmSync(storageStatePath(profileId), { force: true });
+      console.warn(`[Playwright] Cleared browser profile for ${cacheKey}: ${profilePath}`);
+    }
   } catch (err: any) {
     console.warn(`[Playwright] Failed to clear browser profile for ${cacheKey}: ${err.message}`);
   }
@@ -607,26 +613,34 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
     await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
   }
 
+  let navigated = false;
   try {
     await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    navigated = true;
     const url = acctPage.url();
     if (url.includes('auth') || url.includes('login')) {
       if (account.email && account.password) {
-        console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
+        console.log(`[Playwright] Session expired for account ${account.id}, re-logging in...`);
         await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
         await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+        navigated = true;
       } else {
         console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
       }
     } else {
-      console.log(`[Playwright] Session validated for ${account.email}.`);
+      console.log(`[Playwright] Session validated for account ${account.id}.`);
     }
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
+    console.warn(`[Playwright] Failed to validate session for account ${account.id}: ${err.message}`);
   }
 
-  if (await hasValidAuthCookie(acctPage)) {
+  const finalUrl = acctPage.url();
+  const sessionOk = navigated && !finalUrl.includes("auth") && !finalUrl.includes("login") && finalUrl.startsWith("http");
+  if (sessionOk && (await hasValidAuthCookie(acctPage))) {
     await saveStorageState(acctContext, baseAccountId);
+    const { markAccountReady } = await import("../core/account-manager.js");
+    markAccountReady(account.id);
+    markAccountReady(baseAccountId);
   }
 }
 
