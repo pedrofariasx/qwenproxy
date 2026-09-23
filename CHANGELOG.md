@@ -1,3 +1,10 @@
+## [1.32.2](https://github.com/pedrofariasx/qwenproxy/compare/v1.32.1...v1.32.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* cooldown account until midnight when membership limit is hit ([1249c81](https://github.com/pedrofariasx/qwenproxy/commit/1249c8150e8e371351d5e0a826516b40aabc8076))
+
 ## [1.32.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.32.0...v1.32.1) (2026-09-23)
 
 
