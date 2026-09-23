@@ -40,7 +40,8 @@ export type BlockType =
   | 'captcha'
   | 'flagged'
   | 'cookie-invalid'
-  | 'server-error';
+  | 'server-error'
+  | 'membership-limit';
 
 // Hard blocks indicate the account's device identity / session is compromised:
 // quarantining alone is not enough — we must also rotate the fingerprint and

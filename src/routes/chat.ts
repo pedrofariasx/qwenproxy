@@ -22,6 +22,14 @@ function pruneStaleVerifyEntries(): void {
     if (ts < cutoff) lastSessionVerify.delete(key);
   }
 }
+
+function msUntilMidnight(): number {
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(0, 0, 0, 0);
+  return tomorrow.getTime() - now.getTime();
+}
 import { getSession, resolveSessionKey } from '../services/session-manager.js';
 import { lookupToolCall } from '../core/tool-call-registry.js';
 import type { SessionEntry } from '../services/session-manager.js';
@@ -441,7 +449,7 @@ export async function chatCompletions(c: Context) {
     const obtainStream = async (
       promptForStream: string,
       forceBootstrapOverride = false,
-    ): Promise<{ stream: ReadableStream; uiSessionId: string }> => {
+    ): Promise<{ stream: ReadableStream; uiSessionId: string; accountId: string }> => {
       if (isGuestModeOnly) {
         console.log('[Chat] Guest mode only enabled. Bypassing account rotation.');
         try {
@@ -463,7 +471,7 @@ export async function chatCompletions(c: Context) {
             headers: result.headers,
             stopToken,
           });
-          return { stream: result.stream, uiSessionId: result.uiSessionId };
+          return { stream: result.stream, uiSessionId: result.uiSessionId, accountId: 'guest' };
         } catch (err: any) {
           console.error('[Chat] Guest mode failed:', err.message);
           throw err;
@@ -560,7 +568,7 @@ export async function chatCompletions(c: Context) {
               success = true;
               releaseAccountInUse(accountId);
               noteAccountRecovery(accountId);
-              return { stream: result.stream, uiSessionId: result.uiSessionId };
+              return { stream: result.stream, uiSessionId: result.uiSessionId, accountId };
             } catch (err: any) {
               retries--;
 
@@ -644,7 +652,7 @@ export async function chatCompletions(c: Context) {
           headers: result.headers,
           stopToken,
         });
-        return { stream: result.stream, uiSessionId: result.uiSessionId };
+        return { stream: result.stream, uiSessionId: result.uiSessionId, accountId: 'guest' };
       }
 
       throw lastError || new Error('All accounts failed');
@@ -678,6 +686,7 @@ export async function chatCompletions(c: Context) {
 
       if (completed.status === 200 && completed.updateMember) {
         console.warn('[Chat] Account membership limit hit in non-streaming mode. Retrying with another account...');
+        recordAccountBlock(acquired.accountId, 'membership-limit', undefined, { cooldownMs: msUntilMidnight() });
         const retried = await obtainStream(finalPrompt, true);
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
@@ -722,6 +731,7 @@ export async function chatCompletions(c: Context) {
       onComplete: releaseUserSlotOnce,
       onUpdateMemberRetry: async () => {
         console.warn('[Chat] Account membership limit hit. Retrying with another account...');
+        recordAccountBlock(acquired.accountId, 'membership-limit', undefined, { cooldownMs: msUntilMidnight() });
         const retried = await obtainStream(finalPrompt, true);
         return { stream: retried.stream, uiSessionId: retried.uiSessionId };
       },
