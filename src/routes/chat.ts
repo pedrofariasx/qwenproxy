@@ -678,7 +678,7 @@ export async function chatCompletions(c: Context) {
 
       if (completed.status === 200 && completed.updateMember) {
         console.warn('[Chat] Account membership limit hit in non-streaming mode. Retrying with another account...');
-        const retried = await obtainStream(`${finalPrompt}\n[Retrying with another account due to membership limit.]`, true);
+        const retried = await obtainStream(finalPrompt, true);
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
@@ -722,7 +722,7 @@ export async function chatCompletions(c: Context) {
       onComplete: releaseUserSlotOnce,
       onUpdateMemberRetry: async () => {
         console.warn('[Chat] Account membership limit hit. Retrying with another account...');
-        const retried = await obtainStream(`${finalPrompt}\n[Retrying with another account due to membership limit.]`, true);
+        const retried = await obtainStream(finalPrompt, true);
         return { stream: retried.stream, uiSessionId: retried.uiSessionId };
       },
       ...(guardEnabled ? {
