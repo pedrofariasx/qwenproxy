@@ -161,17 +161,17 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
         if (extractedHeaders['bx-ua']) {
           console.log('[Playwright] Guest: Successfully captured bx-ua');
           setGuestHeadersCache({ headers: extractedHeaders, timestamp: Date.now() });
-          await route.abort('aborted');
-          await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler);
+          await route.abort('aborted').catch(() => {});
+          await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
 
           import('./qwen.js').then(m => m.disableNativeTools('guest').catch(() => {}));
 
           resolve(extractedHeaders);
         } else {
           console.log('[Playwright] Guest: Request missing bx-ua, continuing route. Headers:', Object.keys(reqHeaders));
-          await route.continue();
+          await route.continue().catch(() => {});
           if (request.url().includes('/api/v2/chat/completions')) {
-             await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler);
+             await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
              reject(new Error('Guest completions request was missing bx-ua; refusing to cache inconsistent anti-bot headers.'));
           }
         }
@@ -465,7 +465,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
         if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
           console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}, skipping...`);
-          await route.continue();
+          await route.continue().catch(() => {});
           return;
         }
 
@@ -480,9 +480,9 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
         import('./qwen.js').then(m => m.disableNativeTools(accountId).catch(() => {}));
 
-        await route.abort('aborted');
+        await route.abort('aborted').catch(() => {});
 
-        await page.unroute('**/api/v2/chat/completions*', routeHandler);
+        await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
 
         resolve(cache.cachedQwenHeaders);
       };

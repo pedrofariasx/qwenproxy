@@ -21,6 +21,7 @@ export interface QwenStreamDelta {
     summary_thought?: {
       content: string[];
     };
+    update_member?: boolean;
   };
 }
 
@@ -52,6 +53,7 @@ export interface StreamParserState {
   reasoningBuffer: string;
   promptTokens: number;
   completionTokens: number;
+  updateMemberDetected: boolean;
 }
 
 export interface QwenStreamParseOptions {
@@ -109,6 +111,7 @@ export class QwenStreamParser {
       reasoningBuffer: '',
       promptTokens: 0,
       completionTokens: 0,
+      updateMemberDetected: false,
     };
 
     this.toolParser = this.options.tools && this.options.tools.length > 0
@@ -228,6 +231,7 @@ export class QwenStreamParser {
       reasoningBuffer: '',
       promptTokens: this._state.promptTokens,
       completionTokens: this._state.completionTokens,
+      updateMemberDetected: false,
     };
     this._contentLength = 0;
     this._contentSuffix = '';
@@ -274,6 +278,10 @@ export class QwenStreamParser {
     }
 
     const delta = chunk.choices[0].delta;
+
+    if (delta.extra?.update_member) {
+      this._state.updateMemberDetected = true;
+    }
 
     if (delta.phase === 'thinking_summary') {
       if (delta.extra?.summary_thought?.content) {

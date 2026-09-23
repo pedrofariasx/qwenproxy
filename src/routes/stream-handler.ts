@@ -38,6 +38,7 @@ export interface StreamHandlerContext {
    * dropping the tool call.
    */
   onToolCallRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
+  onUpdateMemberRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
 }
 
 export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): any {
@@ -68,7 +69,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     // the upstream stream ends. A degenerate final answer can then be discarded
     // and regenerated before the client ever sees it.
     const GUARD_HOLD_BYTES = 800;
-    let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry;
+    let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry;
     let heldOutput = '';
 
     const releaseGuard = () => {
@@ -184,6 +185,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       };
 
       let firstPayloadFlushed = false;
+      let sawUpdateMemberSignal = false;
+      let updateMemberRetried = false;
       const estimatedPromptTokens = countTokens(ctx.finalPrompt);
       const fastWriteContent = (content: string) => {
         // Once a tool call has been streamed, never send more content chunks:
@@ -243,8 +246,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         completionTokens = 0;
         promptTokens = estimatedPromptTokens;
         firstPayloadFlushed = false;
+        sawUpdateMemberSignal = false;
+        updateMemberRetried = false;
         heldOutput = '';
-        guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry;
+        guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry;
       };
 
       const readUpstream = async (stream: ReadableStream) => {
@@ -322,6 +327,9 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
             if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta &&
                 (!targetResponseIdSet || chunk.response_id === targetResponseId)) {
               const delta = chunk.choices[0].delta;
+              if (delta.extra?.update_member) {
+                sawUpdateMemberSignal = true;
+              }
               if (delta.phase === 'thinking_summary') {
                 isThinkingChunk = true;
                 if (delta.extra?.summary_thought?.content) {
@@ -440,6 +448,26 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         }
       }
 
+      // Membership-limit guard: the upstream account hit a membership/usage
+      // limit and asked us to update the member plan. Retry once with another
+      // account so the client gets a normal answer instead of a dead-end.
+      if (
+        ctx.onUpdateMemberRetry &&
+        !updateMemberRetried &&
+        sawUpdateMemberSignal &&
+        guardActive
+      ) {
+        console.warn('[Chat] Account membership limit hit. Retrying with another account...');
+        updateMemberRetried = true;
+        const retried = await ctx.onUpdateMemberRetry();
+        if (retried) {
+          ctx.uiSessionId = retried.uiSessionId;
+          resetStreamState();
+          await readUpstream(retried.stream);
+          if (toolParser?.isInsideTool()) sawToolCallSignal = true;
+        }
+      }
+
       // Flush whatever survived (the real answer or the fallback).
       releaseGuard();
 
@@ -541,6 +569,7 @@ export interface NonStreamingResult {
   content: string;
   toolCalls: any[];
   degenerate: boolean;
+  updateMember: boolean;
 }
 
 /**
@@ -617,6 +646,7 @@ export async function collectNonStreamingResult(
       content: '',
       toolCalls: [],
       degenerate: false,
+      updateMember: false,
     };
   }
 
@@ -668,6 +698,7 @@ export async function collectNonStreamingResult(
     content: finalContent,
     toolCalls: toolCallsOut,
     degenerate: toolCallsOut.length === 0 && isDegenerateAnswer(finalContent),
+    updateMember: parserState.updateMemberDetected,
   };
 }
 

@@ -676,6 +676,12 @@ export async function chatCompletions(c: Context) {
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
+      if (completed.status === 200 && completed.updateMember) {
+        console.warn('[Chat] Account membership limit hit in non-streaming mode. Retrying with another account...');
+        const retried = await obtainStream(`${finalPrompt}\n[Retrying with another account due to membership limit.]`, true);
+        completed = await collectResponse(retried.stream, retried.uiSessionId);
+      }
+
       trackUsage(user ? user.id : 'anonymous', inputText, completed.status !== 200, completed.body?.usage?.completion_tokens ?? 0, completed.body?.usage?.prompt_tokens);
       trackModelUsage(modelId);
       releaseUserSlotOnce();
@@ -714,6 +720,11 @@ export async function chatCompletions(c: Context) {
         trackUsage(user ? user.id : 'anonymous', inputText, false, completionTokens, promptTokens);
       },
       onComplete: releaseUserSlotOnce,
+      onUpdateMemberRetry: async () => {
+        console.warn('[Chat] Account membership limit hit. Retrying with another account...');
+        const retried = await obtainStream(`${finalPrompt}\n[Retrying with another account due to membership limit.]`, true);
+        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+      },
       ...(guardEnabled ? {
         onDegenerateRetry: async () => {
           console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');

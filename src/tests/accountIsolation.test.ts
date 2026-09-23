@@ -157,3 +157,43 @@ test('observability: getIsolationStatus reports per-account state without cross-
   clearAccountIsolation(a);
   clearAccountIsolation(b);
 });
+
+test('fingerprint: each lane of the same account gets a distinct fingerprint', () => {
+  const base = 'iso-lane-fp';
+  const lane1 = makeAccountLaneId(base, 1);
+  const lane2 = makeAccountLaneId(base, 2);
+  const lane3 = makeAccountLaneId(base, 3);
+
+  const fp1 = getFingerprintProfile(lane1);
+  const fp2 = getFingerprintProfile(lane2);
+  const fp3 = getFingerprintProfile(lane3);
+  const fpBase = getFingerprintProfile(base);
+
+  assert.notStrictEqual(fp1.userAgent, fp2.userAgent, 'lane 1 and lane 2 must have different user agents');
+  assert.notStrictEqual(fp2.userAgent, fp3.userAgent, 'lane 2 and lane 3 must have different user agents');
+  assert.notStrictEqual(fp1.userAgent, fp3.userAgent, 'lane 1 and lane 3 must have different user agents');
+  assert.notStrictEqual(fp1.userAgent, fpBase.userAgent, 'lane 1 must differ from base account');
+
+  assert.notStrictEqual(fp1.prngSeed, fp2.prngSeed, 'lane 1 and lane 2 must have different PRNG seeds');
+  assert.notStrictEqual(fp2.prngSeed, fp3.prngSeed, 'lane 2 and lane 3 must have different PRNG seeds');
+
+  assert.strictEqual(getFingerprintSaltValue(lane1), getFingerprintSaltValue(lane2), 'lanes share the same salt (rotation is per-base-account)');
+});
+
+test('fingerprint: rotating base account rotates all lane fingerprints', () => {
+  const base = 'iso-lane-rotate';
+  const lane1 = makeAccountLaneId(base, 1);
+  const lane2 = makeAccountLaneId(base, 2);
+
+  const before1 = getFingerprintProfile(lane1);
+  const before2 = getFingerprintProfile(lane2);
+
+  rotateFingerprintSeed(base);
+
+  const after1 = getFingerprintProfile(lane1);
+  const after2 = getFingerprintProfile(lane2);
+
+  assert.notStrictEqual(after1.userAgent, before1.userAgent, 'lane 1 fingerprint must change after base rotation');
+  assert.notStrictEqual(after2.userAgent, before2.userAgent, 'lane 2 fingerprint must change after base rotation');
+  assert.notStrictEqual(after1.userAgent, after2.userAgent, 'lanes remain distinct after rotation');
+});
