@@ -48,6 +48,46 @@ export function isDegenerateAnswer(content: string | null | undefined): boolean 
 }
 
 /**
+ * Evaluates whether an early answer stream can safely bypass the 800-byte hold
+ * buffer and release immediately to achieve zero-latency TTFT.
+ *
+ * If the response already shows technical structure (code fence, headers, JSON,
+ * multiple lines, or technical keywords), it is guaranteed not to be a terse
+ * degenerate acknowledgment ("Yes", "OK", "Sim") and can be flushed instantly.
+ */
+export function canFastReleaseGuard(content: string): boolean {
+  const trimmed = (content || '').trim();
+  if (!trimmed || trimmed.length < 5) return false;
+
+  // If it starts with any known degenerate word, do NOT fast release
+  if (DEGENERATE_RE.test(trimmed)) return false;
+  const firstWord = trimmed.split(/[\s,.:;!?]/)[0].toLowerCase();
+  if (DEGENERATE_PHRASES.includes(firstWord)) return false;
+
+  // 1. Code blocks, markdown headers, lists, or JSON structures
+  if (/^(```|#+ |\* |- |\d+\. |\{|\[|> )/.test(trimmed)) {
+    return true;
+  }
+
+  // 2. Multi-line content with reasonable length
+  if (trimmed.includes('\n') && trimmed.length >= 25) {
+    return true;
+  }
+
+  // 3. Technical code keywords near the start
+  if (/^(const|let|var|function|import|export|class|def|public|private|package|type|interface|<!DOCTYPE|<html|<div)\b/.test(trimmed)) {
+    return true;
+  }
+
+  // 4. Clearly substantive answers longer than 80 chars that aren't degenerate
+  if (trimmed.length >= 80) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Builds the directive appended to a prompt that instructs the model to answer
  * the last user message in full and to never reply with a bare acknowledgment.
  */

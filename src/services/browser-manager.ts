@@ -600,6 +600,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   const acctPage = await acctContext.newPage();
   accountContexts.set(account.id, acctContext);
   accountPages.set(account.id, acctPage);
+  touchAccountActivity(account.id);
 
   const hasAuth = await hasValidAuthCookie(acctPage);
 
@@ -713,6 +714,69 @@ setFingerprintRotationListener((baseId) => {
   cachedUserAgents.delete(baseId);
 });
 
+const accountLastActivity = new Map<string, number>();
+
+export function touchAccountActivity(accountId?: string): void {
+  if (accountId) {
+    accountLastActivity.set(accountId, Date.now());
+  }
+}
+
+export function getAccountLastActivity(accountId: string): number | undefined {
+  return accountLastActivity.get(accountId);
+}
+
+export async function hibernateAccountContext(accountId: string): Promise<boolean> {
+  const acctContext = accountContexts.get(accountId);
+  const acctPage = accountPages.get(accountId);
+  if (!acctContext) return false;
+
+  try {
+    if (await hasValidAuthCookie(acctPage || null)) {
+      await saveStorageState(acctContext, accountId);
+    }
+  } catch (err: any) {
+    console.warn(`[Playwright] Failed saving storage state during hibernation for ${accountId}:`, err.message);
+  }
+
+  try {
+    await acctContext.close();
+  } catch (err: any) {
+    console.warn(`[Playwright] Failed closing context during hibernation for ${accountId}:`, err.message);
+  }
+
+  accountContexts.delete(accountId);
+  accountPages.delete(accountId);
+  console.log(`[Playwright] Hibernated idle browser context for account ${accountId} (freed RAM).`);
+  return true;
+}
+
+export async function hibernateIdleAccountContexts(maxIdleMs?: number): Promise<number> {
+  const idleMs = maxIdleMs ?? config.browser.idleHibernateMs;
+  if (!idleMs || idleMs <= 0) return 0;
+  const now = Date.now();
+  let count = 0;
+
+  for (const accountId of [...accountContexts.keys()]) {
+    const lastActive = accountLastActivity.get(accountId) ?? now;
+    if (now - lastActive >= idleMs) {
+      const hibernated = await hibernateAccountContext(accountId);
+      if (hibernated) count++;
+    }
+  }
+
+  return count;
+}
+
+if (config.browser.idleHibernateMs > 0 && typeof setInterval !== 'undefined') {
+  const timer = setInterval(() => {
+    hibernateIdleAccountContexts().catch((err: any) => {
+      console.warn('[Playwright] Idle hibernation check error:', err.message);
+    });
+  }, 60000);
+  if (timer.unref) timer.unref();
+}
+
 /**
  * Returns the account's page once it is actually on the chat.qwen.ai origin.
  * A lane's page can transiently sit off-origin (mid-`goto`, `about:blank` while
@@ -726,8 +790,17 @@ export async function waitForAccountPage(accountId?: string, timeoutMs = 15000):
   let attemptedNavigation = false;
 
   for (;;) {
-    const page = accountId === 'guest' ? guestPage : accountId ? accountPages.get(accountId) : activePage;
+    let page = accountId === 'guest' ? guestPage : accountId ? accountPages.get(accountId) : activePage;
+    if ((!page || page.isClosed()) && accountId && accountId !== 'guest') {
+      const { getAccountCredentials } = await import('../core/accounts.js');
+      const creds = getAccountCredentials(getBaseAccountId(accountId));
+      if (creds) {
+        await initPlaywrightForAccount({ ...creds, id: accountId }, config.browser.headless);
+        page = accountPages.get(accountId);
+      }
+    }
     if (page && !page.isClosed()) {
+      touchAccountActivity(accountId);
       if (page.url().includes('chat.qwen.ai')) {
         return page;
       }

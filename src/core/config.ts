@@ -21,6 +21,7 @@ const envSchema = z.object({
   USER_DATA_DIR: z.string().default('./qwen_profiles'),
   USER_AGENT: z.string().default('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'),
   LOG_CONSOLE: envBool(false),
+  BROWSER_IDLE_HIBERNATE_MS: envInt(300000, 0),
   NAVIGATION_TIMEOUT: envInt(90000, 1),
   PAGE_TIMEOUT: envInt(60000, 1),
   HTTP_TIMEOUT: envInt(45000, 1),
@@ -69,6 +70,8 @@ const envSchema = z.object({
   HYBRID_SESSION_VERIFY_EVERY_MS: envInt(60000, 0),
   HYBRID_SESSION_TTL_MS: envInt(86400000, 1),
   STREAM_DEGENERATE_GUARD: z.enum(['prone', 'always', 'off']).default('always'),
+  AUTO_CONTINUE: envBool(true),
+  MAX_AUTO_CONTINUES: envInt(3, 1),
   AUTH_REQUIRED: envBool(false),
   USER_RATE_LIMIT_RPM: envInt(120, 0),
   USER_MAX_CONCURRENCY: envInt(8, 1),
@@ -103,6 +106,7 @@ export const config = {
       'accept-language': 'en-US,en;q=0.9',
     },
     logConsole: env.LOG_CONSOLE,
+    idleHibernateMs: env.BROWSER_IDLE_HIBERNATE_MS,
   },
   timeouts: {
     navigation: env.NAVIGATION_TIMEOUT,
@@ -180,6 +184,10 @@ export const config = {
     ttlMs: env.HYBRID_SESSION_TTL_MS,
   },
   streamDegenerateGuard: env.STREAM_DEGENERATE_GUARD,
+  autoContinue: {
+    enabled: env.AUTO_CONTINUE,
+    maxContinues: env.MAX_AUTO_CONTINUES,
+  },
   authRequired: env.AUTH_REQUIRED,
   users: {
     defaultRateLimitRpm: env.USER_RATE_LIMIT_RPM,

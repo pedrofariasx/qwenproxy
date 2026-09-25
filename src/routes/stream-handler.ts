@@ -5,12 +5,14 @@ import { QwenStreamParser } from '../utils/qwen-stream-parser.js';
 import { getIncrementalDelta, parseQwenErrorPayload } from './sse-parser.js';
 import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-handler.js';
 import { textContainsToolCallStart } from '../tools/toolcall-tags.js';
-import { isDegenerateAnswer } from '../utils/degenerate-answer.js';
+import { isDegenerateAnswer, canFastReleaseGuard } from '../utils/degenerate-answer.js';
 import { removeStream } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
 import { recordToolCallEmission } from '../core/tool-call-registry.js';
 import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
 import { countTokens } from '../core/tokenizer.js';
+import { isTruncatedResponse } from '../utils/truncation-detector.js';
+import { config } from '../core/config.js';
 
 export interface StreamHandlerContext {
   stream: ReadableStream;
@@ -39,6 +41,11 @@ export interface StreamHandlerContext {
    */
   onToolCallRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   onUpdateMemberRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
+  /**
+   * Called when a response was cut off / truncated (e.g. unclosed code fence or token limit)
+   * to automatically continue generation on the same chat without requiring the user to send "continue".
+   */
+  onAutoContinue?: (chatId: string, parentId: string) => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
 }
 
 export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): any {
@@ -227,6 +234,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let bufferChunks: string[] = [];
       let bufferLen = 0;
       let lineStart = 0;
+      let upstreamFinishReason: string | null = null;
       completionTokens = 0;
       promptTokens = estimatedPromptTokens;
 
@@ -243,6 +251,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         bufferChunks = [];
         bufferLen = 0;
         lineStart = 0;
+        upstreamFinishReason = null;
         completionTokens = 0;
         promptTokens = estimatedPromptTokens;
         firstPayloadFlushed = false;
@@ -324,6 +333,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
             let foundStr = false;
             let isThinkingChunk = false;
 
+            if (chunk.choices && chunk.choices[0] && chunk.choices[0].finish_reason) {
+              upstreamFinishReason = chunk.choices[0].finish_reason;
+            }
+
             if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta &&
                 (!targetResponseIdSet || chunk.response_id === targetResponseId)) {
               const delta = chunk.choices[0].delta;
@@ -366,8 +379,14 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
               if (vStr === 'FINISHED') continue;
               if (isThinkingChunk) {
                 _reasoningBuffer += vStr;
+                if (guardActive && _reasoningBuffer.length >= 60) {
+                  releaseGuard();
+                }
                 fastWriteReasoning(vStr);
               } else {
+                if (guardActive && canFastReleaseGuard(lastFullContent)) {
+                  releaseGuard();
+                }
                 if (ctx.hasTools && toolParser) {
                   const { text, toolCalls } = toolParser.feed(vStr);
                   if (toolParser.isInsideTool() || textContainsToolCallStart(vStr)) {
@@ -471,6 +490,34 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       // Flush whatever survived (the real answer or the fallback).
       releaseGuard();
 
+      // Auto-continue guard: if the response was cut off / truncated (e.g. unclosed code fence
+      // or upstream finish_reason: 'length'), seamlessly request continuation on the same chat
+      // with parentId and keep streaming without breaking the client connection.
+      let autoContinuesLeft = config.autoContinue.enabled ? config.autoContinue.maxContinues : 0;
+      while (
+        autoContinuesLeft > 0 &&
+        ctx.onAutoContinue &&
+        emittedStreamingToolIds.size === 0 &&
+        isTruncatedResponse(lastFullContent, upstreamFinishReason)
+      ) {
+        autoContinuesLeft--;
+        console.warn(`[Chat] Truncated response detected (unclosed code fence or finish_reason=length). Auto-continuing stream (${config.autoContinue.maxContinues - autoContinuesLeft}/${config.autoContinue.maxContinues})...`);
+        const continued = await ctx.onAutoContinue(ctx.uiSessionId, targetResponseId || '');
+        if (!continued) break;
+        ctx.uiSessionId = continued.uiSessionId;
+        bufferChunks = [];
+        bufferLen = 0;
+        lineStart = 0;
+        currentThoughtIndex = 0;
+        lastFullContent = '';
+        contentLength = 0;
+        contentSuffix = '';
+        targetResponseId = null;
+        targetResponseIdSet = false;
+        upstreamFinishReason = null;
+        await readUpstream(continued.stream);
+      }
+
       const tailBuffer = bufferChunks.length > 0
         ? (bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('')).substring(lineStart)
         : '';
@@ -528,7 +575,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         prompt_tokens_details: { cached_tokens: 0 }
       };
 
-      const finalFinishReason = toolParser && toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : 'stop';
+      const finalFinishReason = toolParser && toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : (upstreamFinishReason || 'stop');
 
       writeEvent({
         id: ctx.completionId,
@@ -570,6 +617,8 @@ export interface NonStreamingResult {
   toolCalls: any[];
   degenerate: boolean;
   updateMember: boolean;
+  targetResponseId?: string | null;
+  isTruncated?: boolean;
 }
 
 /**
@@ -676,6 +725,9 @@ export async function collectNonStreamingResult(
   if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
   if (toolCallsOut.length) message.tool_calls = toolCallsOut;
 
+  const isTruncated = toolCallsOut.length === 0 && isTruncatedResponse(finalContent, parserState.finishReason);
+  const finishReason = toolCallsOut.length ? 'tool_calls' : (isTruncated ? 'length' : (parserState.finishReason || 'stop'));
+
   removeStream(completionId);
   markHistoryComplete(uiSessionId);
   completeOnce();
@@ -691,7 +743,7 @@ export async function collectNonStreamingResult(
         index: 0,
         message,
         logprobs: null,
-        finish_reason: toolCallsOut.length ? 'tool_calls' : 'stop'
+        finish_reason: finishReason
       }],
       usage
     },
@@ -699,6 +751,8 @@ export async function collectNonStreamingResult(
     toolCalls: toolCallsOut,
     degenerate: toolCallsOut.length === 0 && isDegenerateAnswer(finalContent),
     updateMember: parserState.updateMemberDetected,
+    targetResponseId: parserState.targetResponseId,
+    isTruncated,
   };
 }
 

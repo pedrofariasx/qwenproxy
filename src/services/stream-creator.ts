@@ -562,6 +562,10 @@ export interface CreateQwenStreamOptions {
   economicalPrompt?: string;
   /** Skip reusing the pinned session chat and bootstrap the full conversation instead. */
   forceBootstrap?: boolean;
+  /** Existing chat ID to continue generation on without allocating a new warm chat. */
+  chatId?: string;
+  /** Headers to use with the existing chat ID. */
+  chatHeaders?: Record<string, string>;
 }
 
 export async function createQwenStream(
@@ -690,7 +694,16 @@ export async function createQwenStream(
     })();
   }
 
-  if (useEconomical && session) {
+  if (options?.chatId) {
+    chatId = options.chatId;
+    if (options.chatHeaders) {
+      chatHeaders = options.chatHeaders;
+    } else {
+      const { headers } = await getQwenHeaders(false, effectiveAccountId);
+      chatHeaders = headers;
+    }
+    assertAntiBotHeaders(chatHeaders, 'Continuation chat');
+  } else if (useEconomical && session) {
     chatId = session.chatId;
     chatHeaders = session.headers;
     if (!chatHeaders['cookie'] || !chatHeaders['bx-ua'] || !chatHeaders['bx-umidtoken']) {

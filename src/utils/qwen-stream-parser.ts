@@ -36,6 +36,7 @@ export interface QwenStreamChunk {
   };
   choices?: Array<{
     delta: QwenStreamDelta;
+    finish_reason?: string | null;
   }>;
 }
 
@@ -54,6 +55,7 @@ export interface StreamParserState {
   promptTokens: number;
   completionTokens: number;
   updateMemberDetected: boolean;
+  finishReason: string | null;
 }
 
 export interface QwenStreamParseOptions {
@@ -112,6 +114,7 @@ export class QwenStreamParser {
       promptTokens: 0,
       completionTokens: 0,
       updateMemberDetected: false,
+      finishReason: null,
     };
 
     this.toolParser = this.options.tools && this.options.tools.length > 0
@@ -158,6 +161,11 @@ export class QwenStreamParser {
 
     // Track response_id for session continuity
     this.updateResponseId(chunk);
+
+    // Track finish_reason if provided
+    if (chunk.choices && chunk.choices[0] && chunk.choices[0].finish_reason) {
+      this._state.finishReason = chunk.choices[0].finish_reason;
+    }
 
     // Track token usage
     this.updateUsage(chunk);
@@ -232,6 +240,7 @@ export class QwenStreamParser {
       promptTokens: this._state.promptTokens,
       completionTokens: this._state.completionTokens,
       updateMemberDetected: false,
+      finishReason: null,
     };
     this._contentLength = 0;
     this._contentSuffix = '';

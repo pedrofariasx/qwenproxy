@@ -691,6 +691,44 @@ export async function chatCompletions(c: Context) {
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
+      let autoContinuesLeft = config.autoContinue.enabled ? config.autoContinue.maxContinues : 0;
+      while (
+        autoContinuesLeft > 0 &&
+        completed.status === 200 &&
+        completed.isTruncated &&
+        completed.toolCalls.length === 0
+      ) {
+        autoContinuesLeft--;
+        console.warn(`[Chat] Non-streaming truncated response detected. Auto-continuing (${config.autoContinue.maxContinues - autoContinuesLeft}/${config.autoContinue.maxContinues})...`);
+        const continuePrompt = 'Continue directly from where you left off. Do not repeat anything previously written, just continue immediately with the remainder of the response.';
+        try {
+          const continuedStreamResult = await createQwenStream(
+            continuePrompt,
+            false,
+            body.model,
+            completed.targetResponseId || null,
+            acquired.accountId === 'global' ? undefined : acquired.accountId,
+            undefined,
+            undefined,
+            { chatId: acquired.uiSessionId, forceBootstrap: false }
+          );
+          const continuedResponse = await collectResponse(continuedStreamResult.stream, continuedStreamResult.uiSessionId);
+          if (continuedResponse.status === 200 && continuedResponse.content) {
+            completed.content += continuedResponse.content;
+            if (completed.body?.choices?.[0]?.message) {
+              completed.body.choices[0].message.content = completed.content;
+            }
+            completed.isTruncated = continuedResponse.isTruncated;
+            completed.targetResponseId = continuedResponse.targetResponseId;
+          } else {
+            break;
+          }
+        } catch (err: any) {
+          console.warn('[Chat] Non-streaming auto-continue failed:', err.message);
+          break;
+        }
+      }
+
       trackUsage(user ? user.id : 'anonymous', inputText, completed.status !== 200, completed.body?.usage?.completion_tokens ?? 0, completed.body?.usage?.prompt_tokens);
       trackModelUsage(modelId);
       releaseUserSlotOnce();
@@ -734,6 +772,33 @@ export async function chatCompletions(c: Context) {
         recordAccountBlock(acquired.accountId, 'membership-limit', undefined, { cooldownMs: msUntilMidnight() });
         const retried = await obtainStream(finalPrompt, true);
         return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+      },
+      onAutoContinue: async (chatId: string, parentId: string) => {
+        try {
+          const continuePrompt = 'Continue directly from where you left off. Do not repeat anything previously written, just continue immediately with the remainder of the response.';
+          const result = await createQwenStream(
+            continuePrompt,
+            false,
+            body.model,
+            parentId || null,
+            acquired.accountId === 'global' ? undefined : acquired.accountId,
+            undefined,
+            undefined,
+            { chatId, forceBootstrap: false }
+          );
+          registerStream(completionId, {
+            abortController: result.controller,
+            accountId: result.accountId,
+            uiSessionId: result.uiSessionId,
+            targetResponseId: '',
+            headers: result.headers,
+            stopToken,
+          });
+          return { stream: result.stream, uiSessionId: result.uiSessionId };
+        } catch (err: any) {
+          console.warn('[Chat] Streaming auto-continue request failed:', err.message);
+          return null;
+        }
       },
       ...(guardEnabled ? {
         onDegenerateRetry: async () => {
