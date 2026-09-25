@@ -1,3 +1,10 @@
+# [1.33.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.32.2...v1.33.0) (2026-09-25)
+
+
+### Features
+
+* add transparent auto-continue, zero-latency TTFT fast-path, and browser hibernation ([99400fa](https://github.com/pedrofariasx/qwenproxy/commit/99400fae4104c86bfebaed68297c006e61cc6231))
+
 ## [1.32.2](https://github.com/pedrofariasx/qwenproxy/compare/v1.32.1...v1.32.2) (2026-09-23)
 
 
