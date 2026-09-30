@@ -668,20 +668,50 @@ export async function chatCompletions(c: Context) {
 
       let completed = await collectResponse(acquired.stream, acquired.uiSessionId);
 
+      // Quota can arrive as a successful assistant response instead of transport
+      // error. Re-enter the normal account rotation before considering the reply
+      // successful, and re-check after a degenerate-answer retry as well.
+      let quotaRetriesLeft = 2;
       let degenerateRetriesLeft = 1;
-      while (
-        degenerateRetriesLeft > 0 &&
-        completed.status === 200 &&
-        completed.degenerate &&
-        completed.toolCalls.length === 0
-      ) {
-        degenerateRetriesLeft--;
-        console.warn(`[Chat] Degenerate reply detected (${JSON.stringify((completed.content || '').slice(0, 60))}). Retrying on a clean chat with corrective directive.`);
-        // Retry on a fresh chat (forceBootstrap=true) so the degenerate reply and
-        // corrective directive never pollute the pinned conversation history.
-        const correctedPrompt = `${finalPrompt}\n${buildAnswerDirective()}`;
-        const retried = await obtainStream(correctedPrompt, true);
-        completed = await collectResponse(retried.stream, retried.uiSessionId);
+      for (;;) {
+        if (completed.quotaLimited) {
+          const accountId = completed.quotaAccountId;
+          if (accountId && accountId !== 'guest' && accountId !== 'global') {
+            recordAccountBlock(
+              accountId,
+              'rate-limited',
+              'Qwen returned terminal assistant daily-quota message',
+              { cooldownMs: msUntilMidnight() },
+            );
+          }
+
+          if (quotaRetriesLeft > 0 && accountId && accountId !== 'guest' && accountId !== 'global') {
+            quotaRetriesLeft--;
+            console.warn(`[Chat] HTTP-200 assistant quota response detected. Retrying on another account (${quotaRetriesLeft} quota retries left).`);
+            const retried = await obtainStream(finalPrompt, true);
+            completed = await collectResponse(retried.stream, retried.uiSessionId);
+            continue;
+          }
+          break;
+        }
+
+        if (
+          degenerateRetriesLeft > 0 &&
+          completed.status === 200 &&
+          completed.degenerate &&
+          completed.toolCalls.length === 0
+        ) {
+          degenerateRetriesLeft--;
+          console.warn(`[Chat] Degenerate reply detected (${JSON.stringify((completed.content || '').slice(0, 60))}). Retrying on a clean chat with corrective directive.`);
+          // Retry on a fresh chat (forceBootstrap=true) so the degenerate reply and
+          // corrective directive never pollute the pinned conversation history.
+          const correctedPrompt = `${finalPrompt}\n${buildAnswerDirective()}`;
+          const retried = await obtainStream(correctedPrompt, true);
+          completed = await collectResponse(retried.stream, retried.uiSessionId);
+          continue;
+        }
+
+        break;
       }
 
       if (completed.status === 200 && completed.updateMember) {
@@ -754,6 +784,8 @@ export async function chatCompletions(c: Context) {
       guardMode === 'always' ||
       (guardMode === 'prone' && (canEconomize || hasToolConversation || hasUploadContext));
 
+    let streamingQuotaRetriesLeft = 2;
+
     return handleStreamingResponse(c, {
       stream: acquired.stream,
       completionId,
@@ -767,6 +799,20 @@ export async function chatCompletions(c: Context) {
         trackUsage(user ? user.id : 'anonymous', inputText, false, completionTokens, promptTokens);
       },
       onComplete: releaseUserSlotOnce,
+      onDailyQuota: async (accountId: string) => {
+        recordAccountBlock(
+          accountId,
+          'rate-limited',
+          'Qwen returned terminal assistant daily-quota message',
+          { cooldownMs: msUntilMidnight() },
+        );
+
+        if (streamingQuotaRetriesLeft <= 0) return null;
+        streamingQuotaRetriesLeft--;
+        console.warn(`[Chat] HTTP-200 assistant quota response detected. Retrying on another account (${streamingQuotaRetriesLeft} quota retries left).`);
+        const retried = await obtainStream(finalPrompt, true);
+        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+      },
       onUpdateMemberRetry: async () => {
         console.warn('[Chat] Account membership limit hit. Retrying with another account...');
         recordAccountBlock(acquired.accountId, 'membership-limit', undefined, { cooldownMs: msUntilMidnight() });

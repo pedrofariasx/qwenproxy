@@ -6,7 +6,8 @@ import { getIncrementalDelta, parseQwenErrorPayload } from './sse-parser.js';
 import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-handler.js';
 import { textContainsToolCallStart } from '../tools/toolcall-tags.js';
 import { isDegenerateAnswer, canFastReleaseGuard } from '../utils/degenerate-answer.js';
-import { removeStream } from '../core/stream-registry.js';
+import { isDailyQuotaAssistantMessage, couldBeDailyQuotaAssistantMessagePrefix } from '../utils/qwen-quota-message.js';
+import { getStream, removeStream } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
 import { recordToolCallEmission } from '../core/tool-call-registry.js';
 import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
@@ -41,6 +42,12 @@ export interface StreamHandlerContext {
    */
   onToolCallRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   onUpdateMemberRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
+  /**
+   * Called when Qwen returns a terminal daily-quota notice as a normal assistant
+   * response. The callback owns account quarantine/rotation and may return a
+   * replacement stream.
+   */
+  onDailyQuota?: (accountId: string) => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   /**
    * Called when a response was cut off / truncated (e.g. unclosed code fence or token limit)
    * to automatically continue generation on the same chat without requiring the user to send "continue".
@@ -78,6 +85,12 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     const GUARD_HOLD_BYTES = 800;
     let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry;
     let heldOutput = '';
+
+    // Qwen sometimes reports exhausted daily quota as an HTTP-200 assistant
+    // answer. Hold only prefixes that can still become that short provider
+    // notice so normal streams keep their current low-latency behavior.
+    let quotaProbeActive = !!ctx.onDailyQuota;
+    let quotaHeldOutput = '';
 
     const releaseGuard = () => {
       if (!guardActive) return;
@@ -117,6 +130,20 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       } else if (!writeTimer) {
         writeTimer = setTimeout(flushWrites, WRITE_FLUSH_MS);
       }
+    };
+
+    const releaseQuotaProbe = () => {
+      if (!quotaProbeActive) return;
+      quotaProbeActive = false;
+      if (quotaHeldOutput) {
+        bufferedWrite(quotaHeldOutput);
+        quotaHeldOutput = '';
+      }
+    };
+
+    const discardQuotaProbe = () => {
+      quotaProbeActive = false;
+      quotaHeldOutput = '';
     };
 
     try {
@@ -200,7 +227,15 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         // OpenAI clients treat assistant content AFTER tool_calls as an error
         // (and the model should stop after </tool_call> anyway).
         if (emittedStreamingToolIds.size > 0) return;
-        bufferedWrite(contentPrefix + escapeJsonString(content) + chunkSuffix);
+        const payload = contentPrefix + escapeJsonString(content) + chunkSuffix;
+        if (quotaProbeActive) {
+          if (couldBeDailyQuotaAssistantMessagePrefix(lastFullContent)) {
+            quotaHeldOutput += payload;
+            return;
+          }
+          releaseQuotaProbe();
+        }
+        bufferedWrite(payload);
         if (!firstPayloadFlushed) { firstPayloadFlushed = true; flushWrites(); }
       };
 
@@ -259,6 +294,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         updateMemberRetried = false;
         heldOutput = '';
         guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry;
+        quotaHeldOutput = '';
+        quotaProbeActive = !!ctx.onDailyQuota;
       };
 
       const readUpstream = async (stream: ReadableStream) => {
@@ -306,7 +343,9 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
           const dataStr = trimmed.slice(6);
           if (dataStr === '[DONE]') {
-            bufferedWrite('data: [DONE]\n');
+            const donePayload = 'data: [DONE]\n';
+            if (quotaProbeActive) quotaHeldOutput += donePayload;
+            else bufferedWrite(donePayload);
             continue;
           }
 
@@ -487,6 +526,46 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         }
       }
 
+      // A daily quota notice can be produced by the original stream or by any
+      // recovery stream above. Re-check the final assistant content here, before
+      // any held bytes are released to the client.
+      for (;;) {
+        if (!isDailyQuotaAssistantMessage(lastFullContent)) break;
+
+        const accountId = getStream(ctx.completionId)?.accountId;
+        heldOutput = '';
+        writeBuffer = '';
+        discardQuotaProbe();
+
+        const retried =
+          accountId && accountId !== 'guest' && accountId !== 'global' && ctx.onDailyQuota
+            ? await ctx.onDailyQuota(accountId)
+            : null;
+
+        if (retried) {
+          ctx.uiSessionId = retried.uiSessionId;
+          resetStreamState();
+          await readUpstream(retried.stream);
+          if (toolParser?.isInsideTool()) sawToolCallSignal = true;
+          continue;
+        }
+
+        guardActive = false;
+        writeEvent({
+          error: {
+            message: 'Qwen upstream error: RateLimited: daily chat quota exhausted; try again tomorrow.',
+            type: 'rate_limit_error',
+            code: 'RateLimited',
+          }
+        });
+        bufferedWrite('data: [DONE]\n\n');
+        flushWrites();
+        return;
+      }
+
+      // The response is not a quota notice, so release the tiny prefix buffer.
+      releaseQuotaProbe();
+
       // Flush whatever survived (the real answer or the fallback).
       releaseGuard();
 
@@ -617,6 +696,8 @@ export interface NonStreamingResult {
   toolCalls: any[];
   degenerate: boolean;
   updateMember: boolean;
+  quotaLimited: boolean;
+  quotaAccountId?: string;
   targetResponseId?: string | null;
   isTruncated?: boolean;
 }
@@ -696,6 +777,7 @@ export async function collectNonStreamingResult(
       toolCalls: [],
       degenerate: false,
       updateMember: false,
+      quotaLimited: false,
     };
   }
 
@@ -728,7 +810,30 @@ export async function collectNonStreamingResult(
   const isTruncated = toolCallsOut.length === 0 && isTruncatedResponse(finalContent, parserState.finishReason);
   const finishReason = toolCallsOut.length ? 'tool_calls' : (isTruncated ? 'length' : (parserState.finishReason || 'stop'));
 
+  const quotaLimited = isDailyQuotaAssistantMessage(finalContent);
+  const quotaAccountId = quotaLimited ? getStream(completionId)?.accountId : undefined;
+
   removeStream(completionId);
+  if (quotaLimited) {
+    completeOnce();
+    return {
+      status: 429,
+      body: {
+        error: {
+          message: 'Qwen upstream error: RateLimited: daily chat quota exhausted; try again tomorrow.',
+          type: 'rate_limit_error',
+          code: 'RateLimited',
+        }
+      },
+      content: finalContent,
+      toolCalls: [],
+      degenerate: false,
+      updateMember: false,
+      quotaLimited: true,
+      quotaAccountId,
+    };
+  }
+
   markHistoryComplete(uiSessionId);
   completeOnce();
   return {
@@ -751,6 +856,7 @@ export async function collectNonStreamingResult(
     toolCalls: toolCallsOut,
     degenerate: toolCallsOut.length === 0 && isDegenerateAnswer(finalContent),
     updateMember: parserState.updateMemberDetected,
+    quotaLimited: false,
     targetResponseId: parserState.targetResponseId,
     isTruncated,
   };
