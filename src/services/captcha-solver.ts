@@ -28,10 +28,20 @@ export async function solveBaxiaCaptcha(page: Page): Promise<boolean> {
       const frame = page.frameLocator(BAXIA_IFRAME_SELECTOR);
       const slider = frame.locator('#nc_1_n1z, .btn_slide');
 
-      // Wait for the slider element to be visible inside the frame
-      await slider.waitFor({ state: 'visible', timeout: 5000 });
-
-      const sliderBox = await slider.boundingBox();
+      // The baxia iframe frequently loads slower than the old 5s window allowed,
+      // which surfaced as "locator.waitFor: Timeout 5000ms exceeded". Give it a
+      // generous budget and re-locate once on a stale-frame error.
+      let sliderBox: Awaited<ReturnType<typeof slider.boundingBox>> = null;
+      for (let locate = 0; locate < 2; locate++) {
+        try {
+          await slider.waitFor({ state: 'visible', timeout: 15000 });
+          sliderBox = await slider.boundingBox();
+          if (sliderBox) break;
+        } catch (err: any) {
+          console.warn(`[Captcha] Attempt ${attempt} slider locate failed (${locate + 1}/2):`, err.message);
+          await sleep(1500 * (locate + 1));
+        }
+      }
       if (!sliderBox) {
         console.warn(`[Captcha] Attempt ${attempt}: Slider bounding box not found.`);
         await sleep(1000);
@@ -71,10 +81,10 @@ export async function solveBaxiaCaptcha(page: Page): Promise<boolean> {
       }
 
       console.warn(`[Captcha] Attempt ${attempt} did not solve the captcha. Retrying...`);
-      await sleep(1000);
+      await sleep(1000 * attempt);
     } catch (err: any) {
       console.error(`[Captcha] Error during attempt ${attempt}:`, err.message);
-      await sleep(1000);
+      await sleep(1000 * attempt);
     }
   }
 
@@ -91,26 +101,61 @@ export async function solveBaxiaCaptcha(page: Page): Promise<boolean> {
  */
 export function startCaptchaWatcher(page: Page, timeoutMs: number) {
   let finished = false;
-  const promise = (async () => {
-    const start = Date.now();
-    while (!finished && (Date.now() - start < timeoutMs)) {
-      try {
-        if (page.isClosed()) break;
-        const hasCaptcha = await page.locator(BAXIA_IFRAME_SELECTOR).first().isVisible().catch(() => false);
-        if (hasCaptcha) {
-          console.log('[Captcha] Baxia captcha detected on page. Solving...');
-          await solveBaxiaCaptcha(page);
-        }
-      } catch {
-        // ignore
+  let solveInFlight = false;
+
+  const maybeSolve = async () => {
+    if (finished || solveInFlight) return;
+    if (page.isClosed()) return;
+    solveInFlight = true;
+    try {
+      const hasCaptcha = await page.locator(BAXIA_IFRAME_SELECTOR).first().isVisible().catch(() => false);
+      if (hasCaptcha && !finished) {
+        console.log('[Captcha] Baxia captcha detected on page. Solving...');
+        await solveBaxiaCaptcha(page);
       }
-      await sleep(1000);
+    } catch {
+      // ignore
+    } finally {
+      solveInFlight = false;
+    }
+  };
+
+  // Event-driven detection (the punish iframe arrives via a frame navigation)
+  // plus a slow safety poll, instead of the old 1s CDP poll on every lane that
+  // contended with header capture and screenshots. The event API is feature-
+  // detected so lightweight page stand-ins (tests) still work via the poll.
+  const eventsSupported =
+    typeof (page as any).on === 'function' && typeof (page as any).off === 'function';
+  const onFrameNavigated = () => { void maybeSolve(); };
+  if (eventsSupported) {
+    (page as any).on('framenavigated', onFrameNavigated);
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  // Check immediately: a challenge already on the page at warm-up must not wait
+  // for the first safety poll.
+  void maybeSolve();
+
+  const safetyPoll = setInterval(() => {
+    if (finished || Date.now() >= deadline) {
+      clearInterval(safetyPoll);
+      return;
+    }
+    void maybeSolve();
+  }, 5000);
+  if (safetyPoll.unref) safetyPoll.unref();
+
+  const promise = (async () => {
+    while (!finished && Date.now() < deadline) {
+      await sleep(500);
     }
   })();
 
   return {
     stop: () => {
       finished = true;
+      if (eventsSupported) (page as any).off('framenavigated', onFrameNavigated);
+      clearInterval(safetyPoll);
     },
     promise
   };

@@ -11,6 +11,7 @@ import {
   sleep,
   accountContexts,
   accountPages,
+  accountHeaderCaches,
   cachedUserAgents,
   cookieCaches,
   getAccountHeaderCache,
@@ -32,6 +33,13 @@ import { getStealthScript } from './stealth.js';
 import { startCaptchaWatcher } from './captcha-solver.js';
 import { humanType, humanDelay } from './human-behavior.js';
 import { getFingerprintProfile } from './fingerprint.js';
+
+// Capture anti-bot headers from ANY outbound /api/v2 request (chats list,
+// settings, completions, ...), not just completions. The completions request
+// often never fires during warm-up (disabled send button, deduplicated prompt,
+// mid-generation chat), which was the main cause of the 90s "Timeout waiting
+// for Qwen headers" errors. Other API calls carry the same bx-ua/bx-umidtoken.
+export const CAPTURE_ROUTE_PATTERN = '**/api/v2/**';
 
 export async function getCookies(accountId?: string): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
@@ -146,9 +154,8 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
       }, config.timeouts.headers);
 
       const routeHandler = async (route: any, request: any) => {
-        clearTimeout(timeout);
         const reqHeaders = request.headers();
-        console.log('[Playwright] Guest intercepted request:', request.url());
+        const isCompletions = request.url().includes('/api/v2/chat/completions');
 
         const extractedHeaders = {
           'cookie': reqHeaders['cookie'] || '',
@@ -159,25 +166,28 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
         };
 
         if (extractedHeaders['bx-ua']) {
-          console.log('[Playwright] Guest: Successfully captured bx-ua');
+          clearTimeout(timeout);
+          console.log('[Playwright] Guest: Successfully captured bx-ua from', request.url());
           setGuestHeadersCache({ headers: extractedHeaders, timestamp: Date.now() });
-          await route.abort('aborted').catch(() => {});
-          await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+          if (isCompletions) await route.abort('aborted').catch(() => {});
+          else await route.continue().catch(() => {});
+          await guestPage!.unroute(CAPTURE_ROUTE_PATTERN, routeHandler).catch(() => {});
 
           import('./qwen.js').then(m => m.disableNativeTools('guest').catch(() => {}));
 
           resolve(extractedHeaders);
         } else {
-          console.log('[Playwright] Guest: Request missing bx-ua, continuing route. Headers:', Object.keys(reqHeaders));
+          console.log('[Playwright] Guest: Request missing bx-ua, continuing route:', request.url());
           await route.continue().catch(() => {});
-          if (request.url().includes('/api/v2/chat/completions')) {
-             await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+          if (isCompletions) {
+             clearTimeout(timeout);
+             await guestPage!.unroute(CAPTURE_ROUTE_PATTERN, routeHandler).catch(() => {});
              reject(new Error('Guest completions request was missing bx-ua; refusing to cache inconsistent anti-bot headers.'));
           }
         }
       };
 
-      guestPage!.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
+      guestPage!.route(CAPTURE_ROUTE_PATTERN, routeHandler).then(async () => {
         const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
         try {
           await guestPage!.waitForSelector(inputSelector, { timeout: config.timeouts.page });
@@ -187,12 +197,22 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
           const selectors = ['.message-input-right-button-send .send-button', '.chat-prompt-send-button', 'button.send-button'];
           let clicked = false;
           for (const selector of selectors) {
-            const btn = await guestPage!.$(selector);
-            if (btn && await btn.isVisible()) {
+            try {
+              const btn = guestPage!.locator(selector).first();
+              let enabled = false;
+              const enableDeadline = Date.now() + 15000;
+              while (Date.now() < enableDeadline) {
+                if (await btn.isVisible().catch(() => false) && await btn.isEnabled().catch(() => false)) {
+                  enabled = true;
+                  break;
+                }
+                await sleep(500);
+              }
+              if (!enabled) continue;
               await btn.click({ force: true, delay: 50 }).catch(() => {});
               clicked = true;
               break;
-            }
+            } catch { /* try next selector */ }
           }
           if (!clicked) {
             await guestPage!.keyboard.press('Enter');
@@ -299,10 +319,25 @@ async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Pr
       const isTimeout = err?.message?.includes('Timeout waiting for Qwen headers for');
 
       if (attempt < MAX_HEADER_CAPTURE_RETRIES && isTimeout) {
-        console.warn(`[Playwright] Header capture timed out for ${cacheKey}; clearing browser profile and retrying (attempt ${attempt + 1}/${MAX_HEADER_CAPTURE_RETRIES})...`);
-        await resetBrowserProfile(cacheKey, accountId);
-        if (!accountId && getActiveAccountCount() === 0) {
-          await initPlaywright(config.browser.headless, config.browser.type);
+        const isLastRetry = attempt === MAX_HEADER_CAPTURE_RETRIES - 1;
+        if (isLastRetry) {
+          // Final attempt: hard-reset the whole profile so recovery happens as a
+          // fresh device identity.
+          console.warn(`[Playwright] Header capture timed out for ${cacheKey}; hard-resetting browser profile before final retry...`);
+          await resetBrowserProfile(cacheKey, accountId);
+          if (!accountId && getActiveAccountCount() === 0) {
+            await initPlaywright(config.browser.headless, config.browser.type);
+          }
+        } else {
+          // Soft recovery: only drop the stale header cache and nudge the page
+          // back to a fresh new-chat. A full profile reset on every miss was
+          // tearing down healthy contexts and multiplying the timeout.
+          console.warn(`[Playwright] Header capture timed out for ${cacheKey}; soft-recovering (attempt ${attempt + 1}/${MAX_HEADER_CAPTURE_RETRIES})...`);
+          accountHeaderCaches.delete(cacheKey);
+          const page = accountId ? accountPages.get(accountId) : getActivePage();
+          if (page && !page.isClosed()) {
+            await page.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation }).catch(() => {});
+          }
         }
         continue;
       }
@@ -427,10 +462,15 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           const path = await import('path');
           const { PROFILES_DIR } = await import('./browser-manager.js');
           const screenshotPath = path.join(PROFILES_DIR, `error_${cacheKey}.png`);
-          await page.screenshot({ path: screenshotPath });
+          // Best-effort only: a hung page can block a default 30s screenshot and
+          // stall recovery. Cap it at 5s and never let it delay the rejection.
+          await Promise.race([
+            page.screenshot({ path: screenshotPath, timeout: 5000, animations: 'disabled' as const }),
+            sleep(5000),
+          ]);
           console.log(`[Playwright] Error screenshot saved to ${screenshotPath}`);
         } catch (err: any) {
-          console.error('[Playwright] Failed to save error screenshot:', err.message);
+          console.warn('[Playwright] Skipped error screenshot (page unresponsive):', err.message);
         }
         reject(new Error(`Timeout waiting for Qwen headers for ${cacheKey}`));
       }, config.timeouts.headers);
@@ -438,20 +478,23 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
       console.log(`[Playwright] Setting up route interception for ${cacheKey}...`);
       const routeHandler = async (route: any, request: any) => {
         const reqHeaders = request.headers();
+        const isCompletions = request.url().includes('/api/v2/chat/completions');
         let uiSessionId = '';
         let uiParentMessageId: string | null = null;
 
-        const postData = request.postData();
-        if (postData) {
-          try {
-            const payload = JSON.parse(postData);
-            if (payload.chat_id) {
-              uiSessionId = payload.chat_id;
-            }
-            if (payload.parent_id !== undefined) {
-              uiParentMessageId = payload.parent_id;
-            }
-          } catch { /* ignore parse errors */ }
+        if (isCompletions) {
+          const postData = request.postData();
+          if (postData) {
+            try {
+              const payload = JSON.parse(postData);
+              if (payload.chat_id) {
+                uiSessionId = payload.chat_id;
+              }
+              if (payload.parent_id !== undefined) {
+                uiParentMessageId = payload.parent_id;
+              }
+            } catch { /* ignore parse errors */ }
+          }
         }
 
         const extractedHeaders = {
@@ -464,14 +507,14 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
         };
 
         if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-          console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}, skipping...`);
+          console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}, skipping:`, request.url());
           await route.continue().catch(() => {});
           return;
         }
 
         clearTimeout(timeout);
 
-        console.log(`[Playwright] Successfully intercepted headers for ${cacheKey}.`);
+        console.log(`[Playwright] Successfully intercepted headers for ${cacheKey} from`, request.url());
         cache.currentHeaders = extractedHeaders;
         cache.cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };
         cache.lastHeadersTime = Date.now();
@@ -480,14 +523,18 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
         import('./qwen.js').then(m => m.disableNativeTools(accountId).catch(() => {}));
 
-        await route.abort('aborted').catch(() => {});
+        // Only the completions request is aborted (it would start a real
+        // generation); every other API call is allowed through so the page
+        // keeps working while we harvest headers from whichever fires first.
+        if (isCompletions) await route.abort('aborted').catch(() => {});
+        else await route.continue().catch(() => {});
 
-        await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+        await page.unroute(CAPTURE_ROUTE_PATTERN, routeHandler).catch(() => {});
 
         resolve(cache.cachedQwenHeaders);
       };
 
-      page.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
+      page.route(CAPTURE_ROUTE_PATTERN, routeHandler).then(async () => {
         console.log(`[Playwright] Triggering request for ${cacheKey}...`);
         const inputSelector = 'textarea.message-input-textarea, textarea:visible, [contenteditable="true"]:visible';
         try {
@@ -505,23 +552,25 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           let clicked = false;
           for (const selector of selectors) {
             try {
-              const btn = await page.$(selector);
-              if (btn && await btn.isVisible()) {
-                console.log(`[Playwright] Attempting click on: ${selector}`);
-
-                await page.evaluate((sel) => {
-                  const element = document.querySelector(sel) as HTMLElement;
-                  if (element) {
-                    element.focus();
-                    element.click();
-                  }
-                }, selector);
-
-                await btn.click({ force: true, delay: humanDelay(30, 80) }).catch(() => {});
-
-                clicked = true;
-                break;
+              const btn = page.locator(selector).first();
+              // Wait until the send button is actually ENABLED before clicking.
+              // Clicking a disabled button (prior generation still running,
+              // page still hydrating) never fires the completions request and
+              // was a direct cause of the header-capture timeout.
+              let enabled = false;
+              const enableDeadline = Date.now() + 15000;
+              while (Date.now() < enableDeadline) {
+                if (await btn.isVisible().catch(() => false) && await btn.isEnabled().catch(() => false)) {
+                  enabled = true;
+                  break;
+                }
+                await sleep(500);
               }
+              if (!enabled) continue;
+              console.log(`[Playwright] Attempting click on: ${selector}`);
+              await btn.click({ force: true, delay: humanDelay(30, 80) }).catch(() => {});
+              clicked = true;
+              break;
             } catch (e) {
               console.error(`[Playwright] Error clicking ${selector} for ${cacheKey}:`, e);
             }
