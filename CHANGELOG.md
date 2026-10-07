@@ -1,3 +1,10 @@
+# [1.34.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.33.1...v1.34.0) (2026-10-07)
+
+
+### Features
+
+* detect Qwen overload responses and auto-retry on another account ([f9b1cba](https://github.com/pedrofariasx/qwenproxy/commit/f9b1cbaa32bf3f32b7d6636975683ce5aaa05f72))
+
 ## [1.33.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.33.0...v1.33.1) (2026-10-07)
 
 
