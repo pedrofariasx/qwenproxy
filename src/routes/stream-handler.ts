@@ -6,6 +6,7 @@ import { getIncrementalDelta, parseQwenErrorPayload } from './sse-parser.js';
 import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-handler.js';
 import { textContainsToolCallStart } from '../tools/toolcall-tags.js';
 import { isDegenerateAnswer, canFastReleaseGuard } from '../utils/degenerate-answer.js';
+import { isOverloadMessage } from '../utils/overload-detector.js';
 import { removeStream } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
 import { recordToolCallEmission } from '../core/tool-call-registry.js';
@@ -41,6 +42,7 @@ export interface StreamHandlerContext {
    */
   onToolCallRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   onUpdateMemberRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
+  onOverloadRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   /**
    * Called when a response was cut off / truncated (e.g. unclosed code fence or token limit)
    * to automatically continue generation on the same chat without requiring the user to send "continue".
@@ -76,7 +78,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     // the upstream stream ends. A degenerate final answer can then be discarded
     // and regenerated before the client ever sees it.
     const GUARD_HOLD_BYTES = 800;
-    let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry;
+    let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry || !!ctx.onOverloadRetry;
     let heldOutput = '';
 
     let activeStream: ReadableStream | null = ctx.stream;
@@ -215,6 +217,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let firstPayloadFlushed = false;
       let sawUpdateMemberSignal = false;
       let updateMemberRetried = false;
+      let sawOverloadSignal = false;
+      let overloadRetried = false;
       const estimatedPromptTokens = countTokens(ctx.finalPrompt);
       const fastWriteContent = (content: string) => {
         // Once a tool call has been streamed, never send more content chunks:
@@ -278,8 +282,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         firstPayloadFlushed = false;
         sawUpdateMemberSignal = false;
         updateMemberRetried = false;
+        sawOverloadSignal = false;
+        overloadRetried = false;
         heldOutput = '';
-        guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry;
+        guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry || !!ctx.onOverloadRetry;
       };
 
       const readUpstream = async (stream: ReadableStream) => {
@@ -390,6 +396,9 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
                 isThinkingChunk = false;
                 if (delta.content !== undefined) {
                   const newContent = delta.content || '';
+                  if (!sawOverloadSignal && isOverloadMessage(newContent)) {
+                    sawOverloadSignal = true;
+                  }
                   const result = getIncrementalDelta(lastFullContent, newContent, contentLength, contentSuffix);
                   vStr = result.delta;
                   if (vStr) {
@@ -493,6 +502,28 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         console.warn('[Chat] Tool call attempted but unparseable. Regenerating with corrective directive...');
         toolCallRetried = true;
         const retried = await ctx.onToolCallRetry();
+        if (retried) {
+          if (clientAborted()) {
+            retried.stream.cancel('client aborted stream').catch(() => {});
+            return;
+          }
+          ctx.uiSessionId = retried.uiSessionId;
+          resetStreamState();
+          activeStream = retried.stream;
+          await readUpstream(retried.stream);
+          if (toolParser?.isInsideTool()) sawToolCallSignal = true;
+        }
+      }
+
+      if (
+        ctx.onOverloadRetry &&
+        !overloadRetried &&
+        (sawOverloadSignal || isOverloadMessage(lastFullContent)) &&
+        guardActive
+      ) {
+        if (clientAborted()) return;
+        overloadRetried = true;
+        const retried = await ctx.onOverloadRetry();
         if (retried) {
           if (clientAborted()) {
             retried.stream.cancel('client aborted stream').catch(() => {});
@@ -670,6 +701,7 @@ export interface NonStreamingResult {
   toolCalls: any[];
   degenerate: boolean;
   updateMember: boolean;
+  overload: boolean;
   targetResponseId?: string | null;
   isTruncated?: boolean;
 }
@@ -749,6 +781,7 @@ export async function collectNonStreamingResult(
       toolCalls: [],
       degenerate: false,
       updateMember: false,
+      overload: false,
     };
   }
 
@@ -804,6 +837,7 @@ export async function collectNonStreamingResult(
     toolCalls: toolCallsOut,
     degenerate: toolCallsOut.length === 0 && isDegenerateAnswer(finalContent),
     updateMember: parserState.updateMemberDetected,
+    overload: parserState.overloadDetected,
     targetResponseId: parserState.targetResponseId,
     isTruncated,
   };

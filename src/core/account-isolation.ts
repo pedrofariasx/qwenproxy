@@ -41,7 +41,8 @@ export type BlockType =
   | 'flagged'
   | 'cookie-invalid'
   | 'server-error'
-  | 'membership-limit';
+  | 'membership-limit'
+  | 'overload';
 
 // Hard blocks indicate the account's device identity / session is compromised:
 // quarantining alone is not enough — we must also rotate the fingerprint and
@@ -108,6 +109,7 @@ function blockReason(type: BlockType): string {
     case 'captcha': return 'CaptchaBlocked';
     case 'flagged': return 'Flagged';
     case 'cookie-invalid': return 'CookieInvalid';
+    case 'overload': return 'Overload';
     default: return 'ServerError';
   }
 }

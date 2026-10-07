@@ -9,6 +9,7 @@
  */
 
 import { updateSessionParent } from '../services/qwen.js';
+import { isOverloadMessage } from './overload-detector.js';
 import { getIncrementalDelta } from '../routes/chat.js';
 import { StreamingToolParser } from '../tools/parser.js';
 import type { FunctionToolDefinition } from '../tools/types.js';
@@ -55,6 +56,7 @@ export interface StreamParserState {
   promptTokens: number;
   completionTokens: number;
   updateMemberDetected: boolean;
+  overloadDetected: boolean;
   finishReason: string | null;
 }
 
@@ -114,6 +116,7 @@ export class QwenStreamParser {
       promptTokens: 0,
       completionTokens: 0,
       updateMemberDetected: false,
+      overloadDetected: false,
       finishReason: null,
     };
 
@@ -240,6 +243,7 @@ export class QwenStreamParser {
       promptTokens: this._state.promptTokens,
       completionTokens: this._state.completionTokens,
       updateMemberDetected: false,
+      overloadDetected: false,
       finishReason: null,
     };
     this._contentLength = 0;
@@ -290,6 +294,10 @@ export class QwenStreamParser {
 
     if (delta.extra?.update_member) {
       this._state.updateMemberDetected = true;
+    }
+
+    if (delta.phase === 'answer' && delta.content && isOverloadMessage(delta.content)) {
+      this._state.overloadDetected = true;
     }
 
     if (delta.phase === 'thinking_summary') {

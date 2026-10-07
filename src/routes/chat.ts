@@ -5,6 +5,7 @@ import { recordAccountBlock, requiresCrossAccountBootstrap, noteAccountRecovery 
 import type { OpenAIRequest } from '../utils/types.js';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.js';
+import { OVERLOAD_COOLDOWN_MS } from '../utils/overload-detector.js';
 import { getNextAccount, getNextAvailableAccount, getAccountById, onAccountFreed, getAccountCooldownInfo, markAccountInUse, releaseAccountInUse, getInUseAccounts } from '../core/account-manager.js';
 import { loadAccounts } from '../core/accounts.js';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
@@ -691,6 +692,13 @@ export async function chatCompletions(c: Context) {
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
+      if (completed.status === 200 && completed.overload) {
+        console.warn('[Chat] Qwen overload detected in non-streaming mode. Retrying with another account...');
+        recordAccountBlock(acquired.accountId, 'server-error', 'Qwen overload/high-demand response');
+        const retried = await obtainStream(finalPrompt, true);
+        completed = await collectResponse(retried.stream, retried.uiSessionId);
+      }
+
       let autoContinuesLeft = config.autoContinue.enabled ? config.autoContinue.maxContinues : 0;
       while (
         autoContinuesLeft > 0 &&
@@ -767,6 +775,12 @@ export async function chatCompletions(c: Context) {
         trackUsage(user ? user.id : 'anonymous', inputText, false, completionTokens, promptTokens);
       },
       onComplete: releaseUserSlotOnce,
+      onOverloadRetry: async () => {
+        console.warn('[Chat] Qwen overload detected. Retrying with another account...');
+        recordAccountBlock(acquired.accountId, 'overload', undefined, { cooldownMs: OVERLOAD_COOLDOWN_MS });
+        const retried = await obtainStream(finalPrompt, true);
+        return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+      },
       onUpdateMemberRetry: async () => {
         console.warn('[Chat] Account membership limit hit. Retrying with another account...');
         recordAccountBlock(acquired.accountId, 'membership-limit', undefined, { cooldownMs: msUntilMidnight() });
