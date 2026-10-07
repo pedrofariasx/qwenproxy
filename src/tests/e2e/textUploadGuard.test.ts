@@ -7,8 +7,8 @@ process.env.LARGE_PROMPT_THRESHOLD = '1000';
 
 delete process.env.API_KEY;
 
-const { app } = await import('../api/server.js');
-const { isDegenerateAnswer, buildAnswerDirective } = await import('../utils/degenerate-answer.js');
+const { app } = await import('../../api/server.js');
+const { isDegenerateAnswer, buildAnswerDirective } = await import('../../utils/degenerate-answer.js');
 
 function setupFetchMock(handler: (url: string, init?: RequestInit, callIndex?: number) => Response | Promise<Response>) {
   const originalFetch = globalThis.fetch;
@@ -160,7 +160,7 @@ test('degenerate guard: non-streaming "Yes" is retried once with corrective dire
 test('streaming guard: degenerate "Yes" is regenerated before reaching the client', async () => {
   const capturedPayloads: any[] = [];
 
-  const { setSession } = await import('../services/session-manager.js');
+  const { setSession } = await import('../../services/session-manager.js');
   setSession('stream-guard-chat', {
     chatId: 'stream-guard-chat',
     accountId: 'stream-guard-account',
@@ -304,7 +304,7 @@ test('processImagesForQwen: text documents are inlined, not attached as files', 
   };
 
   try {
-    const { processImagesForQwen } = await import('../routes/upload.js');
+    const { processImagesForQwen } = await import('../../routes/upload.js');
     const result = await processImagesForQwen(
       [{ type: 'file_url', file_url: { url: 'http://example.com/note.txt' } }],
       { cookie: 'c', 'user-agent': 'UA', 'bx-ua': 'x', 'bx-umidtoken': 'y', 'bx-v': '2.5.37' },

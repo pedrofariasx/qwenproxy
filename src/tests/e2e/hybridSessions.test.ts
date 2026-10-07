@@ -7,8 +7,8 @@ process.env.HYBRID_SESSION_VERIFY = 'false';
 
 delete process.env.API_KEY;
 
-const { app } = await import('../api/server.js');
-const { resetAllSessions } = await import('../services/session-manager.js');
+const { app } = await import('../../api/server.js');
+const { resetAllSessions } = await import('../../services/session-manager.js');
 
 function setupFetchMock(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
   const originalFetch = globalThis.fetch;

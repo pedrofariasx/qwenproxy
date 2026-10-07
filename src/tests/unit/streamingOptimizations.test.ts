@@ -10,7 +10,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { getIncrementalDelta } from '../routes/chat.js';
+import { getIncrementalDelta } from '../../routes/chat.js';
 
 describe('Streaming Optimizations Tests', () => {
   describe('getIncrementalDelta', () => {

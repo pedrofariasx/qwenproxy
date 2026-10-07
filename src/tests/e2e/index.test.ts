@@ -5,8 +5,8 @@ process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 // Ensure API_KEY is empty by default for existing tests
 process.env.API_KEY = '';
 
-import { app } from '../api/server.js';
-import { initPlaywright, closePlaywright } from '../services/playwright.ts';
+import { app } from '../../api/server.js';
+import { initPlaywright, closePlaywright } from '../../services/playwright.ts';
 
 test('Health check endpoint returns 200', async () => {
   const req = new Request('http://localhost/health');
@@ -332,7 +332,7 @@ test('Models endpoint caching: subsequent requests return cached models without 
   };
 
   try {
-    const { cache } = await import('../cache/memory-cache.js');
+    const { cache } = await import('../../cache/memory-cache.js');
     await cache.flush();
 
     // First request

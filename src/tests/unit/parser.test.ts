@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { StreamingToolParser } from '../tools/parser.js';
+import { StreamingToolParser } from '../../tools/parser.js';
 
 const TC_OPEN = '<tool_' + 'call>';
 const TC_CLOSE = '</tool_' + 'call>';

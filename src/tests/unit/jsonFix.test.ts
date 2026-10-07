@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { robustParseJSON } from '../utils/json.js';
+import { robustParseJSON } from '../../utils/json.js';
 
 test('robustParseJSON: valid JSON passes through directly', () => {
   const result = robustParseJSON('{"name": "test", "arguments": {"a": 1}}');

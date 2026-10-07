@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { recordToolCallEmission, lookupToolCall } from '../core/tool-call-registry.js';
+import { recordToolCallEmission, lookupToolCall } from '../../core/tool-call-registry.js';
 
 describe('tool-call-registry', () => {
   it('records and resolves a tool call by chat id', () => {

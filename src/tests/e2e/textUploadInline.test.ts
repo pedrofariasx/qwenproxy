@@ -8,7 +8,7 @@ process.env.LARGE_PROMPT_INLINE = 'true';
 
 delete process.env.API_KEY;
 
-const { app } = await import('../api/server.js');
+const { app } = await import('../../api/server.js');
 
 function setupFetchMock(handler: (url: string, init?: RequestInit, callIndex?: number) => Response | Promise<Response>) {
   const originalFetch = globalThis.fetch;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { isTruncatedResponse } from '../utils/truncation-detector.js';
+import { isTruncatedResponse } from '../../utils/truncation-detector.js';
 
 test('isTruncatedResponse: returns true when finishReason is length', () => {
   assert.strictEqual(isTruncatedResponse('This is a complete sentence.', 'length'), true);

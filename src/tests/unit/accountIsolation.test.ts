@@ -7,14 +7,14 @@ import {
   getIsolationStatus,
   setFingerprintRotationListener,
   clearAccountIsolation,
-} from '../core/account-isolation.js';
+} from '../../core/account-isolation.js';
 import {
   getFingerprintProfile,
   rotateFingerprintSeed,
   getFingerprintSaltValue,
-} from '../services/fingerprint.js';
-import { getAccountCooldownInfo } from '../core/account-manager.js';
-import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js';
+} from '../../services/fingerprint.js';
+import { getAccountCooldownInfo } from '../../core/account-manager.js';
+import { getBaseAccountId, makeAccountLaneId } from '../../core/account-lanes.js';
 
 test('fingerprint: rotating one account never changes another account fingerprint', () => {
   const a = 'iso-fp-a';

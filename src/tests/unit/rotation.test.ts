@@ -10,8 +10,8 @@ import {
   markAccountNotReady,
   markAccountInUse,
   releaseAccountInUse,
-} from '../core/account-manager.ts';
-import { addAccount, removeAccount, loadAccounts } from '../core/accounts.ts';
+} from '../../core/account-manager.ts';
+import { addAccount, removeAccount, loadAccounts } from '../../core/accounts.ts';
 
 test('Account Rotation: Round-Robin rotation cycle', async () => {
   const originalAccounts = loadAccounts();

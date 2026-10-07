@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { getIncrementalDelta } from '../routes/chat.js';
+import { getIncrementalDelta } from '../../routes/chat.js';
 
 test('getIncrementalDelta: handles strictly cumulative stream correctly', () => {
   let accumulated = '';

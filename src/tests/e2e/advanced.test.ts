@@ -5,7 +5,7 @@ process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 
 delete process.env.API_KEY;
 
-import { app } from '../api/server.js';
+import { app } from '../../api/server.js';
 
 function setupFetchMock(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
   const originalFetch = globalThis.fetch;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { canFastReleaseGuard } from '../utils/degenerate-answer.js';
+import { canFastReleaseGuard } from '../../utils/degenerate-answer.js';
 
 test('canFastReleaseGuard: releases immediately for code blocks', () => {
   assert.strictEqual(canFastReleaseGuard('```typescript\nfunction hello() {}'), true);

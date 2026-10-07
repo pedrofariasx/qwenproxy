@@ -8,9 +8,9 @@ import {
   onAccountFreed,
   releaseAccountInUse,
   clearAccountCooldown,
-} from '../core/account-manager.js';
-import { makeAccountLaneId, getBaseAccountId } from '../core/account-lanes.js';
-import { loadAccounts } from '../core/accounts.js';
+} from '../../core/account-manager.js';
+import { makeAccountLaneId, getBaseAccountId } from '../../core/account-lanes.js';
+import { loadAccounts } from '../../core/accounts.js';
 
 test('account scheduler: marks active load bucketed by base account (lanes share bucket)', () => {
   const base = 'sched-account-a';

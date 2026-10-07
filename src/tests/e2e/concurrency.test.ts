@@ -3,8 +3,8 @@ import assert from 'node:assert';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 
-import { app } from '../api/server.js';
-import { initPlaywright, closePlaywright } from '../services/playwright.js';
+import { app } from '../../api/server.js';
+import { initPlaywright, closePlaywright } from '../../services/playwright.js';
 
 test('Concurrent requests are serialized by mutex', async () => {
   const originalFetch = globalThis.fetch;

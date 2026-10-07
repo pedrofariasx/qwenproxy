@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { buildToolCallContract, selectCandidateTools } from '../routes/tool-handler.js';
-import type { FunctionToolDefinition } from '../tools/types.js';
+import { buildToolCallContract, selectCandidateTools } from '../../routes/tool-handler.js';
+import type { FunctionToolDefinition } from '../../tools/types.js';
 
 function tool(name: string, description: string, properties: Record<string, any> = {}): FunctionToolDefinition {
   return {

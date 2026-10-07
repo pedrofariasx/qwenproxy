@@ -5,7 +5,7 @@ import {
   getAccountLastActivity,
   hibernateAccountContext,
   hibernateIdleAccountContexts,
-} from '../services/browser-manager.js';
+} from '../../services/browser-manager.js';
 
 test('touchAccountActivity: updates and tracks timestamp for account', () => {
   const accountId = 'test-acct-activity';

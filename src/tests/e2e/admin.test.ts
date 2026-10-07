@@ -14,7 +14,7 @@ const TMP_ENV = path.join(os.tmpdir(), `qwenproxy-admin-test-${process.pid}.env`
 process.env.QWENPROXY_ENV_FILE = TMP_ENV;
 fs.writeFileSync(TMP_ENV, 'PORT=3000\n# comment\nHEADLESS=true\nWARM_POOL_SIZE=2\n');
 
-const { app } = await import('../api/server.js');
+const { app } = await import('../../api/server.js');
 
 function cookieFrom(res: Response): string {
   const set = res.headers.get('set-cookie') || '';
@@ -124,7 +124,7 @@ test('admin: user CRUD endpoints manage api keys', async () => {
 });
 
 test('env-settings: persistEnvPatch writes allowlisted keys to the env file', async () => {
-  const { persistEnvPatch, readEnvFile, SETTINGS_ALLOWLIST } = await import('../core/env-settings.js');
+  const { persistEnvPatch, readEnvFile, SETTINGS_ALLOWLIST } = await import('../../core/env-settings.js');
 
   const applied = persistEnvPatch({ PORT: '3100', HEADLESS: 'false', API_KEY: 'should-not-write' });
   assert.ok(applied.includes('PORT'));

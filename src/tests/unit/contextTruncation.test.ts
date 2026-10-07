@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { estimateTokenCount, truncateMessages } from '../utils/context-truncation.js';
+import { estimateTokenCount, truncateMessages } from '../../utils/context-truncation.js';
 
 test('estimateTokenCount: returns 0 for empty string', () => {
   assert.strictEqual(estimateTokenCount(''), 0);

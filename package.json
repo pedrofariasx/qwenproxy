@@ -15,7 +15,9 @@
     "login:edge": "npx tsx src/login.ts --browser=edge",
     "build": "tsc -p tsconfig.build.json",
     "build:admin": "npm --prefix web run build",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "tsx --test src/tests/unit/*.test.ts",
+    "test:e2e": "tsx --test src/tests/e2e/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix"

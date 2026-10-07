@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import type { Page, Locator, FrameLocator } from 'playwright';
-import { solveBaxiaCaptcha, startCaptchaWatcher } from '../services/captcha-solver.js';
+import { solveBaxiaCaptcha, startCaptchaWatcher } from '../../services/captcha-solver.js';
 
 test('solveBaxiaCaptcha: returns false immediately if iframe is not visible', async () => {
   const mockLocator = {

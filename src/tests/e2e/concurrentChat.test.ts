@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert';
 import net from 'node:net';
 import { serve } from '@hono/node-server';
-import { app } from '../api/server.js';
-import { initPlaywright, closePlaywright } from '../services/playwright.js';
+import { app } from '../../api/server.js';
+import { initPlaywright, closePlaywright } from '../../services/playwright.js';
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
