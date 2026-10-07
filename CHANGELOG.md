@@ -1,3 +1,10 @@
+## [1.33.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.33.0...v1.33.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* handle age confirmation modal during account init and header capture ([e2e40e1](https://github.com/pedrofariasx/qwenproxy/commit/e2e40e1154c2970497c891088fbf835846242b78))
+
 # [1.33.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.32.2...v1.33.0) (2026-09-25)
 
 
