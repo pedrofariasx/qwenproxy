@@ -582,6 +582,20 @@ export async function closePlaywright() {
   }
 }
 
+export async function dismissAgeModal(page: Page): Promise<void> {
+  try {
+    const modal = page.locator('.age-confirmation-modal');
+    if (await modal.count() > 0 && await modal.first().isVisible({ timeout: 1500 }).catch(() => false)) {
+      const continueBtn = page.locator('.age-confirmation-modal .qwen-chat-v2-btn-black:has-text("Continuar")');
+      if (await continueBtn.count() > 0) {
+        await continueBtn.first().click();
+        await page.waitForTimeout(500);
+        console.log('[Playwright] Age confirmation modal dismissed.');
+      }
+    }
+  } catch { /* ignore */ }
+}
+
 export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = 'chromium') {
   const sharedBrowser = await getOrLaunchBrowser(browserType);
   const baseAccountId = getBaseAccountId(account.id);
@@ -610,12 +624,14 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
 
   try {
     await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    await dismissAgeModal(acctPage);
     const url = acctPage.url();
     if (url.includes('auth') || url.includes('login')) {
       if (account.email && account.password) {
         console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
         await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
         await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+        await dismissAgeModal(acctPage);
       } else {
         console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
       }

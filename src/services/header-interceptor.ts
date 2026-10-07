@@ -27,6 +27,7 @@ import {
   resetBrowserProfile,
   initPlaywright,
   initPlaywrightForAccount,
+  dismissAgeModal,
 } from './browser-manager.js';
 import { getStealthScript } from './stealth.js';
 import { startCaptchaWatcher } from './captcha-solver.js';
@@ -366,6 +367,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
   if (!isOnQwen || isOnSpecificChat) {
     console.log(`[Playwright] Navigating to stable Qwen new-chat page for ${cacheKey}... (Current: ${currentUrl})`);
     await page.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded' });
+    await dismissAgeModal(page);
   }
 
   const isLoginPage = page.url().includes('login') || (await page.$('input[type="email"], input[placeholder*="Email"]'));
@@ -491,6 +493,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
         console.log(`[Playwright] Triggering request for ${cacheKey}...`);
         const inputSelector = 'textarea.message-input-textarea, textarea:visible, [contenteditable="true"]:visible';
         try {
+          await dismissAgeModal(page);
           await page.waitForSelector(inputSelector, { timeout: config.timeouts.page });
           await humanType(page, inputSelector, 'Hello');
           console.log(`[Playwright] Typed human text for ${cacheKey}, waiting for UI to update...`);
