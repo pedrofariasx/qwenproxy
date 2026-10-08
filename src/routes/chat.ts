@@ -392,6 +392,7 @@ export async function chatCompletions(c: Context) {
 
     let canEconomize = !!(
       session?.historyComplete &&
+      session.instructionsHash === instructionsHash &&
       session.accountId !== 'guest' &&
       pendingMultimodal.length === 0 &&
       (
@@ -423,7 +424,6 @@ export async function chatCompletions(c: Context) {
     if (canEconomize) {
       const recentToolContext = buildRecentToolContext(messages);
       const parts: string[] = [];
-      if (systemPrompt && session?.instructionsHash !== instructionsHash) parts.push(systemPrompt);
       if (hasTools && toolChoiceMode === 'none') parts.push('[TOOL USE DISABLED]\nDo not call tools in this response.');
       if (recentToolContext) parts.push(recentToolContext);
       if (lastMsg?.role === 'user') {

@@ -9,8 +9,7 @@ const manifestCache = new Map<string, string>();
 const CACHE_MAX_ENTRIES = 64;
 
 function toolCacheKey(tools: FunctionToolDefinition[], forcedToolName: string, extra?: string): string {
-  const names = tools.map(t => getToolName(t)).join('|');
-  return `${names}##${forcedToolName}##${extra ?? ''}`;
+  return crypto.createHash('sha256').update(JSON.stringify({ tools, forcedToolName, extra })).digest('hex');
 }
 
 export function getToolFunction(tool: FunctionToolDefinition | any): any {

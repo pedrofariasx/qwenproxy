@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { buildToolCallContract, selectCandidateTools } from '../../routes/tool-handler.js';
+import { buildCompactToolManifest, buildToolCallContract, selectCandidateTools } from '../../routes/tool-handler.js';
 import type { FunctionToolDefinition } from '../../tools/types.js';
 
 function tool(name: string, description: string, properties: Record<string, any> = {}): FunctionToolDefinition {
@@ -115,4 +115,35 @@ test('buildToolCallContract avoids assuming generic tool names', () => {
   assert.match(contract, /Tool names vary by editor\/integration/);
   assert.match(contract, /zed\.workspace\.apply_edits/);
   assert.doesNotMatch(contract, /should be used when modifying workspace files: edit_file/);
+});
+
+test('tool manifest cache reflects changed descriptions and parameter schemas for the same name', () => {
+  const original: any[] = [{ type: 'function', function: {
+    name: 'manifest_cache_fixture', description: 'ORIGINAL_MANIFEST_DESCRIPTION',
+    parameters: { type: 'object', properties: { filename: { type: 'string' } }, required: ['filename'] },
+  } }];
+  const updated: any[] = [{ type: 'function', function: {
+    name: 'manifest_cache_fixture', description: 'UPDATED_MANIFEST_DESCRIPTION',
+    parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'] },
+  } }];
+  const first = buildCompactToolManifest(original);
+  assert.match(first, /filename: string/);
+  assert.match(first, /ORIGINAL_MANIFEST_DESCRIPTION/);
+  const second = buildCompactToolManifest(updated);
+  assert.match(second, /file_path: string/);
+  assert.match(second, /UPDATED_MANIFEST_DESCRIPTION/);
+  assert.doesNotMatch(second, /filename|ORIGINAL_MANIFEST_DESCRIPTION/);
+});
+
+test('tool contract cache reflects changed capabilities for the same name', () => {
+  const original: any[] = [{ type: 'function', function: {
+    name: 'contract_cache_fixture', description: 'Read file diagnostics',
+    parameters: { type: 'object', properties: { path: { type: 'string' } } },
+  } }];
+  const updated: any[] = [{ type: 'function', function: {
+    name: 'contract_cache_fixture', description: 'Write content to a file',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } },
+  } }];
+  assert.doesNotMatch(buildToolCallContract(original), /Workspace file mutation capabilities/);
+  assert.match(buildToolCallContract(updated), /Workspace file mutation capabilities detected in these exact tools: contract_cache_fixture/);
 });

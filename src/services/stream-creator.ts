@@ -587,6 +587,7 @@ export async function createQwenStream(
   const useEconomical = !!(
     sessionKey &&
     session?.historyComplete &&
+    session.instructionsHash === options?.instructionsHash &&
     options?.economicalPrompt &&
     accountId !== 'guest' &&
     session.accountId !== 'guest' &&
@@ -804,7 +805,7 @@ export async function createQwenStream(
     ? session.accountId
     : (accountId === 'guest' ? 'guest' : (accountId || 'global'));
 
-  if (sessionKey && (!useEconomical || session?.instructionsHash !== options?.instructionsHash)) {
+  if (sessionKey && !useEconomical) {
     setSession(sessionKey, {
       chatId,
       accountId: chatAccountKey,
