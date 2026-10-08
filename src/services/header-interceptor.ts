@@ -147,8 +147,17 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
       }, config.timeouts.headers);
 
       const routeHandler = async (route: any, request: any) => {
+        let reqHeaders: Record<string, string>;
+        try {
+          reqHeaders = await request.allHeaders();
+        } catch (error) {
+          clearTimeout(timeout);
+          await route.continue().catch(() => {});
+          await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+          reject(error);
+          return;
+        }
         clearTimeout(timeout);
-        const reqHeaders = await request.allHeaders();
         console.log('[Playwright] Guest intercepted request:', request.url());
 
         const extractedHeaders = {
@@ -439,7 +448,16 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
       console.log(`[Playwright] Setting up route interception for ${cacheKey}...`);
       const routeHandler = async (route: any, request: any) => {
-        const reqHeaders = await request.allHeaders();
+        let reqHeaders: Record<string, string>;
+        try {
+          reqHeaders = await request.allHeaders();
+        } catch (error) {
+          clearTimeout(timeout);
+          await route.continue().catch(() => {});
+          await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+          reject(error);
+          return;
+        }
         let uiSessionId = '';
         let uiParentMessageId: string | null = null;
 
