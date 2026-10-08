@@ -65,6 +65,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     let heartbeatInterval: any;
     let completionTokens = 0;
     let promptTokens = 0;
+    let cachedTokens: number;
     // Micro-buffer: coalesce many tiny SSE writes into fewer socket writes to cut
     // syscall overhead on long responses. Ordering is preserved because EVERY write
     // (content, reasoning, events, [DONE]) goes through this single buffer.
@@ -262,6 +263,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let upstreamFinishReason: string | null = null;
       completionTokens = 0;
       promptTokens = estimatedPromptTokens;
+      cachedTokens = 0;
 
       const resetStreamState = () => {
         _reasoningBuffer = '';
@@ -279,6 +281,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         upstreamFinishReason = null;
         completionTokens = 0;
         promptTokens = estimatedPromptTokens;
+        cachedTokens = 0;
         firstPayloadFlushed = false;
         sawUpdateMemberSignal = false;
         updateMemberRetried = false;
@@ -349,17 +352,19 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
               if (!targetResponseId) {
                 targetResponseId = chunk['response.created'].response_id;
                 targetResponseIdSet = true;
+                updateSessionParent(ctx.uiSessionId, targetResponseId);
               }
-              updateSessionParent(ctx.uiSessionId, chunk['response.created'].response_id);
             } else if (chunk.response_id && !targetResponseIdSet) {
               targetResponseId = chunk.response_id;
               targetResponseIdSet = true;
               updateSessionParent(ctx.uiSessionId, chunk.response_id);
             }
 
-            if (chunk.usage) {
-              if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
-              if (chunk.usage.input_tokens) promptTokens = chunk.usage.input_tokens;
+            if (chunk.usage && (!chunk.response_id || !targetResponseId || chunk.response_id === targetResponseId)) {
+              if (chunk.usage.output_tokens !== undefined) completionTokens = chunk.usage.output_tokens;
+              if (chunk.usage.input_tokens !== undefined) promptTokens = chunk.usage.input_tokens;
+              const cached = chunk.usage.prompt_tokens_details?.cached_tokens ?? chunk.usage.input_tokens_details?.cached_tokens;
+              if (cached !== undefined) cachedTokens = cached;
             }
 
             let vStr = '';
@@ -653,7 +658,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
         total_tokens: promptTokens + completionTokens,
-        prompt_tokens_details: { cached_tokens: 0 }
+        prompt_tokens_details: { cached_tokens: cachedTokens }
       };
 
       const finalFinishReason = toolParser && toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : (upstreamFinishReason || 'stop');
@@ -803,7 +808,7 @@ export async function collectNonStreamingResult(
     prompt_tokens: parserState.promptTokens,
     completion_tokens: parserState.completionTokens,
     total_tokens: parserState.promptTokens + parserState.completionTokens,
-    prompt_tokens_details: { cached_tokens: 0 }
+    prompt_tokens_details: { cached_tokens: parserState.cachedTokens }
   };
   const message: any = { role: 'assistant', content: toolCallsOut.length ? (finalContent || '') : finalContent };
   if (parserState.reasoningBuffer) message.reasoning_content = parserState.reasoningBuffer;
