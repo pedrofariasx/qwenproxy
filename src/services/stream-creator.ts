@@ -161,10 +161,21 @@ async function tryDirectCompletionFetch(
   }
 }
 
-async function openIsolatedQwenPage(basePage: Page, targetUrl = 'https://chat.qwen.ai/'): Promise<Page> {
+async function openIsolatedQwenPage(basePage: Page, targetUrl = 'https://chat.qwen.ai/', signal?: AbortSignal): Promise<Page> {
   const page = await basePage.context().newPage();
-  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
-  return page;
+  let closing: Promise<void> | undefined;
+  const close = () => closing ??= page.close().catch(() => {});
+  const onAbort = () => { void close(); };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    signal?.throwIfAborted();
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    signal?.throwIfAborted();
+    return page;
+  } catch (error) {
+    await close();
+    throw error;
+  } finally { signal?.removeEventListener('abort', onAbort); }
 }
 
 async function waitForTmdCaptcha(page: Page, timeoutMs: number): Promise<boolean> {
@@ -434,6 +445,7 @@ export interface QwenChatHistoryMessage {
   id: string;
   role: 'user' | 'assistant';
   content?: string;
+  error?: unknown;
   parentId?: string | null;
   childrenIds?: string[];
   timestamp?: number;
@@ -464,6 +476,7 @@ function parseChatHistoryResponse(chatId: string, body: string): QwenChatHistory
       id: m.id,
       role: m.role,
       content: typeof m.content === 'string' ? m.content : undefined,
+      error: m.error,
       parentId: m.parentId ?? null,
       childrenIds: Array.isArray(m.childrenIds) ? m.childrenIds : [],
       timestamp: typeof m.timestamp === 'number' ? m.timestamp : undefined,
@@ -490,11 +503,18 @@ export async function fetchQwenChatHistory(
   headers: Record<string, string>,
   accountId?: string,
   limit = 10,
+  signal?: AbortSignal,
 ): Promise<QwenChatHistoryResult> {
+  if (signal?.aborted) return { chatId, messages: [], lastAssistantId: null, hasHistory: false };
   const url = `https://chat.qwen.ai/api/v2/chats/${chatId}?direction=up&limit=${limit}`;
 
   const useDirect = getRuntimeBool('QWEN_DIRECT_FETCH', config.directFetch.enabled);
   if (useDirect && accountId && accountId !== 'guest' && accountId !== 'global') {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    const timeout = setTimeout(() => controller.abort(), config.timeouts.http);
     try {
       const response = await fetch(url, {
         method: 'GET',
@@ -509,21 +529,30 @@ export async function fetchQwenChatHistory(
           'timezone': CACHED_TIMEZONE,
           ...getClientHintsHeaders(accountId),
         },
-        signal: AbortSignal.timeout(config.timeouts.http),
+        signal: controller.signal,
       });
       if (response.ok) {
         return parseChatHistoryResponse(chatId, await response.text());
       }
     } catch (err: any) {
-      console.warn(`[Qwen] Direct HTTP fetch failed for chat history ${chatId}, falling back to browser: ${err.message}`);
+      if (!signal?.aborted) console.warn(`[Qwen] Direct HTTP fetch failed for chat history ${chatId}, falling back to browser: ${err.message}`);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
     }
   }
 
   const page = getPageForAccount(accountId);
+  if (signal?.aborted) return { chatId, messages: [], lastAssistantId: null, hasHistory: false };
   if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
     let isolatedPage: Page | null = null;
+    let closing: Promise<void> | undefined;
+    const close = () => isolatedPage ? closing ??= isolatedPage.close().catch(() => {}) : Promise.resolve();
+    const onAbort = () => { void close(); };
     try {
-      isolatedPage = await openIsolatedQwenPage(page);
+      isolatedPage = await openIsolatedQwenPage(page, undefined, signal);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) return { chatId, messages: [], lastAssistantId: null, hasHistory: false };
       const result = await isolatedPage.evaluate(async ({ url, timeoutMs }) => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -548,9 +577,10 @@ export async function fetchQwenChatHistory(
         return parseChatHistoryResponse(chatId, result.body);
       }
     } catch (err: any) {
-      console.warn(`[Qwen] Browser fetch failed for chat history ${chatId}:`, err.message);
+      if (!signal?.aborted) console.warn(`[Qwen] Browser fetch failed for chat history ${chatId}:`, err.message);
     } finally {
-      await isolatedPage?.close().catch(() => {});
+      signal?.removeEventListener('abort', onAbort);
+      await close();
     }
   }
 
@@ -1103,13 +1133,17 @@ export async function createQwenStream(
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
-      body: payloadJson,
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
+        body: payloadJson,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const responseContentType = response.headers.get('content-type') || '';
     if (process.env.TEST_MOCK_PLAYWRIGHT && response.ok && response.body) {

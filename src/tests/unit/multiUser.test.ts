@@ -43,7 +43,7 @@ function sseAnswer(content: string, responseId = 'rcon-x'): Response {
       if (done) { c.close(); return; }
       done = true;
       c.enqueue(enc.encode(`data: {"response.created":{"response_id":"${responseId}"}}\n\n`));
-      c.enqueue(enc.encode(`data: {"choices":[{"delta":{"content":${JSON.stringify(content)},"phase":"answer"}}],"usage":{"output_tokens":${content.length}}}\n\n`));
+      c.enqueue(enc.encode(`data: {"response_id":"${responseId}","choices":[{"delta":{"content":${JSON.stringify(content)},"phase":"answer"}}],"usage":{"output_tokens":${content.length}}}\n\n`));
       c.enqueue(enc.encode('data: [DONE]\n\n'));
     }
   }), { status: 200 });

@@ -89,7 +89,7 @@ export function getIncrementalDelta(oldStr: string, newStr: string, prevLength: 
 
 export function parseQwenErrorPayload(raw: string): { message: string; status: number } | null {
   const text = raw.trim();
-  if (!text || text.startsWith('data: ')) return null;
+  if (!text || text.startsWith('data:')) return null;
 
   try {
     const payload = JSON.parse(text);

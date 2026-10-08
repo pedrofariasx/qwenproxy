@@ -2,18 +2,39 @@ import type { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { StreamingToolParser } from '../tools/parser.js';
 import { QwenStreamParser } from '../utils/qwen-stream-parser.js';
-import { getIncrementalDelta, parseQwenErrorPayload } from './sse-parser.js';
+import { getIncrementalDelta } from './sse-parser.js';
 import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-handler.js';
 import { textContainsToolCallStart } from '../tools/toolcall-tags.js';
 import { isDegenerateAnswer, canFastReleaseGuard } from '../utils/degenerate-answer.js';
 import { isOverloadMessage } from '../utils/overload-detector.js';
-import { removeStream } from '../core/stream-registry.js';
+import { isDailyQuotaAssistantMessage, couldBeDailyQuotaAssistantMessagePrefix } from '../utils/qwen-quota-message.js';
+import { parseQwenProviderError, parseQwenProviderBody, emptyQwenResponseError, qwenErrorBody } from '../utils/qwen-provider-error.js';
+import type { QwenProviderError } from '../utils/qwen-provider-error.js';
+import { removeStream, getStream } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
 import { recordToolCallEmission } from '../core/tool-call-registry.js';
-import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
+import { updateSessionParent, markHistoryComplete, markHistoryIncomplete, fetchQwenChatHistory } from '../services/qwen.js';
 import { countTokens } from '../core/tokenizer.js';
 import { isTruncatedResponse } from '../utils/truncation-detector.js';
 import { config } from '../core/config.js';
+
+async function resolveResponseError(error: QwenProviderError | undefined, content: string, toolCount: number, completionId: string, chatId: string, parentId?: string | null, signal?: AbortSignal): Promise<QwenProviderError | null> {
+  if (error) return error;
+  if (content || toolCount > 0) return null;
+  markHistoryIncomplete(chatId);
+  const entry = getStream(completionId);
+  if (entry && parentId && !signal?.aborted) {
+    try {
+      const history = await fetchQwenChatHistory(chatId, entry.headers, entry.accountId, 10, signal);
+      const message = history.messages.find(item => item.role === 'assistant' && item.id === parentId);
+      const fromHistory = parseQwenProviderError({ error: message?.error });
+      if (fromHistory) return fromHistory;
+    } catch (error) {
+      console.warn('[Chat] Empty response history lookup failed:', error instanceof Error ? error.name : 'UnknownError');
+    }
+  }
+  return emptyQwenResponseError();
+}
 
 export interface StreamHandlerContext {
   stream: ReadableStream;
@@ -26,7 +47,7 @@ export interface StreamHandlerContext {
   streamOptions?: { include_usage?: boolean };
   /** Called exactly once when the response stream has fully finished. */
   onComplete?: () => void;
-  onUsage?: (promptTokens: number, completionTokens: number) => void;
+  onUsage?: (promptTokens: number, completionTokens: number, failed?: boolean) => void;
   /**
    * Enables the streaming degenerate-answer guard: all emitted chunks are held
    * back until either the buffer grows past a threshold or the upstream ends.
@@ -43,6 +64,8 @@ export interface StreamHandlerContext {
   onToolCallRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   onUpdateMemberRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   onOverloadRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
+  onDailyQuota?: (accountId: string, retryAllowed?: boolean) => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
+  onProviderRetry?: () => Promise<{ stream: ReadableStream; uiSessionId: string } | null>;
   /**
    * Called when a response was cut off / truncated (e.g. unclosed code fence or token limit)
    * to automatically continue generation on the same chat without requiring the user to send "continue".
@@ -80,6 +103,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     const GUARD_HOLD_BYTES = 800;
     let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry || !!ctx.onOverloadRetry;
     let heldOutput = '';
+    let quotaProbeActive = true;
+    let quotaHeldOutput = '';
+    let meaningfulOutput = false;
+    let succeeded = false;
 
     let activeStream: ReadableStream | null = ctx.stream;
     let activeReader: ReadableStreamDefaultReader<any> | null = null;
@@ -139,6 +166,15 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         flushWrites();
       } else if (!writeTimer) {
         writeTimer = setTimeout(flushWrites, WRITE_FLUSH_MS);
+      }
+    };
+
+    const releaseQuotaProbe = () => {
+      if (!quotaProbeActive) return;
+      quotaProbeActive = false;
+      if (quotaHeldOutput) {
+        bufferedWrite(quotaHeldOutput);
+        quotaHeldOutput = '';
       }
     };
 
@@ -225,11 +261,21 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         // OpenAI clients treat assistant content AFTER tool_calls as an error
         // (and the model should stop after </tool_call> anyway).
         if (emittedStreamingToolIds.size > 0) return;
-        bufferedWrite(contentPrefix + escapeJsonString(content) + chunkSuffix);
+        const payload = contentPrefix + escapeJsonString(content) + chunkSuffix;
+        if (quotaProbeActive) {
+          if (couldBeDailyQuotaAssistantMessagePrefix(lastFullContent)) {
+            quotaHeldOutput += payload;
+            return;
+          }
+          releaseQuotaProbe();
+        }
+        if (content) meaningfulOutput = true;
+        bufferedWrite(payload);
         if (!firstPayloadFlushed) { firstPayloadFlushed = true; flushWrites(); }
       };
 
       const fastWriteReasoning = (content: string) => {
+        if (content) meaningfulOutput = true;
         bufferedWrite(reasoningPrefix + escapeJsonString(content) + chunkSuffix);
         if (!firstPayloadFlushed) { firstPayloadFlushed = true; flushWrites(); }
       };
@@ -260,6 +306,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let bufferLen = 0;
       let lineStart = 0;
       let upstreamFinishReason: string | null = null;
+      let providerError: QwenProviderError | undefined;
+      let nonSseBody = '';
       completionTokens = 0;
       promptTokens = estimatedPromptTokens;
 
@@ -277,6 +325,9 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         bufferLen = 0;
         lineStart = 0;
         upstreamFinishReason = null;
+        providerError = undefined;
+        nonSseBody = '';
+        meaningfulOutput = false;
         completionTokens = 0;
         promptTokens = estimatedPromptTokens;
         firstPayloadFlushed = false;
@@ -285,6 +336,8 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         sawOverloadSignal = false;
         overloadRetried = false;
         heldOutput = '';
+        quotaHeldOutput = '';
+        quotaProbeActive = true;
         guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry || !!ctx.onOverloadRetry;
       };
 
@@ -312,13 +365,17 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
                 bufferLen = 0;
               }
               lineStart = 0;
+              if (providerError) { void reader.cancel('upstream error').catch(() => {}); break; }
             }
           }
 
           if (bufferLen > 0) {
             const finalBuffer = bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('');
-            processLines(finalBuffer);
+            processLines(finalBuffer + '\n');
           }
+          providerError ??= parseQwenProviderBody(nonSseBody) ?? undefined;
+        } catch {
+          if (!clientAborted()) providerError = { code: 'UpstreamReadFailed', message: 'Failed to read the Qwen response.', status: 502, retryable: true, dailyQuota: false };
         } finally {
           activeReader = null;
           try { reader.releaseLock(); } catch { /* ignore */ }
@@ -336,12 +393,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           const line = fullBuffer.substring(pos, newlineIdx);
           pos = newlineIdx + 1;
           const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data: ')) continue;
-          const dataStr = trimmed.slice(6);
-          if (dataStr === '[DONE]') {
-            bufferedWrite('data: [DONE]\n');
-            continue;
-          }
+          if (!trimmed || trimmed.startsWith(':') || /^(event|id|retry):/.test(trimmed)) continue;
+          if (!trimmed.startsWith('data:')) { nonSseBody = (nonSseBody + line + '\n').slice(0, 8192); continue; }
+          const dataStr = trimmed.slice(5).trimStart();
+          if (dataStr === '[DONE]') continue;
 
           try {
             const chunk = JSON.parse(dataStr);
@@ -356,6 +411,11 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
               targetResponseIdSet = true;
               updateSessionParent(ctx.uiSessionId, chunk.response_id);
             }
+
+            if (!chunk.response_id || !targetResponseId || chunk.response_id === targetResponseId) {
+              providerError ??= parseQwenProviderError(chunk) ?? undefined;
+            }
+            if (providerError) continue;
 
             if (chunk.usage) {
               if (chunk.usage.output_tokens) completionTokens = chunk.usage.output_tokens;
@@ -457,7 +517,68 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         lineStart = pos;
       };
 
+      const finishProviderError = (error: QwenProviderError, hideNotice = false) => {
+        if (hideNotice) {
+          heldOutput = '';
+          writeBuffer = '';
+          quotaHeldOutput = '';
+          quotaProbeActive = false;
+        } else releaseQuotaProbe();
+        releaseGuard();
+        flushWrites();
+        writeEvent(qwenErrorBody(error));
+        bufferedWrite('data: [DONE]\n\n');
+        flushWrites();
+      };
+
+      const quotaAccounts = new Set<string>();
+      let providerRetriesLeft = 1;
+      const recoverResponse = async (retryAllowed = true): Promise<boolean> => {
+        while (!clientAborted()) {
+          let error = await resolveResponseError(providerError, lastFullContent, emittedStreamingToolIds.size, ctx.completionId, ctx.uiSessionId, targetResponseId, clientSignal);
+          if (!error && emittedStreamingToolIds.size === 0 && isDailyQuotaAssistantMessage(lastFullContent)) {
+            error = { code: 'RateLimited', message: 'Qwen daily chat quota exhausted; no eligible recovery response is available.', status: 429, retryable: false, dailyQuota: true };
+          }
+          if (clientAborted()) return false;
+          if (!error) return true;
+          markHistoryIncomplete(ctx.uiSessionId);
+          let retried: { stream: ReadableStream; uiSessionId: string } | null = null;
+          const accountId = getStream(ctx.completionId)?.accountId;
+          const canReplay = retryAllowed && emittedStreamingToolIds.size === 0 && !meaningfulOutput;
+          try {
+            if (error.dailyQuota && accountId && accountId !== 'guest' && accountId !== 'global' && !quotaAccounts.has(accountId) && ctx.onDailyQuota) {
+              quotaAccounts.add(accountId);
+              retried = await ctx.onDailyQuota(accountId, canReplay);
+            } else if (error.retryable && canReplay && providerRetriesLeft > 0 && ctx.onProviderRetry) {
+              providerRetriesLeft--;
+              retried = await ctx.onProviderRetry();
+            }
+          } catch (failure) {
+            console.warn('[Chat] Response recovery failed:', failure instanceof Error ? failure.name : 'UnknownError');
+          }
+          if (retried && (!canReplay || clientAborted())) {
+            void retried.stream.cancel('recovery cancelled').catch(() => {});
+            retried = null;
+          }
+          if (clientAborted()) return false;
+          if (!retried) { finishProviderError(error, error.dailyQuota && isDailyQuotaAssistantMessage(lastFullContent)); return false; }
+          ctx.uiSessionId = retried.uiSessionId;
+          resetStreamState();
+          activeStream = retried.stream;
+          try { await readUpstream(retried.stream); }
+          catch (failure) {
+            if (clientAborted()) return false;
+            markHistoryIncomplete(ctx.uiSessionId);
+            console.warn('[Chat] Recovery stream failed:', failure instanceof Error ? failure.name : 'UnknownError');
+            finishProviderError({ code: 'UpstreamReadFailed', message: 'Failed to read the Qwen recovery response.', status: 502, retryable: false, dailyQuota: false });
+            return false;
+          }
+        }
+        return false;
+      };
+
       await readUpstream(ctx.stream);
+      if (!await recoverResponse()) return;
       if (toolParser?.isInsideTool()) sawToolCallSignal = true;
 
       // Degenerate-answer guard: if the entire response is a terse
@@ -481,6 +602,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           resetStreamState();
           activeStream = retried.stream;
           await readUpstream(retried.stream);
+          if (!await recoverResponse()) return;
           if (toolParser?.isInsideTool()) sawToolCallSignal = true;
         }
       }
@@ -511,6 +633,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           resetStreamState();
           activeStream = retried.stream;
           await readUpstream(retried.stream);
+          if (!await recoverResponse()) return;
           if (toolParser?.isInsideTool()) sawToolCallSignal = true;
         }
       }
@@ -532,6 +655,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           resetStreamState();
           activeStream = retried.stream;
           await readUpstream(retried.stream);
+          if (!await recoverResponse()) return;
           if (toolParser?.isInsideTool()) sawToolCallSignal = true;
         }
       }
@@ -558,9 +682,12 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
           resetStreamState();
           activeStream = retried.stream;
           await readUpstream(retried.stream);
+          if (!await recoverResponse()) return;
           if (toolParser?.isInsideTool()) sawToolCallSignal = true;
         }
       }
+
+      releaseQuotaProbe();
 
       // Flush whatever survived (the real answer or the fallback).
       releaseGuard();
@@ -576,6 +703,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         isTruncatedResponse(lastFullContent, upstreamFinishReason)
       ) {
         autoContinuesLeft--;
+        flushWrites();
         console.warn(`[Chat] Truncated response detected (unclosed code fence or finish_reason=length). Auto-continuing stream (${config.autoContinue.maxContinues - autoContinuesLeft}/${config.autoContinue.maxContinues})...`);
         if (clientAborted()) break;
         const continued = await ctx.onAutoContinue(ctx.uiSessionId, targetResponseId || '');
@@ -596,32 +724,13 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         targetResponseId = null;
         targetResponseIdSet = false;
         upstreamFinishReason = null;
+        providerError = undefined;
+        nonSseBody = '';
+        quotaProbeActive = true;
+        quotaHeldOutput = '';
         await readUpstream(continued.stream);
-      }
-
-      const tailBuffer = bufferChunks.length > 0
-        ? (bufferChunks.length === 1 ? bufferChunks[0] : bufferChunks.join('')).substring(lineStart)
-        : '';
-
-      const upstreamError = parseQwenErrorPayload(tailBuffer);
-      if (upstreamError) {
-        writeEvent({
-          id: ctx.completionId,
-          object: 'chat.completion.chunk',
-          created: createdTimestamp,
-          model: ctx.model,
-          choices: [makeChoice({ content: upstreamError.message })]
-        });
-        writeEvent({
-          id: ctx.completionId,
-          object: 'chat.completion.chunk',
-          created: createdTimestamp,
-          model: ctx.model,
-          choices: [makeChoice({}, 'stop')]
-        });
-        bufferedWrite('data: [DONE]\n\n');
-        flushWrites();
-        return;
+        if (!await recoverResponse(false)) return;
+        releaseQuotaProbe();
       }
 
       if (toolParser) {
@@ -681,19 +790,22 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       bufferedWrite('data: [DONE]\n\n');
       flushWrites();
       markHistoryComplete(ctx.uiSessionId);
+      succeeded = true;
     } finally {
       if (clientSignal) clientSignal.removeEventListener('abort', onClientAbort);
       releaseActiveStream('stream teardown');
       flushWrites();
       clearInterval(heartbeatInterval);
       removeStream(ctx.completionId);
-      ctx.onUsage?.(promptTokens, completionTokens);
-      ctx.onComplete?.();
+      if (!succeeded) markHistoryIncomplete(ctx.uiSessionId);
+      try { ctx.onUsage?.(promptTokens, completionTokens, !succeeded); }
+      finally { ctx.onComplete?.(); }
     }
   });
 }
 
 export interface NonStreamingResult {
+  providerError?: QwenProviderError;
   status: number;
   body: any;
   content: string;
@@ -701,6 +813,9 @@ export interface NonStreamingResult {
   degenerate: boolean;
   updateMember: boolean;
   overload: boolean;
+  quotaLimited: boolean;
+  quotaAccountId?: string;
+  regenerated?: boolean;
   targetResponseId?: string | null;
   isTruncated?: boolean;
 }
@@ -726,6 +841,7 @@ export async function collectNonStreamingResult(
   const seenToolCallIds = new Set<string>();
   const seenToolCallSignatures = new Set<string>();
   let buffer = '';
+  let nonSseBody = '';
   let completed = false;
   const completeOnce = () => {
     if (completed) return;
@@ -754,35 +870,36 @@ export async function collectNonStreamingResult(
     },
   });
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data: ')) continue;
-      const dataStr = trimmed.slice(6);
-      if (dataStr === '[DONE]') continue;
-      qwenParser.parseLine(dataStr);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':') || /^(event|id|retry):/.test(trimmed)) continue;
+        if (!trimmed.startsWith('data:')) { nonSseBody = (nonSseBody + line + '\n').slice(0, 8192); continue; }
+        const dataStr = trimmed.slice(5).trimStart();
+        if (dataStr === '[DONE]') continue;
+        qwenParser.parseLine(dataStr);
+      }
+      if (qwenParser.state.upstreamError) {
+        void reader.cancel('upstream error').catch(() => {});
+        break;
+      }
     }
-  }
 
-  const upstreamError = parseQwenErrorPayload(buffer);
-  if (upstreamError) {
+    if (buffer.trimStart().startsWith('data:')) qwenParser.parseLine(buffer.trimStart().slice(5).trimStart());
+    else if (!buffer.trimStart().startsWith(':')) nonSseBody = (nonSseBody + buffer).slice(0, 8192);
+
+  } catch (error) {
+    markHistoryIncomplete(uiSessionId);
     removeStream(completionId);
     completeOnce();
-    return {
-      status: upstreamError.status,
-      body: { error: { message: upstreamError.message } },
-      content: '',
-      toolCalls: [],
-      degenerate: false,
-      updateMember: false,
-      overload: false,
-    };
-  }
+    throw error;
+  } finally { reader.releaseLock(); }
 
   const { text: remainingText, toolCalls: remainingToolCalls } = qwenParser.flush();
   const parserState = qwenParser.state;
@@ -799,6 +916,15 @@ export async function collectNonStreamingResult(
     if (toolCallsOut.length > 0) finalContent = '';
   }
 
+  const providerError = await resolveResponseError(parserState.upstreamError ?? parseQwenProviderBody(nonSseBody) ?? undefined, finalContent, toolCallsOut.length, completionId, uiSessionId, parserState.targetResponseId, c.req?.raw?.signal);
+  if (providerError) {
+    const accountId = getStream(completionId)?.accountId;
+    markHistoryIncomplete(uiSessionId);
+    removeStream(completionId);
+    completeOnce();
+    return { status: providerError.status, body: qwenErrorBody(providerError), content: '', toolCalls: [], degenerate: false, updateMember: false, overload: false, quotaLimited: providerError.dailyQuota, quotaAccountId: accountId, providerError, targetResponseId: parserState.targetResponseId };
+  }
+
   const usage = {
     prompt_tokens: parserState.promptTokens,
     completion_tokens: parserState.completionTokens,
@@ -813,8 +939,26 @@ export async function collectNonStreamingResult(
   const isTruncated = toolCallsOut.length === 0 && isTruncatedResponse(finalContent, parserState.finishReason);
   const finishReason = toolCallsOut.length ? 'tool_calls' : (isTruncated ? 'length' : (parserState.finishReason || 'stop'));
 
+  const quotaLimited = toolCallsOut.length === 0 && isDailyQuotaAssistantMessage(finalContent);
+  const quotaAccountId = quotaLimited ? getStream(completionId)?.accountId : undefined;
   removeStream(completionId);
-  markHistoryComplete(uiSessionId);
+  if (quotaLimited) {
+    markHistoryIncomplete(uiSessionId);
+    completeOnce();
+    return {
+      status: 429,
+      body: { error: { message: 'Qwen daily chat quota exhausted; try again tomorrow.', type: 'rate_limit_error', code: 'RateLimited' } },
+      content: finalContent,
+      toolCalls: [],
+      degenerate: false,
+      updateMember: false,
+      overload: false,
+      quotaLimited: true,
+      quotaAccountId,
+    };
+  }
+  if (c.req?.raw?.signal?.aborted) markHistoryIncomplete(uiSessionId);
+  else markHistoryComplete(uiSessionId);
   completeOnce();
   return {
     status: 200,
@@ -837,6 +981,7 @@ export async function collectNonStreamingResult(
     degenerate: toolCallsOut.length === 0 && isDegenerateAnswer(finalContent),
     updateMember: parserState.updateMemberDetected,
     overload: parserState.overloadDetected,
+    quotaLimited: false,
     targetResponseId: parserState.targetResponseId,
     isTruncated,
   };
@@ -853,6 +998,7 @@ export function handleNonStreamingResponse(
 ): any {
   return (async () => {
     const result = await collectNonStreamingResult(c, stream, completionId, model, uiSessionId, hasTools, tools);
+    if (result.status === 503) c.header('Retry-After', '2');
     return c.json(result.body, result.status as any);
   })();
 }

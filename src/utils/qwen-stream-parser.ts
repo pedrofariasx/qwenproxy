@@ -10,6 +10,8 @@
 
 import { updateSessionParent } from '../services/qwen.js';
 import { isOverloadMessage } from './overload-detector.js';
+import { parseQwenProviderError } from './qwen-provider-error.js';
+import type { QwenProviderError } from './qwen-provider-error.js';
 import { getIncrementalDelta } from '../routes/chat.js';
 import { StreamingToolParser } from '../tools/parser.js';
 import type { FunctionToolDefinition } from '../tools/types.js';
@@ -49,6 +51,7 @@ export interface ParsedChunkResult {
 }
 
 export interface StreamParserState {
+  upstreamError?: QwenProviderError;
   targetResponseId: string | null;
   currentThoughtIndex: number;
   lastFullContent: string;
@@ -164,6 +167,10 @@ export class QwenStreamParser {
 
     // Track response_id for session continuity
     this.updateResponseId(chunk);
+    if (!chunk.response_id || !this._state.targetResponseId || chunk.response_id === this._state.targetResponseId) {
+      this._state.upstreamError ??= parseQwenProviderError(chunk) ?? undefined;
+    }
+    if (this._state.upstreamError) return null;
 
     // Track finish_reason if provided
     if (chunk.choices && chunk.choices[0] && chunk.choices[0].finish_reason) {

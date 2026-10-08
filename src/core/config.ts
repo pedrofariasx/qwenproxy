@@ -27,6 +27,7 @@ const envSchema = z.object({
   HTTP_TIMEOUT: envInt(45000, 1),
   HEADERS_TIMEOUT: envInt(90000, 1),
   CHAT_TIMEOUT: envInt(120000, 1),
+  QWEN_PROVIDER_RETRY_DELAY_MS: envInt(1000, 0),
   STREAM_IDLE_TIMEOUT: envInt(180000, 1),
   CACHE_TTL: envInt(3600, 1),
   RESPONSE_TTL: envInt(1800, 1),
@@ -82,6 +83,7 @@ const envSchema = z.object({
 const env = envSchema.parse(process.env)
 
 export const config = {
+  providerRetryDelayMs: env.QWEN_PROVIDER_RETRY_DELAY_MS,
   server: {
     port: env.PORT,
     host: env.HOST,

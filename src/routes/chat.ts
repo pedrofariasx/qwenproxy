@@ -31,7 +31,7 @@ function msUntilMidnight(): number {
   tomorrow.setHours(0, 0, 0, 0);
   return tomorrow.getTime() - now.getTime();
 }
-import { getSession, resolveSessionKey } from '../services/session-manager.js';
+import { getSession, resolveSessionKey, markHistoryIncomplete } from '../services/session-manager.js';
 import { lookupToolCall } from '../core/tool-call-registry.js';
 import type { SessionEntry } from '../services/session-manager.js';
 import { fetchQwenChatHistory } from '../services/qwen.js';
@@ -47,6 +47,7 @@ import { handleStreamingResponse, collectNonStreamingResult } from './stream-han
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
 import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams } from '../core/user-manager.js';
 import { getRuntimeBool } from '../core/runtime-config.js';
+import { setTimeout as delay } from 'node:timers/promises';
 import { TOOL_CALL_OPEN, TOOL_CALL_CLOSE, wrapToolCallPayload } from '../tools/toolcall-tags.js';
 import type { UserIdentity } from '../core/user-manager.js';
 import { trackUsage, trackModelUsage } from '../core/usage-tracker.js';
@@ -655,13 +656,59 @@ export async function chatCompletions(c: Context) {
       throw lastError || new Error('All accounts failed');
     };
 
-    const acquired = await obtainStream(finalPrompt);
+    let acquired = await obtainStream(finalPrompt);
+    let quotaRetriesLeft = Math.max(0, loadAccounts().length - 1);
+    let providerRetriesLeft = 1;
+    const retryProviderResponse = async () => {
+      if (providerRetriesLeft <= 0 || c.req.raw.signal.aborted) return null;
+      providerRetriesLeft--;
+      await delay(config.providerRetryDelayMs, undefined, { signal: c.req.raw.signal });
+      if (c.req.raw.signal.aborted) return null;
+      const retried = await obtainStream(finalPrompt, true);
+      acquired = retried;
+      return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+    };
+    const quarantineDailyQuota = (accountId: string) => {
+      recordAccountBlock(accountId, 'rate-limited', 'Qwen returned a daily chat quota notice', { cooldownMs: msUntilMidnight() });
+    };
 
     c.header('X-Stop-Token', stopToken);
 
     if (!isStream) {
-      const collectResponse = async (acquiredStream: ReadableStream, acquiredSession: string) =>
-        collectNonStreamingResult(c, acquiredStream, completionId, body.model, acquiredSession, parseToolCalls, bodyAny.tools || []);
+      const collectResponse = async (acquiredStream: ReadableStream, acquiredSession: string) => {
+        let result = await collectNonStreamingResult(c, acquiredStream, completionId, body.model, acquiredSession, parseToolCalls, bodyAny.tools || []);
+        let rotated = false;
+        const quotaAccounts = new Set<string>();
+        while (!c.req.raw.signal.aborted) {
+          try {
+            if (result.providerError?.retryable && providerRetriesLeft > 0) {
+              const retried = await retryProviderResponse();
+              if (!retried) break;
+              rotated = true;
+              result = await collectNonStreamingResult(c, retried.stream, completionId, body.model, retried.uiSessionId, parseToolCalls, bodyAny.tools || []);
+              continue;
+            }
+            if (!result.quotaLimited) break;
+            const accountId = result.quotaAccountId;
+            if (!accountId || accountId === 'guest' || accountId === 'global' || quotaAccounts.has(accountId)) break;
+            quotaAccounts.add(accountId);
+            quarantineDailyQuota(accountId);
+            if (quotaRetriesLeft <= 0 || !getNextAvailableAccount()) break;
+            quotaRetriesLeft--;
+            const retried = await obtainStream(finalPrompt, true);
+            acquired = retried;
+            rotated = true;
+            result = await collectNonStreamingResult(c, retried.stream, completionId, body.model, retried.uiSessionId, parseToolCalls, bodyAny.tools || []);
+          } catch (error) {
+            markHistoryIncomplete(acquired.uiSessionId);
+            removeStream(completionId);
+            console.warn('[Chat] Response recovery failed:', error instanceof Error ? error.name : 'UnknownError');
+            break;
+          }
+        }
+        if (rotated) result.regenerated = true;
+        return result;
+      };
 
       let completed = await collectResponse(acquired.stream, acquired.uiSessionId);
 
@@ -678,6 +725,7 @@ export async function chatCompletions(c: Context) {
         // corrective directive never pollute the pinned conversation history.
         const correctedPrompt = `${finalPrompt}\n${buildAnswerDirective()}`;
         const retried = await obtainStream(correctedPrompt, true);
+        acquired = retried;
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
@@ -685,6 +733,7 @@ export async function chatCompletions(c: Context) {
         console.warn('[Chat] Account membership limit hit in non-streaming mode. Retrying with another account...');
         recordAccountBlock(acquired.accountId, 'membership-limit', undefined, { cooldownMs: msUntilMidnight() });
         const retried = await obtainStream(finalPrompt, true);
+        acquired = retried;
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
@@ -692,6 +741,7 @@ export async function chatCompletions(c: Context) {
         console.warn('[Chat] Qwen overload detected in non-streaming mode. Retrying with another account...');
         recordAccountBlock(acquired.accountId, 'server-error', 'Qwen overload/high-demand response');
         const retried = await obtainStream(finalPrompt, true);
+        acquired = retried;
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
@@ -716,7 +766,23 @@ export async function chatCompletions(c: Context) {
             undefined,
             { chatId: acquired.uiSessionId, forceBootstrap: false }
           );
+          registerStream(completionId, {
+            abortController: continuedStreamResult.controller,
+            accountId: continuedStreamResult.accountId,
+            uiSessionId: continuedStreamResult.uiSessionId,
+            targetResponseId: '',
+            headers: continuedStreamResult.headers,
+            stopToken,
+          });
           const continuedResponse = await collectResponse(continuedStreamResult.stream, continuedStreamResult.uiSessionId);
+          if (continuedResponse.quotaLimited) {
+            completed = continuedResponse;
+            break;
+          }
+          if (continuedResponse.regenerated) {
+            completed = continuedResponse;
+            continue;
+          }
           if (continuedResponse.status === 200 && continuedResponse.content) {
             completed.content += continuedResponse.content;
             if (completed.body?.choices?.[0]?.message) {
@@ -737,6 +803,7 @@ export async function chatCompletions(c: Context) {
       trackModelUsage(modelId);
       releaseUserSlotOnce();
       metrics.histogram('latency.completion', Date.now() - completionStart);
+      if (completed.status === 503) c.header('Retry-After', '2');
       return c.json(completed.body, completed.status as any);
     }
 
@@ -767,20 +834,36 @@ export async function chatCompletions(c: Context) {
       tools: bodyAny.tools || [],
       finalPrompt,
       streamOptions: body.stream_options,
-      onUsage: (promptTokens, completionTokens) => {
-        trackUsage(user ? user.id : 'anonymous', inputText, false, completionTokens, promptTokens);
+      onUsage: (promptTokens, completionTokens, failed) => {
+        trackUsage(user ? user.id : 'anonymous', inputText, !!failed, completionTokens, promptTokens);
       },
       onComplete: releaseUserSlotOnce,
+      onProviderRetry: retryProviderResponse,
+      onDailyQuota: async (accountId: string, retryAllowed = true) => {
+        quarantineDailyQuota(accountId);
+        if (!retryAllowed || quotaRetriesLeft <= 0 || !getNextAvailableAccount()) return null;
+        quotaRetriesLeft--;
+        try {
+          const retried = await obtainStream(finalPrompt, true);
+          acquired = retried;
+          return { stream: retried.stream, uiSessionId: retried.uiSessionId };
+        } catch (error) {
+          console.warn('[Chat] Daily quota recovery failed:', error instanceof Error ? error.name : 'UnknownError');
+          return null;
+        }
+      },
       onOverloadRetry: async () => {
         console.warn('[Chat] Qwen overload detected. Retrying with another account...');
         recordAccountBlock(acquired.accountId, 'overload', undefined, { cooldownMs: OVERLOAD_COOLDOWN_MS });
         const retried = await obtainStream(finalPrompt, true);
+        acquired = retried;
         return { stream: retried.stream, uiSessionId: retried.uiSessionId };
       },
       onUpdateMemberRetry: async () => {
         console.warn('[Chat] Account membership limit hit. Retrying with another account...');
         recordAccountBlock(acquired.accountId, 'membership-limit', undefined, { cooldownMs: msUntilMidnight() });
         const retried = await obtainStream(finalPrompt, true);
+        acquired = retried;
         return { stream: retried.stream, uiSessionId: retried.uiSessionId };
       },
       onAutoContinue: async (chatId: string, parentId: string) => {
@@ -814,12 +897,14 @@ export async function chatCompletions(c: Context) {
         onDegenerateRetry: async () => {
           console.warn('[Chat] Streaming degenerate reply detected. Regenerating on a clean chat...');
           const retried = await obtainStream(`${finalPrompt}\n${buildAnswerDirective()}`, true);
+          acquired = retried;
           return { stream: retried.stream, uiSessionId: retried.uiSessionId };
         },
         onToolCallRetry: hasToolConversation ? async () => {
           console.warn('[Chat] Tool call attempted but unparseable. Regenerating with corrective directive...');
           const corrected = `${finalPrompt}\nIMPORTANT: Your previous tool call was malformed and could not be parsed. If a tool is needed, emit ONE valid JSON object wrapped EXACTLY in ${TOOL_CALL_OPEN} and ${TOOL_CALL_CLOSE} tags, nothing else.`;
           const retried = await obtainStream(corrected, true);
+          acquired = retried;
           return { stream: retried.stream, uiSessionId: retried.uiSessionId };
         } : undefined,
       } : {}),
