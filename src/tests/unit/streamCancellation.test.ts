@@ -72,6 +72,33 @@ test('account slot stays reserved until underlying cancellation finishes', async
   assert.equal(getAccountActiveLoad('fixture-delayed'), 0);
 });
 
+test('external controller abort releases the actual Node transport lease', { timeout: 10000 }, async t => {
+  const closed = deferred();
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: fixture\n\n');
+    res.on('close', closed.resolve);
+  });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const nativeFetch = globalThis.fetch;
+  const port = (server.address() as AddressInfo).port;
+  t.mock.method(globalThis, 'fetch', (_input: RequestInfo | URL, init?: RequestInit) => nativeFetch(`http://127.0.0.1:${port}`, init));
+  try {
+    const result = await createQwenStream('fixture', false, 'fixture-model', null, 'fixture-node-abort', undefined, undefined,
+      { chatId: 'fixture-chat', chatHeaders: headers });
+    const reader = result.stream.getReader();
+    await reader.read();
+    const pending = reader.read();
+    result.controller.abort(new Error('fixture controller abort'));
+    await assert.rejects(pending);
+    await closed.promise;
+    assert.equal(getAccountActiveLoad('fixture-node-abort'), 0);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(r => server.close(() => r()));
+  }
+});
+
 test('idle timeout ends a pending read and tears down exactly once', { timeout: 2000 }, async () => {
   const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
   let cancelled = 0;
