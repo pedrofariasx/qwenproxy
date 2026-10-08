@@ -67,13 +67,8 @@ test('account scheduler: getNextAccount prefers the least-loaded viable account'
     const chosen = getNextAccount();
     assert.ok(chosen, 'must still return an account');
     const chosenBase = getBaseAccountId(chosen.id);
-    // The heavy account (by base) must be avoided while another has zero load.
-    if (getBaseAccountId(heavyAccount.id) !== chosenBase) {
-      assert.strictEqual(getAccountActiveLoad(chosenBase), 0, 'least-loaded account should win');
-    } else {
-      // Only one base account exists overall — heavier or not, it has to serve.
-      assert.strictEqual(getAccountActiveLoad(chosenBase), 3);
-    }
+    assert.strictEqual(chosenBase, getBaseAccountId(viable[1].id), 'the unloaded fixture account must be selected');
+    assert.strictEqual(getAccountActiveLoad(chosenBase), 0, 'least-loaded account should win');
   } finally {
     for (let i = 0; i < 3; i++) {
       markAccountStreamEnd(heavyAccount.id);
