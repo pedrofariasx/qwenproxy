@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 
 delete process.env.TEST_MOCK_PLAYWRIGHT;
 process.env.QWEN_DIRECT_FETCH = 'false';
@@ -13,11 +13,13 @@ process.chdir(directory);
 const { config } = await import('../../core/config.js');
 const { closeDatabase } = await import('../../core/database.js');
 const { getGuestHeaders, getQwenHeaders } = await import('../../services/header-interceptor.js');
-const { accountPages, accountHeaderCaches, getAccountHeaderCache, getUiMutex, setGuestPage, setGuestHeadersCache, getGuestHeadersCache } = await import('../../services/browser-manager.js');
+const { accountPages, accountHeaderCaches, getAccountHeaderCache, getUiMutex, setBrowser, setGuestPage, setGuestContext, setGuestHeadersCache, getGuestHeadersCache } = await import('../../services/browser-manager.js');
 const { isAccountReady, markAccountNotReady } = await import('../../core/account-manager.js');
 await import('../../services/qwen.js');
+setBrowser({ isConnected: () => true, newContext: async () => { throw new Error('Unexpected browser context in isolated header test'); } } as unknown as Browser);
 
 after(() => {
+  setBrowser(null);
   closeDatabase();
   process.chdir(originalCwd);
   fs.rmSync(directory, { recursive: true, force: true });
@@ -34,6 +36,122 @@ const fixtureHeaders = {
 const pattern = '**/api/v2/chat/completions*';
 
 type RouteHandler = (route: unknown, request: unknown) => Promise<void>;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolveValue, rejectValue) => { resolve = resolveValue; reject = rejectValue; });
+  return { promise, resolve, reject };
+}
+
+for (const mode of ['guest', 'account'] as const) {
+  for (const scenario of ['timeout-pending-cleanup', 'timeout-completed-cleanup', 'timeout-header-error', 'ui-error', 'duplicate'] as const) {
+    test(`${mode} ignores late header results after ${scenario}`, { timeout: 2000 }, async t => {
+      const accountId = `late-header-fixture-${mode}-${scenario}`;
+      const originalTimeout = config.timeouts.headers;
+      config.timeouts.headers = 1000;
+      const originalSetTimeout = globalThis.setTimeout;
+      const timers = new Set<ReturnType<typeof setTimeout>>();
+      let fireTimeout!: () => void | Promise<void>;
+      t.mock.method(globalThis, 'setTimeout', (callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+        const isCaptureTimeout = delay === config.timeouts.headers;
+        if (isCaptureTimeout) fireTimeout = () => callback(...args);
+        const timer = originalSetTimeout(isCaptureTimeout ? () => undefined : callback, isCaptureTimeout ? 60000 : delay, ...args);
+        timer.unref();
+        timers.add(timer);
+        return timer;
+      });
+      const headers = deferred<Record<string, string>>();
+      const started = deferred<void>();
+      const cleanupStarted = deferred<void>();
+      const cleanup = deferred<void>();
+      const failure = new Error('Fixture UI setup failed');
+      const lateHeaders = { ...fixtureHeaders, cookie: 'late-fixture-cookie', 'bx-ua': 'late-fixture-bx-ua' };
+      const tasks: Promise<void>[] = [];
+      let continues = 0;
+      let aborts = 0;
+      let handler: RouteHandler | undefined;
+      const route = { continue: async () => { continues++; }, abort: async () => { aborts++; } };
+      const request = {
+        allHeaders: () => { started.resolve(); return headers.promise; },
+        url: () => 'https://chat.qwen.ai/api/v2/chat/completions',
+        postData: () => JSON.stringify({ chat_id: 'late-fixture-chat' }),
+      };
+      const page = {
+        isClosed: () => true,
+        url: () => 'https://chat.qwen.ai/c/new-chat',
+        $: async () => null,
+        locator: () => ({ count: async () => 0 }),
+        waitForSelector: async () => { if (scenario === 'ui-error') throw failure; await new Promise(() => {}); },
+        screenshot: async () => { cleanupStarted.resolve(); await cleanup.promise; },
+        evaluate: async () => ({ status: 200, body: '{"success":true}' }),
+        route: async (registeredPattern: string, callback: RouteHandler) => {
+          assert.equal(registeredPattern, pattern);
+          handler = callback;
+          if (scenario === 'duplicate') tasks.push(callback(route, { ...request, allHeaders: async () => fixtureHeaders }));
+          tasks.push(callback(route, request));
+        },
+        unroute: async (registeredPattern: string, callback: RouteHandler) => {
+          assert.equal(registeredPattern, pattern);
+          assert.equal(callback, handler);
+        },
+      } as unknown as Page;
+      setGuestHeadersCache(null);
+      if (mode === 'guest') {
+        setGuestPage(page);
+        setGuestContext({ close: async () => { cleanupStarted.resolve(); await cleanup.promise; } } as unknown as BrowserContext);
+      } else accountPages.set(accountId, page);
+      const cache = getAccountHeaderCache(accountId);
+      const outcome = (mode === 'guest' ? getGuestHeaders() : getQwenHeaders(true, accountId))
+        .then(value => ({ kind: 'success' as const, value }), error => ({ kind: 'error' as const, error }));
+      try {
+        await started.promise;
+        if (scenario.startsWith('timeout')) {
+          void fireTimeout();
+          await cleanupStarted.promise;
+          if (scenario === 'timeout-completed-cleanup') {
+            cleanup.resolve();
+            assert.equal((await outcome).kind, 'error');
+          }
+        } else {
+          const result = await outcome;
+          assert.equal(result.kind, scenario === 'duplicate' ? 'success' : 'error');
+          if (result.kind === 'error') assert.equal(result.error, failure);
+        }
+        if (scenario === 'timeout-header-error') headers.reject(new Error('Fixture late allHeaders failure'));
+        else headers.resolve(lateHeaders);
+        await Promise.all(tasks);
+        if (scenario === 'duplicate') {
+          assert.equal(mode === 'guest' ? getGuestHeadersCache()?.headers.cookie : cache.cachedQwenHeaders?.headers.cookie, fixtureHeaders.cookie);
+          assert.equal(aborts, 1, 'only the winning capture may abort its request');
+        } else {
+          assert.equal(getGuestHeadersCache(), null);
+          assert.equal(cache.cachedQwenHeaders, null);
+          assert.deepEqual(cache.currentHeaders, {});
+          assert.equal(isAccountReady(accountId), false);
+          assert.equal(aborts, 0);
+        }
+        assert.equal(continues, 1, 'late requests must continue without applying their headers');
+        cleanup.resolve();
+        await outcome;
+        if (mode === 'account') assert.equal(getUiMutex(accountId).isLocked(), false);
+      } finally {
+        headers.resolve(lateHeaders);
+        cleanup.resolve();
+        await Promise.all(tasks);
+        await outcome;
+        for (const timer of timers) clearTimeout(timer);
+        config.timeouts.headers = originalTimeout;
+        setGuestPage(null);
+        setGuestContext(null);
+        setGuestHeadersCache(null);
+        accountPages.delete(accountId);
+        accountHeaderCaches.delete(accountId);
+        markAccountNotReady(accountId);
+      }
+    });
+  }
+}
 
 for (const mode of ['guest', 'account'] as const) {
   for (const scenario of ['header-error', 'cleanup-error', 'success'] as const) {

@@ -140,23 +140,41 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
   const watcher = startCaptchaWatcher(guestPage!, config.timeouts.headers);
   try {
     return await new Promise<Record<string, string>>((resolve, reject) => {
+      let settled = false;
       const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        void guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
         resetBrowserProfile('guest', 'guest')
           .catch((err: any) => console.warn(`[Playwright] Failed to reset guest profile after timeout: ${err.message}`))
           .finally(() => reject(new Error('Timeout getting guest headers')));
       }, config.timeouts.headers);
 
       const routeHandler = async (route: any, request: any) => {
+        if (settled) {
+          await route.continue().catch(() => {});
+          return;
+        }
         let reqHeaders: Record<string, string>;
         try {
           reqHeaders = await request.allHeaders();
         } catch (error) {
+          if (settled) {
+            await route.continue().catch(() => {});
+            return;
+          }
+          settled = true;
           clearTimeout(timeout);
           await route.continue().catch(() => {});
           await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
           reject(error);
           return;
         }
+        if (settled) {
+          await route.continue().catch(() => {});
+          return;
+        }
+        settled = true;
         clearTimeout(timeout);
         console.log('[Playwright] Guest intercepted request:', request.url());
 
@@ -208,7 +226,10 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
             await guestPage!.keyboard.press('Enter');
           }
         } catch (e) {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
           reject(e);
         }
       });
@@ -432,7 +453,11 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
   const watcher = startCaptchaWatcher(page, config.timeouts.headers);
   try {
     return await new Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }>((resolve, reject) => {
+      let settled = false;
       const timeout = setTimeout(async () => {
+        if (settled) return;
+        settled = true;
+        void page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
         console.error(`[Playwright] Timeout waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
         try {
           const path = await import('path');
@@ -448,14 +473,27 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
       console.log(`[Playwright] Setting up route interception for ${cacheKey}...`);
       const routeHandler = async (route: any, request: any) => {
+        if (settled) {
+          await route.continue().catch(() => {});
+          return;
+        }
         let reqHeaders: Record<string, string>;
         try {
           reqHeaders = await request.allHeaders();
         } catch (error) {
+          if (settled) {
+            await route.continue().catch(() => {});
+            return;
+          }
+          settled = true;
           clearTimeout(timeout);
           await route.continue().catch(() => {});
           await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
           reject(error);
+          return;
+        }
+        if (settled) {
+          await route.continue().catch(() => {});
           return;
         }
         let uiSessionId = '';
@@ -489,6 +527,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           return;
         }
 
+        settled = true;
         clearTimeout(timeout);
 
         console.log(`[Playwright] Successfully intercepted headers for ${cacheKey}.`);
@@ -554,7 +593,10 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
             await page.keyboard.press('Enter');
           }
         } catch (e) {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
           reject(e);
         }
       });
