@@ -158,3 +158,28 @@ test('literal role names cannot resolve through the role-label prototype', async
   const { serializeConversationMessages } = await import('../../utils/conversation-serialization.js');
   assert.equal(serializeConversationMessages([{ role: 'toString', content: 'literal role text' }]), 'toString: literal role text');
 });
+
+
+test('stream creation only prepares bootstrap when it is used and releases a failed preparation lease', async () => {
+  const { createQwenStream } = await import('../../services/stream-creator.js');
+  const { setSession, getSession } = await import('../../services/session-manager.js');
+  const { getAccountActiveLoad } = await import('../../core/account-manager.js');
+  const { ConversationContextError } = await import('../../utils/conversation-serialization.js');
+  setSession('lazy-bootstrap-session', { chatId: 'lazy-bootstrap-chat', accountId: 'serialization-account', parentId: 'confirmed-parent',
+    headers: { cookie: 'fixture', 'user-agent': 'fixture', 'bx-ua': 'fixture', 'bx-umidtoken': 'fixture', 'bx-v': 'fixture' }, historyComplete: true, updatedAt: Date.now() });
+  let preparations = 0;
+  const options = { sessionKey: 'lazy-bootstrap-session', economicalPrompt: 'User: Cached valid turn.', prepareBootstrap: () => {
+    preparations++; throw new ConversationContextError('fixture unused bootstrap exceeds context');
+  } };
+  const result = await createQwenStream('unused bootstrap', false, 'qwen3.7-plus', null, 'serialization-account', undefined, undefined, options);
+  await new Response(result.stream).text();
+  assert.equal(preparations, 0);
+  assert.equal(payloads[0].messages[0].content, 'User: Cached valid turn.');
+  const before = structuredClone(getSession('lazy-bootstrap-session'));
+  await assert.rejects(createQwenStream('unused bootstrap', false, 'qwen3.7-plus', null, 'serialization-account', undefined, undefined,
+    { ...options, forceBootstrap: true }), ConversationContextError);
+  assert.equal(preparations, 1);
+  assert.equal(payloads.length, 1);
+  assert.equal(getAccountActiveLoad('serialization-account'), 0);
+  assert.deepEqual(getSession('lazy-bootstrap-session'), before);
+});

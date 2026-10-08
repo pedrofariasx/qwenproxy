@@ -558,6 +558,7 @@ export async function fetchQwenChatHistory(
 }
 
 export interface CreateQwenStreamOptions {
+  prepareBootstrap?: (prompt: string) => string;
   /** Client conversation key (OpenAI `user` field or x-qwen-session header). */
   sessionKey?: string;
   /** System + last user message only. Used when the server-side history can supply context. */
@@ -663,7 +664,7 @@ export async function createQwenStream(
   };
 
   try {
-  const payloadPrompt = useEconomical && options?.economicalPrompt ? options.economicalPrompt : prompt;
+  const payloadPrompt = useEconomical && options?.economicalPrompt ? options.economicalPrompt : (options?.prepareBootstrap?.(prompt) ?? prompt);
   const LARGE_PROMPT_THRESHOLD = config.largePromptThreshold;
   const needsFileUpload = Buffer.byteLength(payloadPrompt, 'utf-8') > LARGE_PROMPT_THRESHOLD && !config.largePromptInline;
 

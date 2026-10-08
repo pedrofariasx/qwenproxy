@@ -295,17 +295,36 @@ export async function chatCompletions(c: Context) {
       if (compactManifest) toolSuffix += `\n\n${compactManifest}`;
     }
 
-    let retainedMessages = conversationMessages;
-    const estimatedTokens = estimateTokenCount(`${systemPrompt}\n${prompt}${toolSuffix}`, modelId);
-    if (conversationMessages.length && estimatedTokens > modelContextWindow - 1000) {
-      retainedMessages = truncateMessages(conversationMessages, modelContextWindow, systemPrompt + toolSuffix, modelId, serializationOptions);
-    }
-    const retainedPrompt = serializeConversationMessages(retainedMessages, serializationOptions);
-    const finalPrompt = [systemPrompt, retainedPrompt].filter(Boolean).join('\n\n') + toolSuffix;
-    if ((!retainedMessages.length && conversationMessages.length > 0) || !finalPrompt.trim() || estimateTokenCount(finalPrompt, modelId) > modelContextWindow) {
-      throw new ConversationContextError('The current conversation or tool group does not fit the model context window');
-    }
-    const pendingMultimodal = retainedMessages.flatMap(message => message.media?.length ? [message.media] : []);
+    const unboundedPrompt = [systemPrompt, prompt].filter(Boolean).join('\n\n') + toolSuffix;
+    const pendingMultimodal: Array<NonNullable<(typeof conversationMessages)[number]['media']>> = [];
+    let boundedPrompt: string | undefined;
+    const checkBootstrapBudget = (value: string): string => {
+      if (!value.trim() || estimateTokenCount(value, modelId) > modelContextWindow) {
+        throw new ConversationContextError('The current conversation or tool group does not fit the model context window');
+      }
+      return value;
+    };
+    const prepareBootstrap = (requestedPrompt: string): string => {
+      if (!requestedPrompt.startsWith(unboundedPrompt) && !(boundedPrompt && requestedPrompt.startsWith(boundedPrompt))) {
+        return checkBootstrapBudget(requestedPrompt);
+      }
+      if (boundedPrompt === undefined) {
+        let retainedMessages = conversationMessages;
+        if (conversationMessages.length && estimateTokenCount(unboundedPrompt, modelId) > modelContextWindow - 1000) {
+          retainedMessages = truncateMessages(conversationMessages, modelContextWindow, systemPrompt + toolSuffix, modelId, serializationOptions);
+        }
+        const retainedPrompt = serializeConversationMessages(retainedMessages, serializationOptions);
+        if (!retainedMessages.length && conversationMessages.length > 0) {
+          throw new ConversationContextError('The current conversation cannot be retained as a complete group');
+        }
+        const candidate = [systemPrompt, retainedPrompt].filter(Boolean).join('\n\n') + toolSuffix;
+        boundedPrompt = checkBootstrapBudget(candidate);
+        pendingMultimodal.push(...retainedMessages.flatMap(message => message.media?.length ? [message.media] : []));
+      }
+      const suffix = requestedPrompt.startsWith(unboundedPrompt) ? requestedPrompt.slice(unboundedPrompt.length)
+        : requestedPrompt.slice(boundedPrompt.length);
+      return suffix ? checkBootstrapBudget(boundedPrompt + suffix) : boundedPrompt;
+    };
 
     const isThinkingModel = body.reasoning_effort !== undefined
       ? body.reasoning_effort !== 'none'
@@ -376,7 +395,8 @@ export async function chatCompletions(c: Context) {
       economicalPrompt = parts.join('\n');
       if (!economicalPrompt.trim()) canEconomize = false;
     }
-    const baseStreamOptions = { sessionKey, economicalPrompt };
+    const finalPrompt = canEconomize ? unboundedPrompt : prepareBootstrap(unboundedPrompt);
+    const baseStreamOptions = { sessionKey, economicalPrompt, prepareBootstrap };
 
     const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', false);
     const completionId = 'chatcmpl-' + crypto.randomUUID();
@@ -503,6 +523,7 @@ export async function chatCompletions(c: Context) {
               noteAccountRecovery(accountId);
               return { stream: result.stream, uiSessionId: result.uiSessionId, accountId };
             } catch (err: any) {
+              if (err instanceof ConversationContextError) throw err;
               retries--;
 
               if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
