@@ -183,3 +183,15 @@ test('stream creation only prepares bootstrap when it is used and releases a fai
   assert.equal(getAccountActiveLoad('serialization-account'), 0);
   assert.deepEqual(getSession('lazy-bootstrap-session'), before);
 });
+
+test('media on a retained instruction message is not silently discarded', async () => {
+  const { response, prompt } = await send([
+    { role: 'system', content: [{ type: 'text', text: 'SYSTEM_MEDIA_TEXT' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,' + Buffer.alloc(17).toString('base64') } }] },
+    { role: 'user', content: 'Use the retained image.' },
+  ], 100000);
+  assert.equal(response.status, 200);
+  assert.deepEqual(uploads, [17]);
+  assert.equal(payloads[0].messages[0].files.length, 1);
+  assert.equal(payloads[0].messages[0].files[0].size, 17);
+  assert.ok(prompt?.includes('SYSTEM_MEDIA_TEXT'));
+});

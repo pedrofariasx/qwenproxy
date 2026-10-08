@@ -319,7 +319,7 @@ export async function chatCompletions(c: Context) {
         }
         const candidate = [systemPrompt, retainedPrompt].filter(Boolean).join('\n\n') + toolSuffix;
         boundedPrompt = checkBootstrapBudget(candidate);
-        pendingMultimodal.push(...retainedMessages.flatMap(message => message.media?.length ? [message.media] : []));
+        pendingMultimodal.push(...[...instructionMessages, ...retainedMessages].flatMap(message => message.media?.length ? [message.media] : []));
       }
       const suffix = requestedPrompt.startsWith(unboundedPrompt) ? requestedPrompt.slice(unboundedPrompt.length)
         : requestedPrompt.slice(boundedPrompt.length);
