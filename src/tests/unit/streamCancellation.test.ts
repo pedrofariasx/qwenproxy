@@ -99,6 +99,29 @@ test('external controller abort releases the actual Node transport lease', { tim
   }
 });
 
+test('request abort before Node response metadata closes the connection and releases the lease', { timeout: 10000 }, async t => {
+  const connected = deferred();
+  const closed = deferred();
+  const server = http.createServer((_req, res) => { res.on('close', closed.resolve); connected.resolve(); });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const nativeFetch = globalThis.fetch;
+  const port = (server.address() as AddressInfo).port;
+  t.mock.method(globalThis, 'fetch', (_input: RequestInfo | URL, init?: RequestInit) => nativeFetch(`http://127.0.0.1:${port}`, init));
+  const abort = new AbortController();
+  try {
+    const pending = createQwenStream('fixture', false, 'fixture-model', null, 'fixture-node-parent', undefined, undefined,
+      { chatId: 'fixture-chat', chatHeaders: headers, signal: abort.signal });
+    await connected.promise;
+    abort.abort(new Error('fixture request aborted'));
+    await assert.rejects(pending, /fixture request aborted/);
+    await closed.promise;
+    assert.equal(getAccountActiveLoad('fixture-node-parent'), 0);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(r => server.close(() => r()));
+  }
+});
+
 test('idle timeout ends a pending read and tears down exactly once', { timeout: 2000 }, async () => {
   const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
   let cancelled = 0;
@@ -136,6 +159,17 @@ test('an unconfirmed transport teardown does not release its lease', async () =>
   const managed = manageQwenStream(new ReadableStream<Uint8Array>(), new AbortController(), 1000, 'fixture',
     async () => { throw new Error('fixture teardown failed'); }, () => { released = true; }, () => {});
   await assert.rejects(managed.stream.cancel(), /fixture teardown failed/);
+  assert.equal(released, false);
+});
+
+test('a failed source cancellation must not release its lease even when it rejects with the abort reason', async () => {
+  const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
+  const reason = new Error('fixture source cancellation failed');
+  let released = false;
+  const source = new ReadableStream<Uint8Array>({ cancel(error) { return Promise.reject(error); } });
+  const managed = manageQwenStream(source, new AbortController(), 1000, 'fixture', undefined,
+    () => { released = true; }, () => {});
+  await assert.rejects(managed.stream.cancel(reason), /fixture source cancellation failed/);
   assert.equal(released, false);
 });
 

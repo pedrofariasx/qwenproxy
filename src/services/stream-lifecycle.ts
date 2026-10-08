@@ -9,6 +9,7 @@ export function manageQwenStream(
   parentSignal?: AbortSignal,
 ): { stream: ReadableStream<Uint8Array>; cancel: (reason?: unknown) => Promise<void> } {
   const reader = source.getReader();
+  const sourceClosed = reader.closed.then(() => ({ errored: false as const }), error => ({ errored: true as const, error }));
   let output: ReadableStreamDefaultController<Uint8Array>;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let finishing = false;
@@ -25,8 +26,9 @@ export function manageQwenStream(
       if (!normal && !controller.signal.aborted) controller.abort(reason);
       const results = await Promise.allSettled([
         Promise.resolve().then(() => abortTransport?.()),
-        normal ? Promise.resolve() : reader.cancel(reason).catch(error => {
-          if (error !== reason) throw error;
+        normal ? Promise.resolve() : reader.cancel(reason).catch(async error => {
+          const state = await sourceClosed;
+          if (!state.errored || state.error !== error) throw error;
         }),
       ]);
       reader.releaseLock();
