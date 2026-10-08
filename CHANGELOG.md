@@ -1,3 +1,10 @@
+## [1.34.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.34.0...v1.34.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* account lane wait loop and SSE [DONE] framing ([72f2f00](https://github.com/pedrofariasx/qwenproxy/commit/72f2f00b22d287d33c98bdccbe70924338ba8d3f))
+
 # [1.34.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.33.1...v1.34.0) (2026-10-07)
 
 
