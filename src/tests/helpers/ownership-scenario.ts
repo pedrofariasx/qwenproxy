@@ -181,9 +181,10 @@ try {
     }
     assert.equal(new Set(payloads.map(payload => payload.chat_id)).size, 3);
     assert.equal(new Set(listSessions().map(row => row.owner)).size, 3);
-    const aliceCanonical = listSessions()[0].session_key;
-    assert.equal((await chat('fixture-global', aliceCanonical)).response.status, 200);
+    const foreignCanonical = listSessions()[0].session_key;
+    assert.equal((await chat('fixture-env-global', foreignCanonical)).response.status, 200);
     assert.notEqual(payloads.at(-1).chat_id, payloads[0].chat_id);
+    assert.equal(listSessions().at(-1)?.owner, JSON.stringify(['environment', 'global']));
   } else if (scenario === 'env-key-rotation') {
     addAccount('env-rotation@example.invalid', 'fixture', 'env-rotation-account');
     assert.equal((await chat('fixture-env', 'env-client')).response.status, 200);
