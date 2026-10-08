@@ -28,7 +28,7 @@ import { getFingerprintProfile } from '../services/fingerprint.js'
 import { makeAccountLaneId } from '../core/account-lanes.js'
 import { getPersonalization, savePersonalization, applyPersonalizationToAccount, applyPersonalizationToAll, hasPersonalization } from '../services/personalization.js'
 import { listUsers, upsertUser, deleteUserById, getUserById, listSessions } from '../core/database.js'
-import { getUserActiveStreams } from '../core/user-manager.js'
+import { getUserActiveStreams, getUserPrincipal, getTotalUserActiveStreams } from '../core/user-manager.js'
 import { getSessionCount, removeSession, resetAllSessions } from '../services/session-manager.js'
 import { getStreamRegistry, abortStream } from '../core/stream-registry.js'
 import { getRecentToolCalls } from '../core/tool-call-debug.js'
@@ -192,10 +192,9 @@ async function buildOverview(): Promise<any> {
   const latencyCompletion = metrics.get('latency.completion')?.value as any
 
   const users = listUsers()
-  let totalUserStreams = getUserActiveStreams('global')
+  const totalUserStreams = getTotalUserActiveStreams()
   const userList = users.map(u => {
-    const streams = getUserActiveStreams(u.id)
-    totalUserStreams += streams
+    const streams = getUserActiveStreams(getUserPrincipal({ id: u.id, isGlobal: false }))
     return { id: u.id, email: u.email, streams }
   })
 
@@ -495,7 +494,7 @@ adminApp.get('/api/users', adminGuard, (c) => {
     apiKey: u.api_key,
     rateLimitRpm: u.rate_limit_rpm || config.users.defaultRateLimitRpm,
     maxConcurrency: u.max_concurrency || config.users.defaultMaxConcurrency,
-    activeStreams: getUserActiveStreams(u.id),
+    activeStreams: getUserActiveStreams(getUserPrincipal({ id: u.id, isGlobal: false })),
   }))
   return c.json(userInfo)
 })
@@ -662,6 +661,7 @@ adminApp.get('/api/sessions', adminGuard, (c) => {
   const ttlMs = config.hybridSessions.ttlMs
   return c.json(rows.map((r) => ({
     sessionKey: r.session_key,
+    owner: r.owner ?? null,
     chatId: r.chat_id,
     accountId: r.account_id,
     parentId: r.parent_id,

@@ -7,6 +7,7 @@ export interface StreamRegistryEntry {
   targetResponseId: string;
   headers: Record<string, string>;
   stopToken: string;
+  owner?: string;
   createdAt: number;
 }
 

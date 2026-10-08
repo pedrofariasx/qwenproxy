@@ -14,6 +14,7 @@ import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
 import { uploadFile } from '../routes/upload.js'
 import { adminApp } from './admin.js'
 import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js'
+import { hasConfiguredApiKeys, resolveUserFromAuthHeader, getUserPrincipal } from '../core/user-manager.js'
 
 const app = new Hono()
 
@@ -59,22 +60,25 @@ app.use('*', async (c, next) => {
 })
 
 app.use('/v1/*', async (c, next) => {
-  const apiKey = process.env.API_KEY || config.apiKey
-  const authRequired = config.authRequired || Boolean(apiKey)
+  const configured = hasConfiguredApiKeys()
+  const authRequired = config.authRequired || configured
   if (authRequired) {
-    if (!apiKey) {
-      return c.json({ error: 'AUTH_REQUIRED=true but no API_KEY is configured' }, 500)
+    if (!configured) {
+      return c.json({ error: 'AUTH_REQUIRED=true but no API keys are configured' }, 500)
     }
     const auth = c.req.header('Authorization')
-    if (!auth?.startsWith('Bearer ')) {
+    if (!auth) {
       return c.json({ error: 'Missing or invalid Authorization header' }, 401)
     }
-    const { resolveUserFromAuthHeader } = await import('../core/user-manager.js')
     const identity = resolveUserFromAuthHeader(auth)
     if (!identity) {
       return c.json({ error: 'Invalid API key' }, 401)
     }
     ;(c as any).set('user', identity)
+    ;(c as any).set('principal', getUserPrincipal(identity))
+  } else {
+    if (c.req.header('Authorization')) return c.json({ error: 'Invalid API key' }, 401)
+    ;(c as any).set('principal', getUserPrincipal())
   }
   await next()
 })

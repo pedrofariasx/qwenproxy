@@ -1,16 +1,6 @@
-/**
- * Per-user identity, rate limiting and concurrency caps for multi-user setups.
- *
- * Identities are resolved from:
- *  1. The proxy-wide `API_KEY` (the "global" user),
- *  2. Per-user rows in the `users` SQLite table,
- *  3. `USER_API_KEYS` env (comma-separated `key[:label]` entries) seeded into
- *     the table on first use.
- */
-
 import crypto from 'crypto';
 import { config } from './config.js';
-import { getUserByApiKey, upsertUser, listUsers } from './database.js';
+import { getUserByApiKey, hasUsers } from './database.js';
 
 export interface UserIdentity {
   id: string;
@@ -18,6 +8,7 @@ export interface UserIdentity {
   rateLimitRpm: number;
   maxConcurrency: number;
   isGlobal: boolean;
+  source?: 'environment';
 }
 
 const rateWindows = new Map<string, number[]>();
@@ -33,33 +24,31 @@ function defaultIdentity(id: string, email: string | null, isGlobal: boolean): U
   };
 }
 
-function seedEnvApiKeys(): void {
-  if (!config.users.apiKeys) return;
-  const existing = new Set(listUsers().map(u => u.id));
-  for (const entry of config.users.apiKeys.split(',')) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    const [key, ...labelParts] = trimmed.split(':');
-    if (!key) continue;
-    const label = labelParts.join(':') || `user-${key.slice(0, 6)}`;
-    if (!existing.has(label)) {
-      try {
-        upsertUser({ id: label, email: label, apiKey: key });
-      } catch { /* ignore duplicate key */ }
-    }
-  }
+function envApiKeys(): Array<{ key: string; label: string }> {
+  return config.users.apiKeys.split(',').flatMap(entry => {
+    const [key, ...labelParts] = entry.trim().split(':');
+    if (!key) return [];
+    const label = labelParts.join(':') || `env-${crypto.createHash('sha256').update(key).digest('hex')}`;
+    return [{ key, label }];
+  });
 }
 
-let seeded = false;
+export function hasConfiguredApiKeys(): boolean {
+  return Boolean((process.env.API_KEY || config.apiKey || '').trim()) || envApiKeys().length > 0 || hasUsers();
+}
+
+export function getUserPrincipal(user?: Pick<UserIdentity, 'id' | 'isGlobal' | 'source'>): string {
+  return JSON.stringify(user ? user.isGlobal ? ['global'] : [user.source === 'environment' ? 'environment' : 'user', user.id] : ['anonymous']);
+}
 
 /**
  * Resolves the caller identity from an `Authorization` header value, or null
  * when the token is not recognized (middleware should reject).
  */
 export function resolveUserFromAuthHeader(authHeader?: string | null): UserIdentity | null {
-  if (!authHeader) return null;
-  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-  if (!token) return null;
+  const match = authHeader?.match(/^Bearer[ \t]+([^\s]+)[ \t]*$/i);
+  if (!match) return null;
+  const token = match[1];
 
   // 1. Proxy-wide API key → global user (constant-time comparison).
   const globalKey = (process.env.API_KEY || config.apiKey || '').trim();
@@ -71,12 +60,9 @@ export function resolveUserFromAuthHeader(authHeader?: string | null): UserIdent
     }
   }
 
-  // 2/3. Per-user keys (DB + env seeds).
-  if (!seeded) {
-    seeded = true;
-    try { seedEnvApiKeys(); } catch { /* ignore */ }
-  }
   try {
+    const configured = envApiKeys().find(entry => entry.key === token);
+    if (configured) return { ...defaultIdentity(configured.label, configured.label, false), source: 'environment' };
     const user = getUserByApiKey(token);
     if (user) {
       return {
@@ -124,6 +110,10 @@ export function releaseUserSlot(userId: string): void {
 
 export function getUserActiveStreams(userId: string): number {
   return activeStreams.get(userId) || 0;
+}
+
+export function getTotalUserActiveStreams(): number {
+  return [...activeStreams.values()].reduce((total, value) => total + value, 0);
 }
 
 export function getRateLimitInfo(userId: string, userLimit?: number): { used: number; limit: number; windowMs: number } {

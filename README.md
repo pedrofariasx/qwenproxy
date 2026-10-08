@@ -320,8 +320,8 @@ ADMIN_PASSWORD=
 
 Quando exposto para vários usuários, cada um recebe a própria API key com
 **rate limit** (requisições por minuto) e **teto de concorrência** (streams
-simultâneos). As chaves ficam na tabela `users` do SQLite e podem ser criadas
-pela dashboard em `/admin` ou via `USER_API_KEYS` no `.env`:
+simultâneos). Chaves de usuários SQLite podem ser criadas pela dashboard em
+`/admin`. Chaves de ambiente são configuradas separadamente em `USER_API_KEYS`:
 
 ```env
 USER_RATE_LIMIT_RPM=120        # padrão por usuário
@@ -330,8 +330,16 @@ USER_API_KEYS=sk-key-1:usuario1,sk-key-2:usuario2
 ```
 
 Os clientes autenticam com `Authorization: Bearer <chave>`. A `API_KEY` global
-continua valendo como usuário `global` (sem distinção de cota). Um usuário que
+continua valendo como proprietário global separado. Um usuário que
 estoura o limite recebe `429` com a mensagem correspondente.
+
+Qualquer chave global, de ambiente ou de usuário SQLite configurada ativa a autenticação dos endpoints `/v1/*`. Uma chave válida de usuário funciona sem `API_KEY` global; uma chave ausente, inválida ou com esquema diferente de Bearer retorna 401. `AUTH_REQUIRED=true` sem nenhuma fonte de chaves retorna 500 por erro de configuração. Somente a ausência de todas as fontes com `AUTH_REQUIRED=false` permite o proprietário anônimo; um Authorization inválido não é ignorado nesse modo.
+
+`user`, `x-qwen-session` e `x-session-id` são identificadores de conversa, não credenciais. Conversas, aliases de chat, referências de ferramentas e Stop respeitam o proprietário autenticado. O token de parada sozinho não autoriza outro proprietário. Proprietários globais, de ambiente, SQLite e anônimos têm espaços separados, mesmo que suas etiquetas coincidam. Alterar a API key de um usuário SQLite mantém sua identidade; para chaves de ambiente, mantenha a mesma etiqueta explícita ao trocar a chave. Sem etiqueta, a identidade depende do hash da chave. Chaves de ambiente não são gravadas no SQLite; registros de usuários existentes são preservados como fonte independente e exigem revogação própria.
+
+A migração adiciona `sessions.owner` nullable e preserva as sessões antigas, incluindo seus headers e parents. Registros sem proprietário não são entregues ao primeiro cliente que apresente sua chave ou alias, nem expiram automaticamente durante essa migração. Seu acesso exige um mapeamento administrativo explícito, preparado a partir de um backup privado antes da atualização; a configuração atual não comprova quem criou cada conversa. Novos pedidos com a mesma chave textual usam uma conversa separada e não sobrescrevem o registro antigo. O painel administrativo expõe o proprietário de cada registro pela API de sessões.
+
+Uma versão anterior ignora a proteção de proprietário. O rollback precisa considerar código e banco em conjunto e preservar os dados criados após o backup.
 
 ---
 
