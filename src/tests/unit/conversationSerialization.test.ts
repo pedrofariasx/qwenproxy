@@ -102,11 +102,12 @@ for (const truncated of [false, true]) {
 }
 
 test('an oversized current tool group is rejected before any completion request', async () => {
-  const { response } = await send([
+  const { response, body } = await send([
     { role: 'assistant', content: null, tool_calls: [{ id: 'oversized-call', type: 'function', function: { name: 'read_doc', arguments: JSON.stringify({ text: 'large complete argument '.repeat(2500) }) } }] },
     { role: 'tool', name: 'read_doc', tool_call_id: 'oversized-call', content: 'The current tool result must keep its complete call.' },
   ], 2048);
   assert.equal(response.status, 400);
+  assert.equal(body.error.code, 'ContextWindowExceeded');
   assert.equal(payloads.length, 0);
 });
 

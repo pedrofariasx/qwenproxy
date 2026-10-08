@@ -272,7 +272,7 @@ HYBRID_SESSION_VERIFY=true   # verifica histórico no servidor antes de reusar; 
 HYBRID_SESSION_TTL_MS=86400000
 ```
 
-O bootstrap completo e o histórico reduzido usam a mesma serialização de papéis, nomes, IDs de chamadas e resultados de ferramentas. Argumentos JSON válidos mantêm sua representação original, inclusive literais inteiros grandes; strings de argumentos incompletas são preservadas como texto. Instruções system/developer são incluídas uma vez e o orçamento considera o contrato de ferramentas.
+O bootstrap completo e o histórico reduzido usam a mesma serialização de papéis, nomes, IDs de chamadas e resultados de ferramentas. Strings de argumentos JSON válidas mantêm sua representação original, inclusive literais inteiros grandes; strings de argumentos incompletas são preservadas como texto. Instruções system/developer são incluídas uma vez e o orçamento considera o contrato de ferramentas.
 
 Ao reduzir o contexto, grupos de chamadas/resultados e mensagens com mídia são mantidos inteiros ou omitidos inteiros. Somente a mídia retida é enviada para upload. Se o grupo atual não cabe, a API retorna 400 (`ContextWindowExceeded`) antes de criar uma completion, em vez de enviar um resultado parcial sem sua chamada. Memórias resumidas de ferramentas anteriores são limitadas pelo orçamento disponível; o limite de texto usa a estimativa do tokenizer configurado, não uma medição exata do tokenizer remoto do Qwen.
 

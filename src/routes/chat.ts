@@ -767,7 +767,7 @@ export async function chatCompletions(c: Context) {
     metrics.histogram('latency.completion', Date.now() - completionStart)
     trackUsage(user ? user.id : 'anonymous', usageInputText, true);
     trackModelUsage(usageModel);
-    return c.json({ error: { message: err.message } }, status)
+    return c.json({ error: { message: err.message, ...(err instanceof ConversationContextError ? { code: err.upstreamCode } : {}) } }, status)
   }
 }
 
