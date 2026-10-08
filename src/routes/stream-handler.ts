@@ -420,7 +420,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
                 }
                 fastWriteReasoning(vStr);
               } else {
-                if (guardActive && canFastReleaseGuard(lastFullContent)) {
+                if (guardActive && !sawOverloadSignal && canFastReleaseGuard(lastFullContent)) {
                   releaseGuard();
                 }
                 if (ctx.hasTools && toolParser) {
@@ -518,8 +518,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       if (
         ctx.onOverloadRetry &&
         !overloadRetried &&
-        (sawOverloadSignal || isOverloadMessage(lastFullContent)) &&
-        guardActive
+        (sawOverloadSignal || isOverloadMessage(lastFullContent))
       ) {
         if (clientAborted()) return;
         overloadRetried = true;

@@ -486,31 +486,27 @@ export async function chatCompletions(c: Context) {
 
       if (!account) {
         const inUse = getInUseAccounts();
-        if (inUse.length === 0) {
-          throw new RetryableQwenStreamError('No available account lanes', 1000);
-        }
-
-        const waitStart = Date.now();
-        const MAX_LANE_WAIT_MS = 30000;
-        while (!account) {
-          const elapsed = Date.now() - waitStart;
-          if (elapsed > MAX_LANE_WAIT_MS) {
-            throw new RetryableQwenStreamError(
-              `All configured account lanes are busy: ${getInUseAccounts().join(', ')}`,
-              1000
-            );
+        if (inUse.length > 0) {
+          const waitStart = Date.now();
+          const MAX_LANE_WAIT_MS = 30000;
+          while (!account) {
+            const elapsed = Date.now() - waitStart;
+            if (elapsed > MAX_LANE_WAIT_MS) {
+              throw new RetryableQwenStreamError(
+                `All configured account lanes are busy: ${getInUseAccounts().join(', ')}`,
+                1000
+              );
+            }
+            const freed = onAccountFreed();
+            await Promise.race([
+              new Promise(r => setTimeout(r, 300)),
+              freed.promise,
+            ]);
+            freed.cancel();
+            account = getNextAccount();
           }
-          // Drain-based wait: pop as soon as any account slot frees, with a
-          // short poll interval as a safety net instead of a blind 300ms sleep.
-          const freed = onAccountFreed();
-          await Promise.race([
-            new Promise(r => setTimeout(r, 300)),
-            freed.promise,
-          ]);
-          freed.cancel();
-          account = getNextAccount();
+          console.log(`[Chat] Waited ${Date.now() - waitStart}ms for a free lane`);
         }
-        console.log(`[Chat] Waited ${Date.now() - waitStart}ms for a free lane`);
       }
 
       while (account) {

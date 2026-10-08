@@ -8,6 +8,10 @@ delete process.env.API_KEY;
 
 const { app } = await import('../../api/server.js');
 const { resetAllSessions } = await import('../../services/session-manager.js');
+const { addAccount } = await import('../../core/accounts.js');
+
+try { addAccount('test-mu-1@test.com', 'pass1', 'mu-test-account-1'); } catch { /* exists */ }
+try { addAccount('test-mu-2@test.com', 'pass2', 'mu-test-account-2'); } catch { /* exists */ }
 const {
   resolveUserFromAuthHeader,
   checkUserRateLimit,
