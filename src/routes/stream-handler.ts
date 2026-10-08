@@ -399,7 +399,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
                   if (!sawOverloadSignal && isOverloadMessage(newContent)) {
                     sawOverloadSignal = true;
                   }
-                  const result = getIncrementalDelta(lastFullContent, newContent, contentLength, contentSuffix);
+                  const result = getIncrementalDelta(lastFullContent, newContent, contentLength, contentSuffix, 'incremental');
                   vStr = result.delta;
                   if (vStr) {
                     lastFullContent = result.matchedContent;

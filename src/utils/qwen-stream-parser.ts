@@ -187,7 +187,8 @@ export class QwenStreamParser {
         this._state.lastFullContent,
         delta.content,
         this._contentLength,
-        this._contentSuffix
+        this._contentSuffix,
+        'incremental'
       );
       const actualDelta = deltaResult.delta;
       this._state.lastFullContent = deltaResult.matchedContent;

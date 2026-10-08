@@ -5,7 +5,11 @@ export interface DeltaResult {
   contentSuffix: string;
 }
 
-export function getIncrementalDelta(oldStr: string, newStr: string, prevLength: number = 0, prevSuffix: string = ''): DeltaResult {
+export function getIncrementalDelta(oldStr: string, newStr: string, prevLength: number = 0, prevSuffix: string = '', mode: 'auto' | 'incremental' = 'auto'): DeltaResult {
+  if (mode === 'incremental') {
+    const combined = oldStr + newStr;
+    return { delta: newStr, matchedContent: combined, contentLength: combined.length, contentSuffix: combined.slice(-64) };
+  }
   if (!oldStr) {
     return {
       delta: newStr,
