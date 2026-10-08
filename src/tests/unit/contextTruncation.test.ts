@@ -62,15 +62,12 @@ test('truncateMessages: drops oldest messages first when exceeding context', () 
   assert.ok(lastMsg.content.includes('latest message') || lastMsg.content.includes('[Truncated]'));
 });
 
-test('truncateMessages: returns system prompt as fallback when context is extremely small', () => {
+test('truncateMessages: rejects instructions that leave no conversation budget', () => {
   const messages = [
     { role: 'user', content: 'some content' },
   ];
   const systemPrompt = 'system instructions';
-  const result = truncateMessages(messages, 10, systemPrompt);
-  assert.strictEqual(result.length, 1);
-  assert.strictEqual(result[0].role, 'user');
-  assert.strictEqual(result[0].content, systemPrompt);
+  assert.throws(() => truncateMessages(messages, 10, systemPrompt), /no room/);
 });
 
 test('truncateMessages: handles array content in messages', () => {
@@ -156,8 +153,35 @@ test('truncateMessages: preserves earlier tool memory when truncating history', 
   assert.ok(result.some(m => m.content.includes('old tool result')));
 });
 
-test('truncateMessages: handles empty messages with system prompt fallback', () => {
-  const result = truncateMessages([], 5, 'fallback');
+test('truncateMessages: rejects an insufficient budget without copying instructions into a user message', () => {
+  assert.throws(() => truncateMessages([], 5, 'fallback'), /no room/);
+});
+
+test('truncateMessages: counts tool arguments and drops an older oversized group atomically', () => {
+  const messages = [
+    { role: 'assistant', content: null, tool_calls: [{ id: 'old-large-call', type: 'function', function: { name: 'read', arguments: JSON.stringify({ text: 'large argument fixture '.repeat(3000) }) } }] },
+    { role: 'tool', name: 'read', tool_call_id: 'old-large-call', content: 'OLD_RESULT_SENTINEL' },
+    { role: 'user', content: 'CURRENT_USER_SENTINEL' },
+  ];
+  const result = truncateMessages(messages, 1500);
+  assert.ok(result.some(message => message.content.includes('CURRENT_USER_SENTINEL')));
+  assert.ok(!result.some(message => message.tool_calls?.some(call => call.id === 'old-large-call')));
+  assert.ok(!result.some(message => message.role === 'tool'));
+});
+
+test('truncateMessages: preserves a complete thin tool result whose call is outside client history', () => {
+  const result = truncateMessages([{ role: 'tool', name: 'read', tool_call_id: 'thin-call', content: 'Complete result.' }], 100000);
   assert.strictEqual(result.length, 1);
-  assert.strictEqual(result[0].content, 'fallback');
+  assert.strictEqual(result[0].tool_call_id, 'thin-call');
+  assert.strictEqual(result[0].content, 'Complete result.');
+});
+
+
+test('truncateMessages: bounded earlier memory preserves integer argument literals', () => {
+  const result = truncateMessages([
+    { role: 'assistant', content: null, tool_calls: [{ id: 'memory-int', type: 'function', function: { name: 'read', arguments: '{ "integer": 9007199254740993 }' } }] },
+    { role: 'tool', name: 'read', tool_call_id: 'memory-int', content: 'Completed.' },
+    { role: 'user', content: 'Current long question. '.repeat(3000) },
+  ], 1000);
+  assert.ok(result.some(message => message.content.includes('9007199254740993')));
 });

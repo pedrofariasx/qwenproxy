@@ -1,13 +1,9 @@
 import { getModelTokenDivisor } from '../core/model-registry.js'
 import { countTokens } from '../core/tokenizer.js'
 
-export interface TruncatedMessage {
-  role: string
-  content: string
-  tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string | Record<string, unknown> } }>
-  name?: string
-  tool_call_id?: string
-}
+import { prepareConversationMessage, serializeConversationMessages, ConversationContextError, type ConversationMessage, type PreparedMessage, type SerializationOptions } from './conversation-serialization.js';
+
+export type TruncatedMessage = PreparedMessage;
 
 export function estimateTokenCount(text: string, modelId?: string): number {
   const divisor = getModelTokenDivisor(modelId)
@@ -49,6 +45,7 @@ function summarizeContent(content: string, maxChars = TOOL_MEMORY_ITEM_MAX_CHARS
 }
 
 function stringifyToolArgs(args: unknown): string {
+  if (typeof args === 'string') return summarizeContent(args, 220);
   try {
     return summarizeContent(JSON.stringify(args), 220);
   } catch {
@@ -64,16 +61,7 @@ function buildToolMemory(messages: Array<{ role: string; content: string | null 
     if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
       for (const call of msg.tool_calls) {
         const name = call?.function?.name || call?.name || 'unknown_tool';
-        let args: unknown = {};
-        if (typeof call?.function?.arguments === 'string') {
-          try {
-            args = JSON.parse(call.function.arguments);
-          } catch {
-            args = call.function.arguments;
-          }
-        } else if (call?.function?.arguments !== undefined) {
-          args = call.function.arguments;
-        }
+        const args: unknown = call?.function?.arguments ?? {};
         lines.push(`- call ${call.id || 'unknown'}: ${name}(${stringifyToolArgs(args)})`);
         if (lines.length >= TOOL_MEMORY_MAX_ITEMS) return lines.join('\n');
       }
@@ -94,146 +82,97 @@ function buildToolMemory(messages: Array<{ role: string; content: string | null 
   return lines.join('\n');
 }
 
-function stringifyContent(content: string | null | any[] | Record<string, unknown>): string {
-  if (Array.isArray(content)) {
-    return content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
-  }
-  if (typeof content === 'object' && content !== null) {
-    return JSON.stringify(content);
-  }
-  return content || '';
-}
-
 interface MessageGroup {
-  messages: Array<{ role: string; content: string; tool_calls?: any[]; name?: string; tool_call_id?: string }>;
+  messages: PreparedMessage[];
   totalTokens: number;
+  endIndex: number;
+  atomic: boolean;
 }
 
-function buildAtomicGroups(
-  normalized: Array<{ role: string; content: string; tool_calls?: any[]; name?: string; tool_call_id?: string }>,
-  modelId?: string
-): MessageGroup[] {
+function buildAtomicGroups(normalized: PreparedMessage[], modelId?: string, options?: SerializationOptions): MessageGroup[] {
   const groups: MessageGroup[] = [];
-  let i = 0;
-
-  while (i < normalized.length) {
-    const msg = normalized[i];
-
-    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-      const groupMsgs = [msg];
-      let tokens = estimateTokenCount(msg.content, modelId);
-      i++;
-
-      while (i < normalized.length && (normalized[i].role === 'tool' || normalized[i].role === 'function')) {
-        groupMsgs.push(normalized[i]);
-        tokens += estimateTokenCount(normalized[i].content, modelId);
-        i++;
-      }
-
-      groups.push({ messages: groupMsgs, totalTokens: tokens });
-    } else if (msg.role === 'tool' || msg.role === 'function') {
-      const groupMsgs = [msg];
-      let tokens = estimateTokenCount(msg.content, modelId);
-      i++;
-
-      while (i < normalized.length && (normalized[i].role === 'tool' || normalized[i].role === 'function')) {
-        groupMsgs.push(normalized[i]);
-        tokens += estimateTokenCount(normalized[i].content, modelId);
-        i++;
-      }
-
-      groups.push({ messages: groupMsgs, totalTokens: tokens });
-    } else {
-      groups.push({ messages: [msg], totalTokens: estimateTokenCount(msg.content, modelId) });
-      i++;
+  for (let i = 0; i < normalized.length; i++) {
+    const message = normalized[i];
+    const messages = [message];
+    if (message.tool_calls?.length || message.role === 'tool' || message.role === 'function') {
+      while (i + 1 < normalized.length && ['tool', 'function'].includes(normalized[i + 1].role)) messages.push(normalized[++i]);
     }
+    groups.push({ messages, endIndex: i, totalTokens: estimateTokenCount(serializeConversationMessages(messages, options), modelId),
+      atomic: messages.some(item => item.tool_calls?.length || item.media?.length || item.role === 'tool' || item.role === 'function') });
   }
-
   return groups;
 }
 
-export function truncateMessages(
-  messages: Array<{ role: string; content: string | null | any[] | Record<string, unknown>; tool_calls?: any[]; name?: string; tool_call_id?: string }>,
-  maxContextLength: number,
-  systemPrompt: string = '',
-  modelId?: string
-): TruncatedMessage[] {
-  const divisor = getModelTokenDivisor(modelId)
-  const systemTokens = estimateTokenCount(systemPrompt, modelId);
-  const availableTokens = maxContextLength - systemTokens - 500;
-  
-  if (availableTokens <= 0) {
-    return [{ role: 'user', content: systemPrompt }];
+function fitPlainMessage(message: PreparedMessage, budget: number, modelId?: string, options?: SerializationOptions): PreparedMessage | undefined {
+  let low = 0;
+  let high = message.content.length;
+  let best: PreparedMessage | undefined;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = { ...message, content: `[Truncated] ${truncateSemantically(message.content, middle)}` };
+    if (estimateTokenCount(serializeConversationMessages([candidate], options), modelId) <= budget) {
+      best = candidate;
+      low = middle + 1;
+    } else high = middle - 1;
   }
-  
-  const normalizedMessages = messages.map(msg => {
-    const contentStr = stringifyContent(msg.content);
-    return {
-      role: msg.role,
-      content: contentStr,
-      tool_calls: msg.tool_calls,
-      name: msg.name,
-      tool_call_id: msg.tool_call_id,
-    };
-  });
+  return best;
+}
 
-  const groups = buildAtomicGroups(normalizedMessages, modelId);
-
-  const keptGroups: MessageGroup[] = [];
+export function truncateMessages(
+  messages: ConversationMessage[],
+  maxContextLength: number,
+  systemPrompt = '',
+  modelId?: string,
+  options?: SerializationOptions,
+): TruncatedMessage[] {
+  const availableTokens = maxContextLength - estimateTokenCount(systemPrompt, modelId) - 500;
+  if (availableTokens <= 0) throw new ConversationContextError('Instructions leave no room for the current conversation');
+  const normalized = messages.map(message => ({ ...prepareConversationMessage(message), ...(message.media ? { media: message.media } : {}) }));
+  const groups = buildAtomicGroups(normalized, modelId, options);
+  if (!groups.length) return [];
+  const latest = groups[groups.length - 1];
+  if (latest.atomic && latest.totalTokens > availableTokens) {
+    throw new ConversationContextError('The current tool or media group does not fit the model context window');
+  }
+  const totalTokens = groups.reduce((sum, group) => sum + group.totalTokens, 0);
+  let memoryReserve = totalTokens > availableTokens && groups.slice(0, -1).some(group =>
+    group.messages.some(message => message.tool_calls?.length || ['tool', 'function'].includes(message.role)))
+    ? Math.min(256, Math.floor(availableTokens / 4)) : 0;
+  if (latest.totalTokens <= availableTokens) memoryReserve = Math.min(memoryReserve, availableTokens - latest.totalTokens);
+  const bodyBudget = availableTokens - memoryReserve;
+  const kept: MessageGroup[] = [];
   let usedTokens = 0;
-  let droppedToolMemory = '';
-
+  let droppedThrough = -1;
   for (let i = groups.length - 1; i >= 0; i--) {
     const group = groups[i];
-
-    if (usedTokens + group.totalTokens <= availableTokens) {
-      keptGroups.push(group);
+    if (usedTokens + group.totalTokens <= bodyBudget) {
+      kept.push(group);
       usedTokens += group.totalTokens;
     } else {
-      const remainingTokens = availableTokens - usedTokens;
-      if (remainingTokens > 100) {
-        const maxChars = Math.floor(remainingTokens * divisor);
-        const lastMsg = group.messages[group.messages.length - 1];
-        const truncatedContent = truncateSemantically(lastMsg.content, maxChars);
-        keptGroups.push({
-          messages: [{ ...lastMsg, content: `[Truncated] ${truncatedContent}` }],
-          totalTokens: remainingTokens,
-        });
+      const remaining = bodyBudget - usedTokens;
+      if (!group.atomic && remaining > 0) {
+        const partial = fitPlainMessage(group.messages[0], remaining, modelId, options);
+        if (partial) kept.push({ ...group, messages: [partial] });
       }
-      const cutoffIndex = groups.slice(0, i).reduce((sum, g) => sum + g.messages.length, 0);
-      droppedToolMemory = buildToolMemory(normalizedMessages, cutoffIndex);
+      droppedThrough = group.endIndex;
       break;
     }
   }
-
-  if (keptGroups.length === 0 && normalizedMessages.length > 0) {
-    const lastMsg = normalizedMessages[normalizedMessages.length - 1];
-    const maxChars = Math.max(200, Math.floor(availableTokens * divisor));
-    const truncatedContent = truncateSemantically(lastMsg.content, maxChars);
-    keptGroups.push({
-      messages: [{ ...lastMsg, content: `[Truncated] ${truncatedContent}` }],
-      totalTokens: availableTokens,
-    });
+  const knownCalls = new Set(normalized.flatMap(message => message.tool_calls?.flatMap(call => call.id ? [call.id] : []) ?? []));
+  const retained = kept.reverse().flatMap(group => group.messages);
+  const retainedCalls = new Set(retained.flatMap(message => message.tool_calls?.flatMap(call => call.id ? [call.id] : []) ?? []));
+  const result = retained.filter(message => !(['tool', 'function'].includes(message.role) && message.tool_call_id &&
+    knownCalls.has(message.tool_call_id) && !retainedCalls.has(message.tool_call_id)));
+  if (!result.length || (latest.atomic && !result.includes(normalized[normalized.length - 1]))) {
+    throw new ConversationContextError('The current conversation cannot be retained as a complete group');
   }
-
-  const keptMessages = keptGroups.reverse().flatMap(g => g.messages);
-
-  const keptToolCallIds = new Set<string>();
-  for (const msg of keptMessages) {
-    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
-      for (const tc of msg.tool_calls) {
-        if (tc.id) keptToolCallIds.add(tc.id);
-      }
-    }
+  const memory = droppedThrough < 0 ? '' : buildToolMemory(normalized, droppedThrough + 1);
+  const spare = Math.min(256, availableTokens - estimateTokenCount(serializeConversationMessages(result, options), modelId));
+  if (memory && spare > 0) {
+    const message = { role: 'user', content: `[Earlier tool memory]\n${memory}` };
+    const summary = estimateTokenCount(serializeConversationMessages([message]), modelId) <= spare ? message
+      : fitPlainMessage(message, spare, modelId);
+    if (summary) result.unshift(summary);
   }
-
-  const result = keptMessages.filter(msg => {
-    if (msg.role === 'tool' || msg.role === 'function') {
-      if (msg.tool_call_id && !keptToolCallIds.has(msg.tool_call_id)) return false;
-    }
-    return true;
-  });
-
-  if (!droppedToolMemory) return result;
-  return [{ role: 'user', content: `[Earlier tool memory]\n${droppedToolMemory}` }, ...result];
+  return result;
 }

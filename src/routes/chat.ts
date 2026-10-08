@@ -5,6 +5,7 @@ import { recordAccountBlock, requiresCrossAccountBootstrap, noteAccountRecovery 
 import type { OpenAIRequest } from '../utils/types.js';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.js';
+import { prepareConversationMessage, serializeConversationMessages, ConversationContextError } from '../utils/conversation-serialization.js';
 import { OVERLOAD_COOLDOWN_MS } from '../utils/overload-detector.js';
 import { getNextAccount, getNextAvailableAccount, getAccountById, onAccountFreed, getAccountCooldownInfo, markAccountInUse, releaseAccountInUse, getInUseAccounts } from '../core/account-manager.js';
 import { loadAccounts } from '../core/accounts.js';
@@ -47,7 +48,7 @@ import { handleStreamingResponse, collectNonStreamingResult } from './stream-han
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
 import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams } from '../core/user-manager.js';
 import { getRuntimeBool } from '../core/runtime-config.js';
-import { TOOL_CALL_OPEN, TOOL_CALL_CLOSE, wrapToolCallPayload } from '../tools/toolcall-tags.js';
+import { TOOL_CALL_OPEN, TOOL_CALL_CLOSE } from '../tools/toolcall-tags.js';
 import type { UserIdentity } from '../core/user-manager.js';
 import { trackUsage, trackModelUsage } from '../core/usage-tracker.js';
 
@@ -200,15 +201,12 @@ export async function chatCompletions(c: Context) {
       }
     }
     
-    let prompt = '';
     const messages = body.messages || [];
-    let systemPrompt = '';
-    // Accumulate into arrays and join once at the end. For long conversations this
-    // avoids repeated O(n) string reallocation on every `+=`.
-    const promptParts: string[] = [];
-    const systemPromptParts: string[] = [];
-    const pendingMultimodal: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>> = [];
-
+    const prepared = messages.map(prepareConversationMessage);
+    const instructionMessages = prepared.filter(message => message.role === 'system' || message.role === 'developer');
+    const conversationMessages = prepared.filter(message => message.role !== 'system' && message.role !== 'developer');
+    const hasMultimodalInput = prepared.some(message => message.media?.length);
+    let systemPrompt = serializeConversationMessages(instructionMessages);
     const toolCallIdToName = new Map<string, string>();
     // Resolve the session's chat id early so the tool_response replay below can
     // fall back to the emitted-tool registry when the client omits the original
@@ -230,74 +228,9 @@ export async function chatCompletions(c: Context) {
       }
     }
 
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      let contentStr = '';
-      if (Array.isArray(msg.content)) {
-        const textParts: string[] = [];
-        const multimodalParts: Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }> = [];
-        
-        for (const p of msg.content as any[]) {
-          if (p.type === "text" && p.text) {
-            textParts.push(p.text);
-          } else if (
-            (p.type === "image_url" && p.image_url?.url) ||
-            (p.type === "video_url" && p.video_url?.url) ||
-            (p.type === "audio_url" && p.audio_url?.url) ||
-            (p.type === "file_url" && p.file_url?.url)
-          ) {
-            multimodalParts.push(p);
-          }
-        }
-        
-        contentStr = textParts.join("\n");
-        if (multimodalParts.length > 0) {
-          pendingMultimodal.push(multimodalParts);
-        }
-      } else if (typeof msg.content === 'object' && msg.content !== null) {
-        contentStr = JSON.stringify(msg.content);
-      } else {
-        contentStr = msg.content || '';
-      }
-
-      if (msg.role === 'system') {
-        systemPromptParts.push((contentStr || '') + '\n');
-      } else if (msg.role === 'user') {
-        lastUserContent = contentStr || '';
-        promptParts.push(`User: ${contentStr || ''}\n`);
-      } else if (msg.role === 'assistant') {
-        let assistantContent = contentStr || '';
-        if (msg.tool_calls && Array.isArray(msg.tool_calls)) {
-           for (const tc of msg.tool_calls) {
-             const args = tc.function?.arguments;
-             let parsedArgs: any = {};
-             if (typeof args === 'string') {
-               try { parsedArgs = JSON.parse(args); }
-               catch { parsedArgs = args; } // keep the raw string: better than losing the tool call details
-             } else if (args && typeof args === 'object') {
-               parsedArgs = args;
-             }
-              const payload = { name: tc.function?.name, arguments: parsedArgs };
-              const toolCallStr = wrapToolCallPayload(JSON.stringify(payload));
-              assistantContent = assistantContent ? assistantContent + '\n' + toolCallStr : toolCallStr;
-           }
-        }
-        promptParts.push(`Assistant: ${assistantContent.trim()}\n`);
-      } else if (msg.role === 'tool' || msg.role === 'function') {
-        let toolName = msg.name;
-        if (!toolName && msg.tool_call_id) {
-          toolName = toolCallIdToName.get(msg.tool_call_id);
-          if (!toolName) {
-            const rec = sessionChatId ? lookupToolCall(sessionChatId, msg.tool_call_id) : undefined;
-            if (rec) toolName = rec.name;
-          }
-        }
-        promptParts.push(`Tool Response (${toolName || 'tool'}): ${contentStr || ''}\n`);
-      }
-    }
-
-    systemPrompt = systemPromptParts.length ? systemPromptParts.join('\n') + '\n' : '';
-    prompt = promptParts.length ? promptParts.join('\n') + '\n' : '';
+    const serializationOptions = { resolveToolName: (id: string) => toolCallIdToName.get(id) || (sessionChatId ? lookupToolCall(sessionChatId, id)?.name : undefined) };
+    const prompt = serializeConversationMessages(conversationMessages, serializationOptions);
+    lastUserContent = [...conversationMessages].reverse().find(message => message.role === 'user')?.content || '';
 
     const bodyAny = body as any;
     const hasTools = Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0;
@@ -344,32 +277,35 @@ export async function chatCompletions(c: Context) {
     usageInputText = inputText;
     usageModel = modelId;
     const modelContextWindow = getModelContextWindow(modelId)
-    const estimatedTokens = estimateTokenCount(inputText, modelId);
     const forcedToolName = getForcedToolName(bodyAny.tool_choice);
     const parallelToolCalls = bodyAny.parallel_tool_calls !== false && toolChoiceMode !== 'forced';
     const toolContextText = `${systemPrompt}\n${prompt}`;
     const recentToolNames = hasTools ? getRecentToolNames(messages) : new Set<string>();
     const candidateTools = hasTools ? selectCandidateTools(bodyAny.tools, toolContextText, forcedToolName, recentToolNames) : [];
     
-    let finalPrompt: string;
-    if (estimatedTokens > modelContextWindow - 1000) {
-      const truncated = truncateMessages(messages, modelContextWindow, systemPrompt, modelId);
-      const truncatedBody = truncated.map(m => `${m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : m.role}: ${m.content}`).join('\n\n');
-      finalPrompt = systemPrompt ? `${systemPrompt}\n\n${truncatedBody}` : truncatedBody;
-    } else {
-      finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
-    }
-
+    let toolSuffix = '';
     if (hasTools && toolChoiceMode === 'none') {
-      finalPrompt += '\n\n[TOOL USE DISABLED]\nDo not call tools in this response. Answer directly using available context.';
+      toolSuffix += '\n\n[TOOL USE DISABLED]\nDo not call tools in this response. Answer directly using available context.';
     }
 
     if (hasTools && toolChoiceMode !== 'none') {
       const compactManifest = buildCompactToolManifest(candidateTools, forcedToolName);
       const toolContract = buildToolCallContract(candidateTools, forcedToolName, parallelToolCalls);
-      finalPrompt += `\n\n${toolContract}`;
-      if (compactManifest) finalPrompt += `\n\n${compactManifest}`;
+      toolSuffix += `\n\n${toolContract}`;
+      if (compactManifest) toolSuffix += `\n\n${compactManifest}`;
     }
+
+    let retainedMessages = conversationMessages;
+    const estimatedTokens = estimateTokenCount(`${systemPrompt}\n${prompt}${toolSuffix}`, modelId);
+    if (conversationMessages.length && estimatedTokens > modelContextWindow - 1000) {
+      retainedMessages = truncateMessages(conversationMessages, modelContextWindow, systemPrompt + toolSuffix, modelId, serializationOptions);
+    }
+    const retainedPrompt = serializeConversationMessages(retainedMessages, serializationOptions);
+    const finalPrompt = [systemPrompt, retainedPrompt].filter(Boolean).join('\n\n') + toolSuffix;
+    if ((!retainedMessages.length && conversationMessages.length > 0) || !finalPrompt.trim() || estimateTokenCount(finalPrompt, modelId) > modelContextWindow) {
+      throw new ConversationContextError('The current conversation or tool group does not fit the model context window');
+    }
+    const pendingMultimodal = retainedMessages.flatMap(message => message.media?.length ? [message.media] : []);
 
     const isThinkingModel = body.reasoning_effort !== undefined
       ? body.reasoning_effort !== 'none'
@@ -402,7 +338,7 @@ export async function chatCompletions(c: Context) {
     let canEconomize = !!(
       session?.historyComplete &&
       session.accountId !== 'guest' &&
-      pendingMultimodal.length === 0 &&
+      !hasMultimodalInput &&
       (
         (lastMsg?.role === 'user' && !!lastUserContent) ||
         isToolResultTurn
