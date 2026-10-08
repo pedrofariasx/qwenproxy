@@ -3,7 +3,7 @@ import { chromium, firefox, webkit } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import type { QwenAccount } from '../core/accounts.js';
+import { getAccountCredentials, type QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
 import { markAccountNotReady } from '../core/account-manager.js';
@@ -279,6 +279,7 @@ export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'):
     args: launchArgs,
   });
   browser.on('disconnected', () => {
+    const closedAccountIds = [...accountPages.keys()];
     browser = null;
     accountContexts.clear();
     accountPages.clear();
@@ -289,7 +290,7 @@ export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'):
     activePage = null;
     guestContext = null;
     guestPage = null;
-    for (const id of [...accountPages.keys(), '_default', 'guest']) {
+    for (const id of [...closedAccountIds, '_default', 'guest']) {
       markAccountNotReady(id);
     }
   });
@@ -299,6 +300,10 @@ export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'):
 export class Mutex {
   private queue: (() => void)[] = [];
   private locked = false;
+
+  isLocked(): boolean {
+    return this.locked;
+  }
 
   async acquire(): Promise<() => void> {
     if (!this.locked) {
@@ -355,6 +360,37 @@ async function checkValidSession(): Promise<boolean> {
   }
 }
 
+async function confirmAccountSession(page: Page, email: string): Promise<void> {
+  await page.waitForFunction(() => {
+    const token = localStorage.getItem('token');
+    if (!token) return false;
+    try {
+      const claims = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      return claims.type === 'access_token' && claims.exp * 1000 > Date.now() + 30000;
+    } catch {
+      return false;
+    }
+  }, undefined, { timeout: config.timeouts.page });
+  const authenticated = page.waitForResponse(async response => {
+    const url = new URL(response.url());
+    if (url.hostname !== 'auth.qwen.ai' || !/^\/api\/v2\/auths\/?$/.test(url.pathname) || !response.ok()) {
+      return false;
+    }
+    try {
+      const payload = await response.json();
+      return payload.success === true && Boolean(payload.data?.id) &&
+        payload.data?.email?.toLowerCase() === email.toLowerCase();
+    } catch {
+      return false;
+    }
+  }, { timeout: config.timeouts.page });
+  const checked = Promise.all([
+    page.reload({ waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation }),
+    authenticated,
+  ]);
+  await checked;
+}
+
 async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
   await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
 
@@ -380,16 +416,40 @@ async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Pag
     }
   }, { email, password: hashedPassword });
 
-  if (result.ok) {
-    await acctPage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
-    const isLogged = !(acctPage.url().includes('auth') || acctPage.url().includes('login'));
-    if (isLogged) {
+  const session = result.data?.data ?? result.data;
+  if (result.ok && result.data?.success !== false && typeof session?.token === 'string' && session.token) {
+    const expiry = Number(session.expires_at);
+    const expiresAt = Number.isFinite(expiry) && expiry > 0
+      ? (expiry < 1e12 ? expiry * 1000 : expiry)
+      : 0;
+    await acctPage.evaluate(({ token, expiresAt }) => {
+      localStorage.setItem('token', token);
+      if (expiresAt > 0) {
+        localStorage.setItem('at_expire_time', String(expiresAt));
+        localStorage.setItem('qwen_access_token_state', JSON.stringify({
+          version: 1,
+          stateId: crypto.randomUUID(),
+          token,
+          expiresAt,
+          updatedAt: Date.now(),
+          sourceId: crypto.randomUUID(),
+        }));
+      }
+      localStorage.removeItem('qwen_token_logged_out_marker');
+      localStorage.removeItem('qwen_token_session_marker');
+    }, { token: session.token, expiresAt });
+    try {
+      await acctPage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });
+      await confirmAccountSession(acctPage, email);
       console.log(`[Playwright] Login confirmed for ${email}.`);
       return true;
+    } catch {
+      console.error(`[Playwright] Qwen did not confirm the browser session for ${email}.`);
+      return false;
     }
   }
 
-  console.error(`[Playwright] Login failed for ${email}:`, result.data || result.error);
+  console.error(`[Playwright] Login failed for ${email}:`, result.error || session?.code || 'Authentication rejected');
   return false;
 }
 
@@ -597,8 +657,19 @@ export async function dismissAgeModal(page: Page): Promise<void> {
 }
 
 export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = 'chromium') {
+  const priorContext = accountContexts.get(account.id);
+  if (priorContext) {
+    await priorContext.close().catch(() => {});
+    accountContexts.delete(account.id);
+    accountPages.delete(account.id);
+    accountHeaderCaches.delete(account.id);
+    cookieCaches.delete(account.id);
+    cachedUserAgents.delete(account.id);
+    markAccountNotReady(account.id);
+  }
   const sharedBrowser = await getOrLaunchBrowser(browserType);
   const baseAccountId = getBaseAccountId(account.id);
+  const loginAccount = getAccountCredentials(baseAccountId) ?? account;
 
   console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
 
@@ -617,29 +688,47 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   touchAccountActivity(account.id);
 
   const hasAuth = await hasValidAuthCookie(acctPage);
+  const savedState = await acctContext.storageState();
+  const hasBrowserToken = savedState.origins.some(origin =>
+    origin.origin === 'https://chat.qwen.ai' &&
+    origin.localStorage.some(item => {
+      if (item.name !== 'token' || !item.value.trim()) return false;
+      try {
+        const claims = JSON.parse(Buffer.from(item.value.split('.')[1], 'base64url').toString());
+        return claims.type === 'access_token' && claims.exp * 1000 > Date.now() + 30000;
+      } catch {
+        return false;
+      }
+    })
+  );
 
-  if (!hasAuth && account.email && account.password) {
-    await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
+  if ((!hasAuth || !hasBrowserToken) && loginAccount.email && loginAccount.password) {
+    if (!await loginToQwenWithContext(acctContext, acctPage, loginAccount.email, loginAccount.password)) {
+      throw new Error('Qwen rejected account login');
+    }
   }
 
   try {
     await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
     await dismissAgeModal(acctPage);
-    const url = acctPage.url();
-    if (url.includes('auth') || url.includes('login')) {
-      if (account.email && account.password) {
+    try {
+      await confirmAccountSession(acctPage, loginAccount.email);
+    } catch {
+      if (loginAccount.email && loginAccount.password) {
         console.log(`[Playwright] Session expired for ${account.email}, re-logging in...`);
-        await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
+        if (!await loginToQwenWithContext(acctContext, acctPage, loginAccount.email, loginAccount.password)) {
+          throw new Error('Qwen rejected account login');
+        }
         await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
         await dismissAgeModal(acctPage);
       } else {
-        console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
+        throw new Error('Qwen session is unavailable and no login credentials were provided');
       }
-    } else {
-      console.log(`[Playwright] Session validated for ${account.email}.`);
     }
+    console.log(`[Playwright] Session validated for ${account.email}.`);
   } catch (err: any) {
     console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
+    throw err;
   }
 
   if (await hasValidAuthCookie(acctPage)) {

@@ -1,15 +1,52 @@
 import type { Page } from 'playwright';
-import { accountPages, getPageForAccount, sleep } from './browser-manager.js';
+import { accountPages, getPageForAccount, getUiMutex, getBrowser, sleep } from './browser-manager.js';
 import { humanMouseMove, humanScroll, humanDelay } from './human-behavior.js';
 import { config } from '../core/config.js';
 import { isMouseLocked } from './mouse-lock.js';
+import { getAccountCredentials } from '../core/accounts.js';
+import type { QwenAccount } from '../core/accounts.js';
+import { getAccountCooldownInfo, isAccountReady, getReadyAccountCount, getInUseAccounts, getAccountsWithCooldownSync, getAccountActiveLoad } from '../core/account-manager.js';
+import { getBaseAccountId } from '../core/account-lanes.js';
 
 const KEEP_ALIVE_INTERVAL_MS = 3 * 60 * 1000;
 const NAVIGATION_INTERVAL_MS = 8 * 60 * 1000;
 
 let running = false;
+let recoveryInterval: ReturnType<typeof setInterval> | null = null;
+let recoveryInProgress = false;
 let intervalId: ReturnType<typeof setInterval> | null = null;
 const lastNavigation = new Map<string, number>();
+
+export async function recoverUnreadyAccounts(
+  prepare: (account: QwenAccount) => Promise<void> = async account => {
+    const { initPlaywrightForAccount } = await import('./browser-manager.js');
+    const { getQwenHeaders } = await import('./header-interceptor.js');
+    const credentials = getAccountCredentials(getBaseAccountId(account.id));
+    if (!credentials) return;
+    await initPlaywrightForAccount({ ...credentials, id: account.id }, config.browser.headless, config.browser.type);
+    await getQwenHeaders(true, account.id);
+  },
+): Promise<void> {
+  if (recoveryInProgress || isMouseLocked()) return;
+  recoveryInProgress = true;
+  try {
+    for (const account of getAccountsWithCooldownSync()) {
+      if (isAccountReady(account.id) || getInUseAccounts().includes(account.id) || getAccountActiveLoad(account.id) > 0 || getAccountCooldownInfo(account.id) || getUiMutex(account.id).isLocked()) continue;
+      try {
+        await prepare(account);
+      } catch (error) {
+        console.warn(`[SessionKeeper] Account ${account.id} is not ready; recovery will retry: ${(error as Error).message}`);
+        if (/ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_NETWORK_CHANGED|EAI_AGAIN/.test((error as Error).message) &&
+            getReadyAccountCount() === 0 && getInUseAccounts().length === 0 &&
+            getAccountsWithCooldownSync().every(entry => getAccountActiveLoad(entry.id) === 0 && !getUiMutex(entry.id).isLocked())) {
+          await getBrowser()?.close().catch(() => {});
+        }
+      }
+    }
+  } finally {
+    recoveryInProgress = false;
+  }
+}
 
 async function performKeepAlive(accountId: string, page: Page): Promise<void> {
   if (page.isClosed()) return;
@@ -67,6 +104,10 @@ export function startSessionKeeper(): void {
 
   if (running) return;
   running = true;
+  recoveryInterval = setInterval(() => {
+    if (running) recoverUnreadyAccounts().catch(error => console.warn('[SessionKeeper] Recovery failed:', error.message));
+  }, 30000);
+  recoveryInterval.unref();
 
   intervalId = setInterval(async () => {
     if (!running) return;
@@ -101,6 +142,10 @@ export function startSessionKeeper(): void {
 
 export function stopSessionKeeper(): void {
   running = false;
+  if (recoveryInterval) {
+    clearInterval(recoveryInterval);
+    recoveryInterval = null;
+  }
   if (intervalId) {
     clearInterval(intervalId);
     intervalId = null;

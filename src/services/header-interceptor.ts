@@ -148,7 +148,7 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
 
       const routeHandler = async (route: any, request: any) => {
         clearTimeout(timeout);
-        const reqHeaders = request.headers();
+        const reqHeaders = await request.allHeaders();
         console.log('[Playwright] Guest intercepted request:', request.url());
 
         const extractedHeaders = {
@@ -439,7 +439,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
 
       console.log(`[Playwright] Setting up route interception for ${cacheKey}...`);
       const routeHandler = async (route: any, request: any) => {
-        const reqHeaders = request.headers();
+        const reqHeaders = await request.allHeaders();
         let uiSessionId = '';
         let uiParentMessageId: string | null = null;
 
@@ -466,7 +466,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
         };
 
         if (!extractedHeaders.cookie || !extractedHeaders['bx-ua']) {
-          console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}, skipping...`);
+          console.log(`[Playwright] Intercepted request missing critical headers for ${cacheKey}: cookie=${Boolean(extractedHeaders.cookie)}, bx-ua=${Boolean(extractedHeaders['bx-ua'])}; skipping...`);
           await route.continue().catch(() => {});
           return;
         }

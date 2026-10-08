@@ -36,7 +36,7 @@ function expandSingleAccountLanes(accounts: QwenAccount[]): QwenAccount[] {
   }))
 }
 
-function getAccountsWithCooldownSync(): QwenAccount[] {
+export function getAccountsWithCooldownSync(): QwenAccount[] {
   const accounts = expandSingleAccountLanes(loadAccounts())
   const now = Date.now()
 

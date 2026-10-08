@@ -1,17 +1,22 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 process.env.HYBRID_SESSION_VERIFY = 'true';
 process.env.USER_API_KEYS = 'sk-user-a:userOne,sk-user-b:userTwo';
 delete process.env.API_KEY;
 
+const originalCwd = process.cwd();
+const testDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwenproxy-multi-user-'));
+process.chdir(testDirectory);
+
 const { app } = await import('../../api/server.js');
 const { resetAllSessions } = await import('../../services/session-manager.js');
 const { addAccount } = await import('../../core/accounts.js');
-
-try { addAccount('test-mu-1@test.com', 'pass1', 'mu-test-account-1'); } catch { /* exists */ }
-try { addAccount('test-mu-2@test.com', 'pass2', 'mu-test-account-2'); } catch { /* exists */ }
+const { closeDatabase } = await import('../../core/database.js');
 const {
   resolveUserFromAuthHeader,
   checkUserRateLimit,
@@ -19,6 +24,15 @@ const {
   releaseUserSlot,
   getUserActiveStreams,
 } = await import('../../core/user-manager.js');
+
+addAccount('multi-user-one@example.test', 'fixture-password', 'mu-test-account-1');
+addAccount('multi-user-two@example.test', 'fixture-password', 'mu-test-account-2');
+
+after(() => {
+  closeDatabase();
+  process.chdir(originalCwd);
+  fs.rmSync(testDirectory, { recursive: true, force: true });
+});
 
 function setupFetchMock(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
   const originalFetch = globalThis.fetch;
