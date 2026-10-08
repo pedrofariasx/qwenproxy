@@ -97,7 +97,7 @@ test('non-streaming quota becomes 429 and invalidates completed pinned history',
   assert.equal(getSession('quota-history')?.historyComplete, false);
   assert.equal(getStream(id), undefined);
 });
-test('streaming quota fragments are hidden, rotation preserves cache usage and emits DONE once', async () => {
+test('streaming quota fragments are hidden and rotation emits DONE once', async () => {
   const seen: string[] = [];
   const result = await streamResult(["You've reached ", "today's chat limit. ", 'Try again tomorrow.'], {
     onDailyQuota: async (accountId: string) => { seen.push(accountId); register('quota-helper', accounts[1].id); return { stream: upstream(ordinary, 'replacement', 128), uiSessionId: 'replacement-chat' }; },
@@ -207,7 +207,7 @@ test('quota during streaming continuation preserves prior output and forbids rep
   } finally { config.autoContinue.enabled = previous; }
 });
 
-test('quota in a different response is ignored and cannot overwrite selected cache usage', async () => {
+test('quota in a different response is ignored without rotating the selected account', async () => {
   const chunks = [
     { 'response.created': { response_id: 'selected' } },
     { response_id: 'other', choices: [{ delta: { phase: 'answer', content: english } }], usage: { input_tokens: 999, prompt_tokens_details: { cached_tokens: 999 } } },
