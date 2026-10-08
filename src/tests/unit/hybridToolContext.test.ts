@@ -47,7 +47,7 @@ async function forwardedToolCycle(messages: FixtureMessage[], systems: string[] 
     const responseId = `context-parent-${captured.length}`;
     return new Response([
       `data: ${JSON.stringify({ 'response.created': { response_id: responseId } })}\n\n`,
-      `data: ${JSON.stringify({ choices: [{ delta: { content: 'Fixture response completed.', phase: 'answer' } }] })}\n\n`,
+      `data: ${JSON.stringify({ response_id: responseId, choices: [{ delta: { content: 'Fixture response completed.', phase: 'answer' } }] })}\n\n`,
       'data: [DONE]\n\n',
     ].join(''), { status: 200 });
   };
@@ -64,7 +64,8 @@ async function forwardedToolCycle(messages: FixtureMessage[], systems: string[] 
         body: JSON.stringify({ model: 'qwen3.7-plus', user: 'context-fixture-session', messages: [{ role: 'system', content: systems[index] }, ...turn], tools: toolsets[index] }),
       }));
       assert.equal(response.status, 200, await response.clone().text());
-      await response.text();
+      const completion = await response.json();
+      assert.equal(completion.choices[0].message.content, 'Fixture response completed.');
     }
     assert.equal(captured.length, 2);
     const changed = systems[0] !== systems[1] || JSON.stringify(toolsets[0]) !== JSON.stringify(toolsets[1]);
