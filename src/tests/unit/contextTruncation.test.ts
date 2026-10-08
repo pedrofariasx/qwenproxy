@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { estimateTokenCount, truncateMessages } from '../../utils/context-truncation.js';
+import { getModelContextWindow } from '../../core/model-registry.js';
+
+test('configured Qwen web models keep their declared one-million-token window before catalog discovery', () => {
+  for (const model of ['qwen3.7-max', 'qwen3.7-plus', 'qwen3.8-max', 'qwen3.8-omni-flash']) {
+    assert.strictEqual(getModelContextWindow(model), 1000000);
+  }
+});
 
 test('estimateTokenCount: returns 0 for empty string', () => {
   assert.strictEqual(estimateTokenCount(''), 0);

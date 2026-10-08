@@ -122,11 +122,8 @@ function buildRecentToolContext(
   while (i >= 0 && messages[i].role === 'user') i--;
 
   const toolTurns: string[] = [];
-  const MAX_TOOL_TURNS = 6;
-  const MAX_ARG_CHARS = 400;
-  const MAX_RESPONSE_CHARS = 600;
 
-  for (; i >= 0 && toolTurns.length < MAX_TOOL_TURNS * 2; i--) {
+  for (; i >= 0; i--) {
     const msg = messages[i];
     // A user message below the trailing tail marks the start of the cycle.
     if (msg.role === 'user') break;
@@ -139,23 +136,16 @@ function buildRecentToolContext(
         if (typeof argsStr !== 'string') {
           try { argsStr = JSON.stringify(argsStr); } catch { argsStr = ''; }
         }
-        if (argsStr.length > MAX_ARG_CHARS) argsStr = argsStr.slice(0, MAX_ARG_CHARS) + '...[truncated]';
         toolTurns.unshift(`  [call] ${name}(${argsStr})`);
       }
       const assistantText = (typeof msg.content === 'string' ? msg.content : '').trim();
       if (assistantText) {
-        const truncated = assistantText.length > MAX_RESPONSE_CHARS
-          ? assistantText.slice(assistantText.length - MAX_RESPONSE_CHARS) + '...[truncated]'
-          : assistantText;
-        toolTurns.unshift(`  [assistant] ${truncated}`);
+        toolTurns.unshift(`  [assistant] ${assistantText}`);
       }
     } else if (msg.role === 'tool' || msg.role === 'function') {
       const name = msg.name || idToName.get(msg.tool_call_id || '') || 'tool';
       const contentStr = (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)) || '';
-      const truncated = contentStr.length > MAX_RESPONSE_CHARS
-        ? contentStr.slice(0, MAX_RESPONSE_CHARS) + '...[truncated]'
-        : contentStr;
-      toolTurns.unshift(`  [tool_response ${name}] ${truncated}`);
+      toolTurns.unshift(`  [tool_response ${name}] ${contentStr}`);
     }
   }
 
@@ -380,6 +370,7 @@ export async function chatCompletions(c: Context) {
       : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
     const sessionKey = rawSessionKey ? (resolveSessionKey(rawSessionKey) ?? rawSessionKey) : undefined;
     const session = sessionKey ? getSession(sessionKey) : undefined;
+    const instructionsHash = crypto.createHash('sha256').update(JSON.stringify({ modelId, systemPrompt, toolChoice: bodyAny.tool_choice ?? 'auto' })).digest('hex');
     const lastMsg = messages[messages.length - 1];
     // Economical mode sends only the trailing cycle (tool calls, tool
     // responses and the final user message). It is safe for tool loops because
@@ -432,7 +423,8 @@ export async function chatCompletions(c: Context) {
     if (canEconomize) {
       const recentToolContext = buildRecentToolContext(messages);
       const parts: string[] = [];
-      if (systemPrompt) parts.push(systemPrompt);
+      if (systemPrompt && session?.instructionsHash !== instructionsHash) parts.push(systemPrompt);
+      if (hasTools && toolChoiceMode === 'none') parts.push('[TOOL USE DISABLED]\nDo not call tools in this response.');
       if (recentToolContext) parts.push(recentToolContext);
       if (lastMsg?.role === 'user') {
         parts.push(`User: ${lastUserContent}`);
@@ -440,7 +432,7 @@ export async function chatCompletions(c: Context) {
       economicalPrompt = parts.join('\n');
       if (!economicalPrompt.trim()) canEconomize = false;
     }
-    const baseStreamOptions = { sessionKey, economicalPrompt };
+    const baseStreamOptions = { sessionKey, economicalPrompt, instructionsHash };
 
     const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', false);
     const completionId = 'chatcmpl-' + crypto.randomUUID();

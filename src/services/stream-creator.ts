@@ -568,6 +568,7 @@ export interface CreateQwenStreamOptions {
   chatId?: string;
   /** Headers to use with the existing chat ID. */
   chatHeaders?: Record<string, string>;
+  instructionsHash?: string;
 }
 
 export async function createQwenStream(
@@ -803,7 +804,7 @@ export async function createQwenStream(
     ? session.accountId
     : (accountId === 'guest' ? 'guest' : (accountId || 'global'));
 
-  if (sessionKey && !useEconomical) {
+  if (sessionKey && (!useEconomical || session?.instructionsHash !== options?.instructionsHash)) {
     setSession(sessionKey, {
       chatId,
       accountId: chatAccountKey,
@@ -811,6 +812,7 @@ export async function createQwenStream(
       parentId: actualParentId,
       historyComplete: false,
       updatedAt: Date.now(),
+      instructionsHash: options?.instructionsHash,
     });
     console.log(`[Session] Registered session ${sessionKey} -> chat ${chatId} on account ${chatAccountKey}`);
   }

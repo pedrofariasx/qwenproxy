@@ -29,6 +29,7 @@ export interface SessionEntry {
   parentId: string | null;
   historyComplete: boolean;
   updatedAt: number;
+  instructionsHash?: string;
 }
 
 const MAX_SESSIONS = 2000;
@@ -67,6 +68,7 @@ function loadSessionsFromDb(): void {
         parentId: row.parent_id,
         historyComplete: row.history_complete !== 0,
         updatedAt: row.updated_at,
+        instructionsHash: row.instructions_hash || undefined,
       };
       sessions.set(row.session_key, entry);
       chatToSession.set(row.chat_id, row.session_key);
@@ -90,6 +92,7 @@ function persistSession(sessionKey: string, entry: SessionEntry): void {
       parent_id: entry.parentId,
       history_complete: entry.historyComplete ? 1 : 0,
       updated_at: entry.updatedAt,
+      instructions_hash: entry.instructionsHash,
     });
   } catch (err: any) {
     console.warn(`[Session] Failed to persist session ${sessionKey} to SQLite:`, err.message);

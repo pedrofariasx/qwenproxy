@@ -1,4 +1,6 @@
 const modelContextWindows: Record<string, number> = {
+  'qwen3.8-max': 1000000,
+  'qwen3.8-omni-flash': 1000000,
   'qwen3.7-plus': 1000000,
   'qwen3.7-max': 1000000,
   'qwen3.6-plus': 1000000,

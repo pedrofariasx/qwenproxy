@@ -90,6 +90,10 @@ function runMigrations(db: Database.Database): void {
   try {
     db.exec(`ALTER TABLE accounts ADD COLUMN cooldown_reason TEXT;`)
   } catch { /* column may already exist */ }
+  const sessionColumns = db.pragma('table_info(sessions)') as Array<{ name: string }>
+  if (!sessionColumns.some(column => column.name === 'instructions_hash')) {
+    db.exec(`ALTER TABLE sessions ADD COLUMN instructions_hash TEXT;`)
+  }
 }
 
 function encryptPlaintextPasswords(db: Database.Database): void {
@@ -225,26 +229,28 @@ export interface SessionRow {
   parent_id: string | null
   history_complete: number
   updated_at: number
+  instructions_hash?: string | null
 }
 
 export function listSessions(): SessionRow[] {
-  return getDatabase().prepare('SELECT session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at FROM sessions').all() as SessionRow[]
+  return getDatabase().prepare('SELECT session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash FROM sessions').all() as SessionRow[]
 }
 
 export function upsertSession(row: SessionRow): void {
   getDatabase()
     .prepare(`
-      INSERT INTO sessions (session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_key) DO UPDATE SET
         chat_id = excluded.chat_id,
         account_id = excluded.account_id,
         headers = excluded.headers,
         parent_id = excluded.parent_id,
         history_complete = excluded.history_complete,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        instructions_hash = excluded.instructions_hash
     `)
-    .run(row.session_key, row.chat_id, row.account_id, row.headers, row.parent_id, row.history_complete, row.updated_at)
+    .run(row.session_key, row.chat_id, row.account_id, row.headers, row.parent_id, row.history_complete, row.updated_at, row.instructions_hash ?? null)
 }
 
 export function deleteSession(sessionKey: string): void {
