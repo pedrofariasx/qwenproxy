@@ -220,6 +220,22 @@ try {
   } else if (scenario === 'migration-conflict') {
     assert.throws(() => getDatabase(), /UNIQUE/);
     assert.throws(() => getDatabase(), /UNIQUE/, 'A failed schema initialization must not be reused');
+  } else if (scenario === 'env-whitespace') {
+    const { config } = await import('../../core/config.js');
+    config.users.apiKeys = ' fixture-spaced : alice , : ignored, fixture-label-only: alice';
+    for (const key of ['fixture-spaced', 'fixture-label-only']) {
+      const response = await request('/v1/identity-fixture', key);
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).principal, JSON.stringify(['environment', 'alice']));
+    }
+    config.users.apiKeys = ' fixture-unlabelled :  ';
+    const unlabelled = await request('/v1/identity-fixture', 'fixture-unlabelled');
+    assert.equal(unlabelled.status, 200);
+    assert.equal((await unlabelled.json()).principal, JSON.stringify(['environment', 'env-db150674b3dc9017f1899568fa02601c30dfe5fb429646c986e1c4840fbeae02']));
+    config.users.apiKeys = ' : ignored';
+    const anonymous = await request('/v1/identity-fixture');
+    assert.equal(anonymous.status, 200);
+    assert.equal((await anonymous.json()).principal, JSON.stringify(['anonymous']));
   }
   console.log(JSON.stringify({ scenario, status: 'pass', provider_posts: payloads.length }));
 } finally {

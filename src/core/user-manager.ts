@@ -26,9 +26,10 @@ function defaultIdentity(id: string, email: string | null, isGlobal: boolean): U
 
 function envApiKeys(): Array<{ key: string; label: string }> {
   return config.users.apiKeys.split(',').flatMap(entry => {
-    const [key, ...labelParts] = entry.trim().split(':');
+    const [rawKey, ...labelParts] = entry.trim().split(':');
+    const key = rawKey.trim();
     if (!key) return [];
-    const label = labelParts.join(':') || `env-${crypto.createHash('sha256').update(key).digest('hex')}`;
+    const label = labelParts.join(':').trim() || `env-${crypto.createHash('sha256').update(key).digest('hex')}`;
     return [{ key, label }];
   });
 }
