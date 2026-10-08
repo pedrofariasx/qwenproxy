@@ -1,3 +1,12 @@
+export async function cancelQwenReader(reader: ReadableStreamDefaultReader<Uint8Array>, reason?: unknown): Promise<void> {
+  const closed = reader.closed.then(() => ({ errored: false as const }), error => ({ errored: true as const, error }));
+  try { await reader.cancel(reason); }
+  catch (error) {
+    const state = await closed;
+    if (!state.errored || state.error !== error) throw error;
+  }
+}
+
 export function manageQwenStream(
   source: ReadableStream<Uint8Array>,
   controller: AbortController,
@@ -9,7 +18,6 @@ export function manageQwenStream(
   parentSignal?: AbortSignal,
 ): { stream: ReadableStream<Uint8Array>; cancel: (reason?: unknown) => Promise<void> } {
   const reader = source.getReader();
-  const sourceClosed = reader.closed.then(() => ({ errored: false as const }), error => ({ errored: true as const, error }));
   let output: ReadableStreamDefaultController<Uint8Array>;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let finishing = false;
@@ -26,10 +34,7 @@ export function manageQwenStream(
       if (!normal && !controller.signal.aborted) controller.abort(reason);
       const results = await Promise.allSettled([
         Promise.resolve().then(() => abortTransport?.()),
-        normal ? Promise.resolve() : reader.cancel(reason).catch(async error => {
-          const state = await sourceClosed;
-          if (!state.errored || state.error !== error) throw error;
-        }),
+        normal ? Promise.resolve() : cancelQwenReader(reader, reason),
       ]);
       reader.releaseLock();
       const failure = results.find(result => result.status === 'rejected');

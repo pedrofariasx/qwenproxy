@@ -198,6 +198,22 @@ test('a read error with successful teardown does not leave a phantom registry en
   }
 });
 
+test('an already errored legacy stream is terminal and can be removed', { timeout: 3000 }, async () => {
+  const { handleStreamingResponse } = await import('../../routes/stream-handler.js');
+  const finished = deferred();
+  const stream = new ReadableStream<Uint8Array>({ start(source) { source.error(new Error('fixture terminal read error')); } });
+  registry.registerStream('legacy-terminal-fixture', { abortController: new AbortController(), accountId: 'fixture',
+    uiSessionId: 'fixture-chat', targetResponseId: '', headers, stopToken: 'fixture' });
+  const app = new Hono();
+  app.get('/fixture', c => handleStreamingResponse(c, { stream, completionId: 'legacy-terminal-fixture',
+    uiSessionId: 'fixture-chat', model: 'fixture', finalPrompt: 'fixture', hasTools: false, tools: [], onComplete: finished.resolve }));
+  try {
+    await (await app.request('/fixture')).text();
+    await finished.promise;
+    assert.equal(registry.getStream('legacy-terminal-fixture'), undefined);
+  } finally { await registry.removeStream('legacy-terminal-fixture'); }
+});
+
 test('idle timeout ends a pending read and tears down exactly once', { timeout: 2000 }, async () => {
   const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
   let cancelled = 0;
