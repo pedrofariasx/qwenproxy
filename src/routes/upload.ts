@@ -136,7 +136,7 @@ async function getOSSModule() {
 }
 
 async function uploadToOSS(
-  fileBuffer: ArrayBuffer,
+  fileBuffer: ArrayBuffer | Uint8Array,
   stsData: STSResponse["data"],
   filename: string,
 ): Promise<string> {
@@ -172,7 +172,9 @@ async function uploadToOSS(
     refreshSTSTokenInterval: 300000,
   });
 
-  const buffer = Buffer.from(fileBuffer);
+  const buffer = fileBuffer instanceof ArrayBuffer
+    ? Buffer.from(fileBuffer)
+    : Buffer.from(fileBuffer.buffer, fileBuffer.byteOffset, fileBuffer.byteLength);
   const ext = filename.split(".").pop()?.toLowerCase() || "";
   const mimeMap: Record<string, string> = {
     // Images
@@ -668,7 +670,7 @@ export async function processImagesForQwen(
             typeInfo.qwenFileType,
             headers,
           );
-          fileUrl = await uploadToOSS(buffer.buffer, stsData, filename);
+          fileUrl = await uploadToOSS(buffer, stsData, filename);
           fileId = stsData.file_id;
         } catch (err: any) {
           console.error("[Upload] Failed to download/re-upload HTTP media:", err.message);
@@ -712,7 +714,7 @@ export async function processImagesForQwen(
             typeInfo.qwenFileType,
             headers,
           );
-          fileUrl = await uploadToOSS(buffer.buffer, stsData, filename);
+          fileUrl = await uploadToOSS(buffer, stsData, filename);
           fileId = stsData.file_id;
         } catch (err: any) {
           console.error("[Upload] Failed to upload media:", err.message);
@@ -798,7 +800,7 @@ export async function uploadLargePromptAsFile(
   const buffer = Buffer.from(promptText, "utf-8");
 
   const stsData = await getSTSToken(filename, buffer.length, "file", headers);
-  const fileUrl = await uploadToOSS(buffer.buffer, stsData, filename);
+  const fileUrl = await uploadToOSS(buffer, stsData, filename);
 
   const entry: QwenFileEntry = {
     type: "file",
