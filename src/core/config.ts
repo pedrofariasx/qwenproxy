@@ -25,6 +25,7 @@ const envSchema = z.object({
   NAVIGATION_TIMEOUT: envInt(90000, 1),
   PAGE_TIMEOUT: envInt(60000, 1),
   HTTP_TIMEOUT: envInt(45000, 1),
+  COMPLETION_PAGE_IDLE_TTL_MS: envInt(60000, 0).refine(value => value <= 2147483647),
   HEADERS_TIMEOUT: envInt(90000, 1),
   CHAT_TIMEOUT: envInt(120000, 1),
   STREAM_IDLE_TIMEOUT: envInt(180000, 1),
@@ -86,6 +87,7 @@ export const config = {
     port: env.PORT,
     host: env.HOST,
   },
+  completionPageIdleTtlMs: env.COMPLETION_PAGE_IDLE_TTL_MS,
   browser: {
     headless: env.HEADLESS,
     type: env.BROWSER,

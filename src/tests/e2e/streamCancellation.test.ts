@@ -169,6 +169,13 @@ test('actual browser relay tears down requests without affecting adjacent stream
       assert.equal(await new Response(result.stream).text(), 'data: fixture\n\n');
       assert.equal(result.controller.signal.aborted, false);
       assert.equal(getAccountActiveLoad('browser-a'), 0);
+      assert.equal(context.pages().length, 3);
+      const idle = context.pages().find(page => page !== baseA && page !== baseB)!;
+      const reused = await create('reused-page');
+      assert.equal(context.pages().length, 3);
+      assert.equal(context.pages().find(page => page !== baseA && page !== baseB), idle);
+      await reused.cancel('fixture stop on reused page');
+      assert.equal(idle.isClosed(), true);
       assert.equal(context.pages().length, 2);
     });
   } finally {

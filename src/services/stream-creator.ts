@@ -16,6 +16,7 @@ import { sleep } from '../utils/sleep.js';
 import { CACHED_TIMEZONE, QWEN_WEB_VERSION } from '../utils/qwen-constants.js';
 import crypto from 'crypto';
 import { manageQwenStream } from './stream-lifecycle.js';
+import { acquireCompletionPage, releaseCompletionPage } from './completion-page-pool.js';
 
 export { updateSessionParent };
 
@@ -613,7 +614,7 @@ export async function createQwenStream(
     controller: AbortController,
     timeoutMs: number,
     label: string,
-    abortTransport?: () => void | Promise<void>,
+    abortTransport?: (cancelled: boolean) => void | Promise<void>,
   ) => manageQwenStream(stream, controller, timeoutMs, label, abortTransport,
     releaseStreamResources, () => accountSlot.touch(), options?.signal);
 
@@ -955,7 +956,7 @@ export async function createQwenStream(
       : await waitForAccountPage(effectiveAccountId, 15000);
     options?.signal?.throwIfAborted();
     if (page) {
-      const completionPage = await openIsolatedQwenPage(page, undefined, options?.signal);
+      const completionPage = await acquireCompletionPage(page, () => openIsolatedQwenPage(page, undefined, options?.signal));
       let streamTransferred = false;
       try {
         const browserResult = await browserStreamFetch(completionPage, url, {
@@ -971,8 +972,10 @@ export async function createQwenStream(
           const controller = new AbortController();
           streamTransferred = true;
           return {
-            ...wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async () => {
-              try { await browserResult.abort(); } finally { await completionPage.close(); }
+            ...wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async cancelled => {
+              let reusable = false;
+              try { await browserResult.abort(); reusable = !cancelled; }
+              finally { await releaseCompletionPage(page, completionPage, reusable); }
             }),
             headers: chatHeaders,
             uiSessionId: chatId,
@@ -1001,8 +1004,10 @@ export async function createQwenStream(
                 const controller = new AbortController();
                 streamTransferred = true;
                 return {
-                  ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async () => {
-                    try { await retryResult.abort(); } finally { await completionPage.close(); }
+                  ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async cancelled => {
+                    let reusable = false;
+                    try { await retryResult.abort(); reusable = !cancelled; }
+                    finally { await releaseCompletionPage(page, completionPage, reusable); }
                   }),
                   headers: freshHeaders,
                   uiSessionId: chatId,
@@ -1043,8 +1048,10 @@ export async function createQwenStream(
               const controller = new AbortController();
               streamTransferred = true;
               return {
-                ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async () => {
-                  try { await retryResult.abort(); } finally { await completionPage.close(); }
+                ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async cancelled => {
+                  let reusable = false;
+                  try { await retryResult.abort(); reusable = !cancelled; }
+                  finally { await releaseCompletionPage(page, completionPage, reusable); }
                 }),
                 headers: freshHeaders,
                 uiSessionId: chatId,
@@ -1065,7 +1072,7 @@ export async function createQwenStream(
         if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
         throw new Error(`Browser stream fetch failed with active Qwen page: ${browserErr.message}`, { cause: browserErr });
       } finally {
-        if (!streamTransferred) await completionPage.close();
+        if (!streamTransferred) await releaseCompletionPage(page, completionPage, false);
       }
     }
 

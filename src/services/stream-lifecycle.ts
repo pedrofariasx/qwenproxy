@@ -12,7 +12,7 @@ export function manageQwenStream(
   controller: AbortController,
   idleTimeoutMs: number,
   label: string,
-  abortTransport: (() => void | Promise<void>) | undefined,
+  abortTransport: ((cancelled: boolean) => void | Promise<void>) | undefined,
   onDone: () => void,
   onActivity: () => void,
   parentSignal?: AbortSignal,
@@ -33,7 +33,7 @@ export function manageQwenStream(
     finished = Promise.resolve().then(async () => {
       if (!normal && !controller.signal.aborted) controller.abort(reason);
       const results = await Promise.allSettled([
-        Promise.resolve().then(() => abortTransport?.()),
+        Promise.resolve().then(() => abortTransport?.(!normal)),
         normal ? Promise.resolve() : cancelQwenReader(reader, reason),
       ]);
       reader.releaseLock();

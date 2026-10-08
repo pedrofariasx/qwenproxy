@@ -474,6 +474,8 @@ qwenproxy/
 
 ---
 
+`COMPLETION_PAGE_IDLE_TTL_MS` mantém no máximo uma página de completion ociosa por página de conta por 60 segundos. Somente páginas com o transporte encerrado normalmente são reutilizadas; cancelamentos fecham a página do pedido. Use `0` para desativar a retenção.
+
 ## Testes
 
 `npm run test:unit` executa as verificações unitárias sem iniciar navegadores nem usar contas Qwen.
