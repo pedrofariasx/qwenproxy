@@ -462,8 +462,8 @@ adminApp.get('/api/streams', adminGuard, (c) => {
   return c.json({ streams })
 })
 
-adminApp.post('/api/streams/:key/stop', adminGuard, (c) => {
-  const stopped = abortStream(c.req.param('key'))
+adminApp.post('/api/streams/:key/stop', adminGuard, async (c) => {
+  const stopped = await abortStream(c.req.param('key'))
   return c.json({ ok: stopped })
 })
 

@@ -17,7 +17,7 @@ process.env.WARM_POOL_SIZE = '0';
 const { createQwenStream } = await import('../../services/stream-creator.js');
 const { getAccountActiveLoad } = await import('../../core/account-manager.js');
 const { closeDatabase } = await import('../../core/database.js');
-const { chatCompletions } = await import('../../routes/chat.js');
+const { chatCompletions, chatCompletionsStop } = await import('../../routes/chat.js');
 const registry = await import('../../core/stream-registry.js');
 after(() => { closeDatabase(); process.chdir(cwd); fs.rmSync(directory, { recursive: true, force: true }); });
 const headers = { cookie: 'fixture', 'user-agent': 'fixture', 'bx-ua': 'fixture', 'bx-umidtoken': 'fixture', 'bx-v': 'fixture' };
@@ -126,13 +126,14 @@ test('cancelling economical reuse keeps the persisted history incomplete', async
   assert.equal(getSession('fixture-reuse')?.historyComplete, false);
 });
 
-test('HTTP client disconnect do not retry or confirm partial history', { timeout: 5000 }, async t => {
+test('HTTP stop and client disconnect do not retry or confirm partial history', { timeout: 5000 }, async t => {
   const { addAccount } = await import('../../core/accounts.js');
   const { getSession } = await import('../../services/session-manager.js');
   addAccount('fixture@example.invalid', 'fixture-password', 'http-fixture');
   process.env.TEST_MOCK_PLAYWRIGHT = 'true';
   const app = new Hono();
   app.post('/chat', chatCompletions);
+  app.post('/stop', chatCompletionsStop);
   let posts = 0;
   let cancellations = 0;
   let continuationPosts = 0;
@@ -168,13 +169,13 @@ test('HTTP client disconnect do not retry or confirm partial history', { timeout
     }
   }
   try {
-    for (const mode of ['disconnect', 'non-streaming', 'continuation'] as const) {
+    for (const mode of ['stop', 'disconnect', 'non-streaming', 'continuation'] as const) {
       continuationMode = mode === 'continuation';
       const key = `http-${mode}`;
       const abort = new AbortController();
       const pending = app.request('/chat', { method: 'POST', signal: abort.signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'qwen3.7-plus', user: key, stream: mode === 'disconnect',
+        body: JSON.stringify({ model: 'qwen3.7-plus', user: key, stream: mode === 'stop' || mode === 'disconnect',
           messages: [{ role: 'user', content: 'Produce a long fixture answer.' }] }),
       });
       await until(() => [...registry.getStreamRegistry().values()].some(entry =>
@@ -187,14 +188,20 @@ test('HTTP client disconnect do not retry or confirm partial history', { timeout
         const response = await pending;
         const reader = response.body!.getReader();
         await reader.read();
-        await reader.cancel('fixture client disconnected');
+        if (mode === 'stop') {
+          const stopped = await app.request('/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ completion_id: response.headers.get('X-Completion-Id'), stop_token: response.headers.get('X-Stop-Token') }),
+          });
+          assert.equal(stopped.status, 200);
+          while (true) { if ((await reader.read()).done) break; }
+        } else await reader.cancel('fixture client disconnected');
       }
       await until(() => registry.getStreamRegistry().size === 0);
       assert.equal(getAccountActiveLoad('http-fixture'), 0);
       assert.equal(getSession(key)?.historyComplete, false);
     }
-    assert.equal(posts, 4);
-    assert.equal(cancellations, 3);
+    assert.equal(posts, 5);
+    assert.equal(cancellations, 4);
   } finally {
     delete process.env.TEST_MOCK_PLAYWRIGHT;
   }

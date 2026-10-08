@@ -48,17 +48,26 @@ export function updateStreamResponseId(key: string, chatId: string, responseId: 
   if (entry && entry.uiSessionId === chatId && !entry.targetResponseId) entry.targetResponseId = responseId;
 }
 
+export function findStream(identifier: string): { key: string; entry: StreamRegistryEntry } | 'ambiguous' | undefined {
+  const direct = activeStreams.get(identifier);
+  if (direct) return { key: identifier, entry: direct };
+  const matches = [...activeStreams.entries()].filter(([, entry]) => entry.uiSessionId === identifier);
+  if (matches.length > 1) return 'ambiguous';
+  return matches.length === 1 ? { key: matches[0][0], entry: matches[0][1] } : undefined;
+}
+
 export function removeStream(key: string, expected?: StreamRegistryEntry): void {
   if (expected && activeStreams.get(key) !== expected) return;
   activeStreams.delete(key)
   updateStreamGauges()
 }
 
-export function abortStream(key: string): boolean {
+export async function abortStream(key: string): Promise<boolean> {
   const entry = activeStreams.get(key)
   if (entry) {
     if (entry.cancel) {
-      void entry.cancel(new Error('Stream stopped by administrator')).then(() => removeStream(key, entry)).catch(() => {});
+      await entry.cancel(new Error('Stream stopped by administrator'));
+      removeStream(key, entry);
     } else {
       entry.abortController.abort();
       removeStream(key, entry);

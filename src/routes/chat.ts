@@ -8,7 +8,7 @@ import { truncateMessages, estimateTokenCount } from '../utils/context-truncatio
 import { OVERLOAD_COOLDOWN_MS } from '../utils/overload-detector.js';
 import { getNextAccount, getNextAvailableAccount, getAccountById, onAccountFreed, getAccountCooldownInfo, markAccountInUse, releaseAccountInUse, getInUseAccounts } from '../core/account-manager.js';
 import { loadAccounts } from '../core/accounts.js';
-import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
+import { registerStream, removeStream, getStream, findStream } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
 import { config } from '../core/config.js';
 
@@ -668,6 +668,7 @@ export async function chatCompletions(c: Context) {
     const acquired = await obtainStream(finalPrompt);
 
     c.header('X-Stop-Token', stopToken);
+    c.header('X-Completion-Id', completionId);
 
     if (!isStream) {
       const collectResponse = async (acquiredStream: ReadableStream, acquiredSession: string) =>
@@ -845,61 +846,65 @@ export async function chatCompletions(c: Context) {
 export async function chatCompletionsStop(c: Context) {
   try {
     const body = await c.req.json();
-    const { chat_id, response_id, stop_token } = body;
-
-    if (!chat_id || !response_id || !stop_token) {
-      return c.json({ error: 'chat_id, response_id and stop_token are required' }, 400);
+    if (!body || typeof body !== 'object') return c.json({ error: 'Invalid stop request' }, 400);
+    const { completion_id, chat_id, response_id, stop_token } = body;
+    const identifier = completion_id ?? chat_id;
+    if (typeof identifier !== 'string' || !identifier || typeof stop_token !== 'string' || !stop_token ||
+      (response_id !== undefined && (typeof response_id !== 'string' || !response_id))) {
+      return c.json({ error: 'completion_id (or chat_id) and stop_token are required; response_id is optional' }, 400);
     }
-
-    const stream = getStream(chat_id);
-    if (!stream) {
-      return c.json({ error: 'Stream not found' }, 404);
-    }
-
-    const tokenBuf = Buffer.from(String(stop_token));
-    const expectedBuf = Buffer.from(stream.stopToken);
+    const direct = completion_id ? getStream(identifier) : undefined;
+    const found = completion_id ? (direct ? { key: identifier, entry: direct } : undefined) : findStream(identifier);
+    if (found === 'ambiguous') return c.json({ error: 'Ambiguous chat_id; use completion_id' }, 409);
+    if (!found) return c.json({ error: 'Stream not found' }, 404);
+    const { key, entry } = found;
+    const tokenBuf = Buffer.from(stop_token);
+    const expectedBuf = Buffer.from(entry.stopToken);
     if (tokenBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(tokenBuf, expectedBuf)) {
       return c.json({ error: 'Invalid stop_token' }, 403);
     }
-
-    if (stream.targetResponseId && stream.targetResponseId !== response_id) {
+    if (completion_id && chat_id !== undefined && chat_id !== entry.uiSessionId && chat_id !== key) {
+      return c.json({ error: 'chat_id mismatch' }, 400);
+    }
+    if (response_id !== undefined && response_id !== entry.targetResponseId) {
       return c.json({ error: 'response_id mismatch' }, 400);
     }
-
-    const stopResponse = await fetch(`https://chat.qwen.ai/api/v2/chat/completions/stop?chat_id=${chat_id}`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'pt-BR,pt;q=0.9',
-        'Content-Type': 'application/json',
-        'Cookie': stream.headers.cookie,
-        'Origin': 'https://chat.qwen.ai',
-        'Referer': `https://chat.qwen.ai/c/${chat_id}`,
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'User-Agent': stream.headers['user-agent'],
-        'X-Request-Id': crypto.randomUUID(),
-        'bx-ua': stream.headers['bx-ua'],
-        'bx-umidtoken': stream.headers['bx-umidtoken'],
-        'bx-v': stream.headers['bx-v'],
-      },
-      body: JSON.stringify({ chat_id, response_id }),
-    });
-
-    if (!stopResponse.ok) {
-      const errorText = await stopResponse.text();
-      console.error(`[Stop] Failed to stop generation for chat_id=${chat_id}: ${stopResponse.status} ${errorText}`);
-      return c.json({ error: 'Failed to stop generation' }, stopResponse.status as any);
+    const targetResponseId = entry.targetResponseId;
+    const localStop = entry.cancel
+      ? entry.cancel(new Error('Generation stopped by client'))
+      : Promise.resolve().then(() => entry.abortController.abort());
+    const upstreamStop = async () => {
+      if (!targetResponseId) return false;
+      const stopResponse = await fetch(`https://chat.qwen.ai/api/v2/chat/completions/stop?chat_id=${encodeURIComponent(entry.uiSessionId)}`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Cookie': entry.headers.cookie,
+          'Origin': 'https://chat.qwen.ai',
+          'Referer': `https://chat.qwen.ai/c/${encodeURIComponent(entry.uiSessionId)}`,
+          'User-Agent': entry.headers['user-agent'],
+          'X-Request-Id': crypto.randomUUID(),
+          'bx-ua': entry.headers['bx-ua'],
+          'bx-umidtoken': entry.headers['bx-umidtoken'],
+          'bx-v': entry.headers['bx-v'],
+        },
+        body: JSON.stringify({ chat_id: entry.uiSessionId, response_id: targetResponseId }),
+        signal: AbortSignal.timeout(config.timeouts.http),
+      });
+      if (!stopResponse.ok) throw new Error(`Upstream stop returned HTTP ${stopResponse.status}`);
+      const acknowledgement = await stopResponse.json().catch(() => null);
+      if (acknowledgement?.success === false || acknowledgement?.error) throw new Error('Upstream stop rejected');
+      return true;
+    };
+    const [local, upstream] = await Promise.allSettled([localStop, upstreamStop()]);
+    if (local.status === 'rejected') return c.json({ error: 'Transport teardown failed', transport_stopped: false }, 502);
+    removeStream(key, entry);
+    if (upstream.status === 'rejected') {
+      return c.json({ error: 'Upstream stop was not acknowledged', transport_stopped: true, upstream_stop_accepted: false }, 502);
     }
-
-    stream.abortController.abort();
-    removeStream(chat_id);
-
-    console.log(`[Stop] Generation stopped for chat_id=${chat_id}`);
-    return c.json({ success: true });
+    return c.json({ success: true, transport_stopped: true, upstream_stop_accepted: upstream.value }, upstream.value ? 200 : 202);
   } catch (err: any) {
-    console.error('Error in chatCompletionsStop:', err);
-    return c.json({ error: err.message }, 500);
+    return c.json({ error: err.message }, err instanceof SyntaxError ? 400 : 500);
   }
 }
