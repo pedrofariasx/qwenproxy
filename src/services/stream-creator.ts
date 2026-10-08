@@ -956,7 +956,7 @@ export async function createQwenStream(
       : await waitForAccountPage(effectiveAccountId, 15000);
     options?.signal?.throwIfAborted();
     if (page) {
-      const completionPage = await acquireCompletionPage(page, () => openIsolatedQwenPage(page, undefined, options?.signal));
+      const completionPage = await acquireCompletionPage(page, () => openIsolatedQwenPage(page, 'https://chat.qwen.ai/c/new-chat', options?.signal));
       let streamTransferred = false;
       try {
         const browserResult = await browserStreamFetch(completionPage, url, {

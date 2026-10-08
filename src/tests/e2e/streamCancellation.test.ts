@@ -53,7 +53,7 @@ test('actual browser relay tears down requests without affecting adjacent stream
   await context.route('**/*', route => {
     const url = new URL(route.request().url());
     if (url.hostname === '127.0.0.1') return route.continue();
-    if (url.href === 'https://chat.qwen.ai/') return route.fulfill({ contentType: 'text/html', body: '<html>fixture</html>' });
+    if (url.href === 'https://chat.qwen.ai/' || url.href === 'https://chat.qwen.ai/c/new-chat') return route.fulfill({ contentType: 'text/html', body: '<html>fixture</html>' });
     return route.abort();
   });
   await context.addInitScript(`const fixtureFetch = window.fetch.bind(window);
@@ -83,6 +83,8 @@ test('actual browser relay tears down requests without affecting adjacent stream
     await t.test('controller abort ends pending read and preserves a second account', async () => {
       const first = await create('first');
       const second = await create('second', 'browser-b');
+      assert.deepEqual(context.pages().filter(page => page !== baseA && page !== baseB).map(page => page.url()),
+        ['https://chat.qwen.ai/c/new-chat', 'https://chat.qwen.ai/c/new-chat']);
       const firstReader = first.stream.getReader();
       const secondReader = second.stream.getReader();
       await firstReader.read();
