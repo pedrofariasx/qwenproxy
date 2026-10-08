@@ -199,6 +199,17 @@ export function markHistoryComplete(chatId: string): void {
   }
 }
 
+export function markHistoryIncomplete(chatId: string): void {
+  loadSessionsFromDb();
+  const sessionKey = chatToSession.get(chatId);
+  const session = sessionKey ? sessions.get(sessionKey) : undefined;
+  if (sessionKey && session?.historyComplete) {
+    session.historyComplete = false;
+    session.updatedAt = Date.now();
+    persistSession(sessionKey, session);
+  }
+}
+
 export function getSessionParent(chatId: string): string | null {
   loadSessionsFromDb();
   return chatParents.get(chatId)?.parentId ?? null;

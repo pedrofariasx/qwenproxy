@@ -8,6 +8,7 @@ export interface StreamRegistryEntry {
   headers: Record<string, string>;
   stopToken: string;
   createdAt: number;
+  cancel?: (reason?: unknown) => Promise<void>;
 }
 
 const activeStreams = new Map<string, StreamRegistryEntry>();
@@ -42,7 +43,13 @@ export function getStream(key: string): StreamRegistryEntry | undefined {
   return activeStreams.get(key)
 }
 
-export function removeStream(key: string): void {
+export function updateStreamResponseId(key: string, chatId: string, responseId: string): void {
+  const entry = activeStreams.get(key);
+  if (entry && entry.uiSessionId === chatId && !entry.targetResponseId) entry.targetResponseId = responseId;
+}
+
+export function removeStream(key: string, expected?: StreamRegistryEntry): void {
+  if (expected && activeStreams.get(key) !== expected) return;
   activeStreams.delete(key)
   updateStreamGauges()
 }
@@ -50,9 +57,12 @@ export function removeStream(key: string): void {
 export function abortStream(key: string): boolean {
   const entry = activeStreams.get(key)
   if (entry) {
-    entry.abortController.abort()
-    activeStreams.delete(key)
-    updateStreamGauges()
+    if (entry.cancel) {
+      void entry.cancel(new Error('Stream stopped by administrator')).then(() => removeStream(key, entry)).catch(() => {});
+    } else {
+      entry.abortController.abort();
+      removeStream(key, entry);
+    }
     return true
   }
   return false

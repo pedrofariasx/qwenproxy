@@ -11,8 +11,6 @@ const streamCallbacks = new Map<string, {
   onBody: (body: string) => void;
 }>();
 
-const abortControllers = new Map<string, () => void>();
-
 const pagesWithExposed = new WeakSet<Page>();
 
 async function ensureStreamBridge(page: Page): Promise<void> {
@@ -24,9 +22,9 @@ async function ensureStreamBridge(page: Page): Promise<void> {
     switch (type) {
       case 'meta': cb.onMeta(data); break;
       case 'chunk': cb.onChunk(data); break;
-      case 'end': cb.onEnd(); streamCallbacks.delete(reqId); abortControllers.delete(reqId); break;
-      case 'error': cb.onError(data); streamCallbacks.delete(reqId); abortControllers.delete(reqId); break;
-      case 'body': cb.onBody(data); streamCallbacks.delete(reqId); abortControllers.delete(reqId); break;
+      case 'end': cb.onEnd(); streamCallbacks.delete(reqId); break;
+      case 'error': cb.onError(data); streamCallbacks.delete(reqId); break;
+      case 'body': cb.onBody(data); streamCallbacks.delete(reqId); break;
     }
   });
 }
@@ -93,6 +91,8 @@ export async function browserStreamFetch(
     headers?: Record<string, string>;
     body?: string;
     timeoutMs?: number;
+    signal?: AbortSignal;
+    closeOnAbortTimeout?: boolean;
   } = {},
 ): Promise<{
   status: number;
@@ -102,193 +102,196 @@ export async function browserStreamFetch(
   stream: ReadableStream<Uint8Array>;
   body: string;
   reqId: string;
-  abort: () => void;
+  abort: () => Promise<void>;
 }> {
+  options.signal?.throwIfAborted();
   await ensureStreamBridge(page);
   const reqId = crypto.randomUUID();
   const enc = new TextEncoder();
-
-  let metaResolve!: (value: { status: number; statusText: string; contentType: string; headers: Record<string, string> }) => void;
-  let metaReject!: (reason: Error) => void;
-  const metaPromise = new Promise<{ status: number; statusText: string; contentType: string; headers: Record<string, string> }>((resolve, reject) => {
+  const timeoutMs = options.timeoutMs || config.timeouts.chat;
+  const watcher = startCaptchaWatcher(page, timeoutMs);
+  let output: ReadableStreamDefaultController<Uint8Array>;
+  let terminal = false;
+  let evaluation: Promise<void> = Promise.resolve();
+  let aborting: Promise<void> | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let metaResolve!: (meta: { status: number; statusText: string; contentType: string; headers: Record<string, string> }) => void;
+  let metaReject!: (error: Error) => void;
+  const metadata = new Promise<Parameters<typeof metaResolve>[0]>((resolve, reject) => {
     metaResolve = resolve;
     metaReject = reject;
   });
+  let bodyResolve!: (value: string) => void;
+  let bodyReject!: (error: Error) => void;
+  const body = new Promise<string>((resolve, reject) => { bodyResolve = resolve; bodyReject = reject; });
+  void body.catch(() => {});
 
-  const metaTimeoutMs = options.timeoutMs || config.timeouts.chat;
-  const metaTimeout = setTimeout(() => {
+  const cleanup = () => {
+    clearTimeout(timeout);
     streamCallbacks.delete(reqId);
-    abortControllers.delete(reqId);
-    metaReject(new Error(`Browser stream fetch timed out waiting for response metadata after ${metaTimeoutMs}ms`));
-  }, metaTimeoutMs);
+    options.signal?.removeEventListener('abort', onAbort);
+    watcher.stop();
+  };
+  const fail = (error: Error) => {
+    if (terminal) return;
+    terminal = true;
+    cleanup();
+    metaReject(error);
+    bodyReject(error);
+    output.error(error);
+  };
+  const abort = (): Promise<void> => aborting ??= Promise.resolve().then(async () => {
+    fail(new Error('Browser stream cancelled'));
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        (async () => {
+          await page.evaluate((id: string) => {
+            (window as any).__abortControllers?.[id]?.abort();
+          }, reqId);
+          await evaluation;
+        })(),
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => reject(new Error('Browser stream abort timed out')), Math.min(5000, config.timeouts.http));
+        }),
+      ]);
+    } catch (error) {
+      if (options.closeOnAbortTimeout && !page.isClosed()) await page.close();
+      if (!page.isClosed()) throw error;
+      await evaluation;
+    } finally {
+      clearTimeout(deadline);
+      cleanup();
+    }
+  });
+  const onAbort = () => { void abort().catch(() => {}); };
+  const armTimeout = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => {
+      fail(new Error(`Browser stream fetch timed out after ${timeoutMs}ms`));
+      void abort().catch(() => {});
+    }, timeoutMs);
+  };
 
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) { output = controller; },
+    cancel() { return abort(); },
+  });
   streamCallbacks.set(reqId, {
-    onMeta: (meta) => {
-      clearTimeout(metaTimeout);
+    onMeta(meta) {
+      clearTimeout(timeout);
+      if (!meta.contentType.includes('text/event-stream')) armTimeout();
       metaResolve(meta);
     },
-    onChunk: () => {},
-    onEnd: () => {},
-    onError: (msg: string) => {
-      clearTimeout(metaTimeout);
-      metaReject(new Error(msg));
+    onChunk(chunk) { if (!terminal) output.enqueue(enc.encode(chunk)); },
+    onEnd() {
+      if (terminal) return;
+      terminal = true;
+      cleanup();
+      bodyResolve('');
+      output.close();
     },
-    onBody: () => {},
+    onError(message) { fail(new Error(message)); },
+    onBody(text) {
+      if (terminal) return;
+      terminal = true;
+      cleanup();
+      bodyResolve(text);
+      output.close();
+    },
   });
+  armTimeout();
+  const { signal: _signal, ...browserOptions } = options;
+  evaluation = page.evaluate(async ({ url, options, reqId, evalTimeoutMs }: any) => {
+    const controller = new AbortController();
+    (window as any).__abortControllers = (window as any).__abortControllers || {};
+    (window as any).__abortControllers[reqId] = controller;
+    const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || evalTimeoutMs);
+    try {
+      const resp = await fetch(url, {
+        method: options.method || 'POST',
+        headers: options.headers || {},
+        body: options.body || undefined,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const respHeaders: Record<string, string> = {};
+      resp.headers.forEach((v: string, k: string) => { respHeaders[k] = v; });
+      (window as any).__streamRelay(reqId, 'meta', {
+        status: resp.status,
+        statusText: resp.statusText,
+        contentType: resp.headers.get('content-type') || '',
+        headers: respHeaders,
+      });
 
-  let bodyResolve!: (value: string) => void;
-  let bodyReject!: (reason: Error) => void;
-  const bodyPromise = new Promise<string>((resolve, reject) => {
-    bodyResolve = resolve;
-    bodyReject = reject;
-  });
-  bodyPromise.catch(() => {});
+      const responseContentType = resp.headers.get('content-type') || '';
+      if (!resp.ok || !resp.body || !responseContentType.includes('text/event-stream')) {
+        const bodyText = await resp.text().catch(() => '');
+        (window as any).__streamRelay(reqId, 'body', bodyText);
+        delete (window as any).__abortControllers[reqId];
+        return;
+      }
 
-  const watcher = startCaptchaWatcher(page, metaTimeoutMs);
-
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      // Coalesce chunks before crossing the CDP bridge. Each __streamRelay call
+      // is an expensive serialized round-trip; batching by time/size reduces
+      // bridge overhead. Thresholds tuned for LOW LATENCY: small byte budget +
+      // short interval flush ~2-3 SSE events at a time, and the very first chunk
+      // is flushed immediately for minimum first-token latency (TTFT).
+      // NOTE: keep this inline (no named functions) — code inside page.evaluate
+      // runs in the browser where esbuild's __name helper does not exist.
+      const FLUSH_BYTES = 512;
+      const FLUSH_INTERVAL_MS = 8;
+      let pending = '';
+      let flushTimer: any = null;
+      let firstChunkSent = false;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+            if (pending) { (window as any).__streamRelay(reqId, 'chunk', pending); pending = ''; }
+            (window as any).__streamRelay(reqId, 'end', null);
+            break;
+          }
+          pending += decoder.decode(value, { stream: true });
+          if (!firstChunkSent) {
+            // Fast-path: flush the first byte(s) immediately to minimize TTFT.
+            if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+            (window as any).__streamRelay(reqId, 'chunk', pending);
+            pending = '';
+            firstChunkSent = true;
+          } else if (pending.length >= FLUSH_BYTES) {
+            if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+            (window as any).__streamRelay(reqId, 'chunk', pending);
+            pending = '';
+          } else if (!flushTimer) {
+            flushTimer = setTimeout(() => {
+              flushTimer = null;
+              if (pending) { (window as any).__streamRelay(reqId, 'chunk', pending); pending = ''; }
+            }, FLUSH_INTERVAL_MS);
+          }
+        }
+      } finally {
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        reader.releaseLock();
+      }
+      delete (window as any).__abortControllers[reqId];
+    } catch (e: any) {
+      clearTimeout(timeoutId);
+      (window as any).__streamRelay(reqId, 'error', e.message);
+      delete (window as any).__abortControllers[reqId];
+    }
+  }, { url, options: browserOptions, reqId, evalTimeoutMs: timeoutMs }).then(() => {}, (error: Error) => { fail(error); });
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  if (options.signal?.aborted) onAbort();
   try {
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const cb = streamCallbacks.get(reqId);
-        if (!cb) return;
-        cb.onChunk = (chunk: string) => {
-          try { controller.enqueue(enc.encode(chunk)); } catch { /* ignore */ }
-        };
-        cb.onEnd = () => {
-          try { controller.close(); } catch { /* ignore */ }
-          bodyResolve('');
-          streamCallbacks.delete(reqId);
-          abortControllers.delete(reqId);
-        };
-        cb.onError = (msg: string) => {
-          try { controller.error(new Error(msg)); } catch { /* ignore */ }
-          bodyReject(new Error(msg));
-          streamCallbacks.delete(reqId);
-          abortControllers.delete(reqId);
-        };
-        cb.onBody = (text: string) => {
-          bodyResolve(text);
-          streamCallbacks.delete(reqId);
-          abortControllers.delete(reqId);
-        };
-
-        page.evaluate(async ({ url, options, reqId, evalTimeoutMs }: any) => {
-          const controller = new AbortController();
-          (window as any).__abortControllers = (window as any).__abortControllers || {};
-          (window as any).__abortControllers[reqId] = controller;
-          const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || evalTimeoutMs);
-          try {
-            const resp = await fetch(url, {
-              method: options.method || 'POST',
-              headers: options.headers || {},
-              body: options.body || undefined,
-              signal: controller.signal,
-            });
-            clearTimeout(timeoutId);
-            const respHeaders: Record<string, string> = {};
-            resp.headers.forEach((v: string, k: string) => { respHeaders[k] = v; });
-            (window as any).__streamRelay(reqId, 'meta', {
-              status: resp.status,
-              statusText: resp.statusText,
-              contentType: resp.headers.get('content-type') || '',
-              headers: respHeaders,
-            });
-
-            const responseContentType = resp.headers.get('content-type') || '';
-            if (!resp.ok || !resp.body || !responseContentType.includes('text/event-stream')) {
-              const bodyText = await resp.text().catch(() => '');
-              (window as any).__streamRelay(reqId, 'body', bodyText);
-              delete (window as any).__abortControllers[reqId];
-              return;
-            }
-
-            const reader = resp.body.getReader();
-            const decoder = new TextDecoder();
-            // Coalesce chunks before crossing the CDP bridge. Each __streamRelay call
-            // is an expensive serialized round-trip; batching by time/size reduces
-            // bridge overhead. Thresholds tuned for LOW LATENCY: small byte budget +
-            // short interval flush ~2-3 SSE events at a time, and the very first chunk
-            // is flushed immediately for minimum first-token latency (TTFT).
-            // NOTE: keep this inline (no named functions) — code inside page.evaluate
-            // runs in the browser where esbuild's __name helper does not exist.
-            const FLUSH_BYTES = 512;
-            const FLUSH_INTERVAL_MS = 8;
-            let pending = '';
-            let flushTimer: any = null;
-            let firstChunkSent = false;
-            try {
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-                  if (pending) { (window as any).__streamRelay(reqId, 'chunk', pending); pending = ''; }
-                  (window as any).__streamRelay(reqId, 'end', null);
-                  break;
-                }
-                pending += decoder.decode(value, { stream: true });
-                if (!firstChunkSent) {
-                  // Fast-path: flush the first byte(s) immediately to minimize TTFT.
-                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-                  (window as any).__streamRelay(reqId, 'chunk', pending);
-                  pending = '';
-                  firstChunkSent = true;
-                } else if (pending.length >= FLUSH_BYTES) {
-                  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-                  (window as any).__streamRelay(reqId, 'chunk', pending);
-                  pending = '';
-                } else if (!flushTimer) {
-                  flushTimer = setTimeout(() => {
-                    flushTimer = null;
-                    if (pending) { (window as any).__streamRelay(reqId, 'chunk', pending); pending = ''; }
-                  }, FLUSH_INTERVAL_MS);
-                }
-              }
-            } finally {
-              if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-            }
-            delete (window as any).__abortControllers[reqId];
-          } catch (e: any) {
-            clearTimeout(timeoutId);
-            (window as any).__streamRelay(reqId, 'error', e.message);
-            delete (window as any).__abortControllers[reqId];
-          }
-        }, { url, options, reqId, evalTimeoutMs: metaTimeoutMs }).catch((e: any) => {
-          const cb = streamCallbacks.get(reqId);
-          if (cb) {
-            cb.onError(e.message);
-          }
-        });
-      },
-      cancel() {
-        page.evaluate((reqId: string) => {
-          const c = (window as any).__abortControllers?.[reqId];
-          if (c) { c.abort(); delete (window as any).__abortControllers[reqId]; }
-        }, reqId).catch(() => {});
-        streamCallbacks.delete(reqId);
-        abortControllers.delete(reqId);
-      },
-    });
-
-    const meta = await metaPromise;
-
-    const abortFn = () => {
-      page.evaluate((reqId: string) => {
-        const c = (window as any).__abortControllers?.[reqId];
-        if (c) { c.abort(); delete (window as any).__abortControllers[reqId]; }
-      }, reqId).catch(() => {});
-      streamCallbacks.delete(reqId);
-      abortControllers.delete(reqId);
-    };
-
-    abortControllers.set(reqId, abortFn);
-
-    return {
-      ...meta,
-      stream,
-      body: meta.contentType.includes('text/event-stream') ? '' : await bodyPromise,
-      reqId,
-      abort: abortFn,
-    };
+    const meta = await metadata;
+    return { ...meta, stream, body: meta.contentType.includes('text/event-stream') ? '' : await body, reqId, abort };
+  } catch (error) {
+    await abort();
+    throw error;
   } finally {
     watcher.stop();
   }

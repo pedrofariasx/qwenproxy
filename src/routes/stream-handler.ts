@@ -7,7 +7,7 @@ import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-hand
 import { textContainsToolCallStart } from '../tools/toolcall-tags.js';
 import { isDegenerateAnswer, canFastReleaseGuard } from '../utils/degenerate-answer.js';
 import { isOverloadMessage } from '../utils/overload-detector.js';
-import { removeStream } from '../core/stream-registry.js';
+import { removeStream, updateStreamResponseId } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
 import { recordToolCallEmission } from '../core/tool-call-registry.js';
 import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
@@ -84,19 +84,19 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     let activeStream: ReadableStream | null = ctx.stream;
     let activeReader: ReadableStreamDefaultReader<any> | null = null;
     const clientSignal = (c.req.raw as any)?.signal as AbortSignal | undefined;
-    const clientAborted = () => !!clientSignal?.aborted;
+    const clientAborted = () => !!clientSignal?.aborted || !!streamWriter.aborted;
+    let pendingTeardown: Promise<void> = Promise.resolve();
     const releaseActiveStream = (reason: string) => {
       const r = activeReader;
       const s = activeStream;
       activeStream = null;
       activeReader = null;
-      if (r) {
-        r.cancel(reason).catch(() => {});
-      } else {
-        s?.cancel(reason).catch(() => {});
-      }
+      const cancel = r ? r.cancel(reason) : s?.cancel(reason);
+      if (cancel) pendingTeardown = Promise.all([pendingTeardown, cancel]).then(() => {}, () => {});
+      return pendingTeardown;
     };
-    const onClientAbort = () => releaseActiveStream('client aborted stream');
+    const onClientAbort = () => { void releaseActiveStream('client aborted stream'); };
+    streamWriter.onAbort(onClientAbort);
     if (clientSignal) {
       if (clientSignal.aborted) queueMicrotask(onClientAbort);
       else clientSignal.addEventListener('abort', onClientAbort, { once: true });
@@ -351,10 +351,12 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
                 targetResponseIdSet = true;
               }
               updateSessionParent(ctx.uiSessionId, chunk['response.created'].response_id);
+              updateStreamResponseId(ctx.completionId, ctx.uiSessionId, targetResponseId!);
             } else if (chunk.response_id && !targetResponseIdSet) {
               targetResponseId = chunk.response_id;
               targetResponseIdSet = true;
               updateSessionParent(ctx.uiSessionId, chunk.response_id);
+              updateStreamResponseId(ctx.completionId, ctx.uiSessionId, targetResponseId!);
             }
 
             if (chunk.usage) {
@@ -458,6 +460,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       };
 
       await readUpstream(ctx.stream);
+      if (clientAborted()) return;
       if (toolParser?.isInsideTool()) sawToolCallSignal = true;
 
       // Degenerate-answer guard: if the entire response is a terse
@@ -680,10 +683,10 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       }
       bufferedWrite('data: [DONE]\n\n');
       flushWrites();
-      markHistoryComplete(ctx.uiSessionId);
+      if (!clientAborted()) markHistoryComplete(ctx.uiSessionId);
     } finally {
       if (clientSignal) clientSignal.removeEventListener('abort', onClientAbort);
-      releaseActiveStream('stream teardown');
+      await releaseActiveStream('stream teardown');
       flushWrites();
       clearInterval(heartbeatInterval);
       removeStream(ctx.completionId);
@@ -747,6 +750,7 @@ export async function collectNonStreamingResult(
   };
 
   const qwenParser = new QwenStreamParser(uiSessionId, {
+    onTargetResponseId: responseId => updateStreamResponseId(completionId, uiSessionId, responseId),
     tools: hasTools ? tools : [],
     onThinking: () => {},
     onToolCall: (tc) => {

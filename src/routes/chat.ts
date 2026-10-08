@@ -165,9 +165,12 @@ function buildRecentToolContext(
 
 export async function chatCompletions(c: Context) {
   const user = (c as any).get?.('user') as UserIdentity | undefined;
+  let detachAbort = () => {};
+  let activeCompletionId: string | undefined;
   let userSlotHeld = false;
   let userSlotReleased = false;
   const releaseUserSlotOnce = () => {
+    detachAbort();
     if (!userSlotHeld || userSlotReleased || !user) return;
     userSlotReleased = true;
     releaseUserSlot(user.id);
@@ -440,17 +443,43 @@ export async function chatCompletions(c: Context) {
       economicalPrompt = parts.join('\n');
       if (!economicalPrompt.trim()) canEconomize = false;
     }
-    const baseStreamOptions = { sessionKey, economicalPrompt };
+    const requestController = new AbortController();
+    const clientSignal = c.req.raw.signal;
+    const onClientAbort = () => requestController.abort(clientSignal.reason);
+    clientSignal.addEventListener('abort', onClientAbort, { once: true });
+    detachAbort = () => clientSignal.removeEventListener('abort', onClientAbort);
+    if (clientSignal.aborted) onClientAbort();
+    const baseStreamOptions = { sessionKey, economicalPrompt, signal: requestController.signal };
 
     const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', false);
     const completionId = 'chatcmpl-' + crypto.randomUUID();
+    activeCompletionId = completionId;
     const stopToken = crypto.randomUUID();
+    const registerActiveStream = async (result: Awaited<ReturnType<typeof createQwenStream>>) => {
+      if (requestController.signal.aborted) {
+        await result.cancel(requestController.signal.reason);
+        requestController.signal.throwIfAborted();
+      }
+      registerStream(completionId, {
+        abortController: requestController,
+        accountId: result.accountId,
+        uiSessionId: result.uiSessionId,
+        targetResponseId: '',
+        headers: result.headers,
+        stopToken,
+        cancel: async reason => {
+          requestController.abort(reason);
+          await result.cancel(reason);
+        },
+      });
+    };
     let lastError: any = null;
 
     const obtainStream = async (
       promptForStream: string,
       forceBootstrapOverride = false,
     ): Promise<{ stream: ReadableStream; uiSessionId: string; accountId: string }> => {
+      requestController.signal.throwIfAborted();
       if (isGuestModeOnly) {
         console.log('[Chat] Guest mode only enabled. Bypassing account rotation.');
         try {
@@ -464,14 +493,7 @@ export async function chatCompletions(c: Context) {
             pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
             { ...baseStreamOptions, forceBootstrap: true }
           );
-          registerStream(completionId, {
-            abortController: result.controller,
-            accountId: 'guest',
-            uiSessionId: result.uiSessionId,
-            targetResponseId: '',
-            headers: result.headers,
-            stopToken,
-          });
+          await registerActiveStream(result);
           return { stream: result.stream, uiSessionId: result.uiSessionId, accountId: 'guest' };
         } catch (err: any) {
           console.error('[Chat] Guest mode failed:', err.message);
@@ -490,6 +512,7 @@ export async function chatCompletions(c: Context) {
           const waitStart = Date.now();
           const MAX_LANE_WAIT_MS = 30000;
           while (!account) {
+            requestController.signal.throwIfAborted();
             const elapsed = Date.now() - waitStart;
             if (elapsed > MAX_LANE_WAIT_MS) {
               throw new RetryableQwenStreamError(
@@ -554,19 +577,13 @@ export async function chatCompletions(c: Context) {
                 pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
                 { ...baseStreamOptions, forceBootstrap: forceBootstrapOverride || attempt > 1 || mustBootstrap }
               );
-              registerStream(completionId, {
-                abortController: result.controller,
-                accountId: result.accountId,
-                uiSessionId: result.uiSessionId,
-                targetResponseId: '',
-                headers: result.headers,
-                stopToken,
-              });
+              await registerActiveStream(result);
               success = true;
               releaseAccountInUse(accountId);
               noteAccountRecovery(accountId);
               return { stream: result.stream, uiSessionId: result.uiSessionId, accountId };
             } catch (err: any) {
+              requestController.signal.throwIfAborted();
               retries--;
 
               if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
@@ -641,14 +658,7 @@ export async function chatCompletions(c: Context) {
           pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
           { ...baseStreamOptions, forceBootstrap: true }
         );
-        registerStream(completionId, {
-          abortController: result.controller,
-          accountId: 'guest',
-          uiSessionId: result.uiSessionId,
-          targetResponseId: '',
-          headers: result.headers,
-          stopToken,
-        });
+        await registerActiveStream(result);
         return { stream: result.stream, uiSessionId: result.uiSessionId, accountId: 'guest' };
       }
 
@@ -714,8 +724,9 @@ export async function chatCompletions(c: Context) {
             acquired.accountId === 'global' ? undefined : acquired.accountId,
             undefined,
             undefined,
-            { chatId: acquired.uiSessionId, forceBootstrap: false }
+            { chatId: acquired.uiSessionId, forceBootstrap: false, signal: requestController.signal }
           );
+          await registerActiveStream(continuedStreamResult);
           const continuedResponse = await collectResponse(continuedStreamResult.stream, continuedStreamResult.uiSessionId);
           if (continuedResponse.status === 200 && continuedResponse.content) {
             completed.content += continuedResponse.content;
@@ -728,6 +739,7 @@ export async function chatCompletions(c: Context) {
             break;
           }
         } catch (err: any) {
+          requestController.signal.throwIfAborted();
           console.warn('[Chat] Non-streaming auto-continue failed:', err.message);
           break;
         }
@@ -794,18 +806,12 @@ export async function chatCompletions(c: Context) {
             acquired.accountId === 'global' ? undefined : acquired.accountId,
             undefined,
             undefined,
-            { chatId, forceBootstrap: false }
+            { chatId, forceBootstrap: false, signal: requestController.signal }
           );
-          registerStream(completionId, {
-            abortController: result.controller,
-            accountId: result.accountId,
-            uiSessionId: result.uiSessionId,
-            targetResponseId: '',
-            headers: result.headers,
-            stopToken,
-          });
+          await registerActiveStream(result);
           return { stream: result.stream, uiSessionId: result.uiSessionId };
         } catch (err: any) {
+          requestController.signal.throwIfAborted();
           console.warn('[Chat] Streaming auto-continue request failed:', err.message);
           return null;
         }
@@ -825,6 +831,7 @@ export async function chatCompletions(c: Context) {
       } : {}),
     });
   } catch (err: any) {
+    if (activeCompletionId) removeStream(activeCompletionId);
     releaseUserSlotOnce();
     console.error('Error in chatCompletions:', err)
     const status = err.upstreamStatus || 500
