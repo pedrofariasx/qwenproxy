@@ -1,6 +1,13 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert';
-import {
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const originalCwd = process.cwd();
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-scheduler-'));
+process.chdir(directory);
+const {
   markAccountStreamStart,
   markAccountStreamEnd,
   getAccountActiveLoad,
@@ -8,9 +15,19 @@ import {
   onAccountFreed,
   releaseAccountInUse,
   clearAccountCooldown,
-} from '../../core/account-manager.js';
+} = await import('../../core/account-manager.js');
 import { makeAccountLaneId, getBaseAccountId } from '../../core/account-lanes.js';
-import { loadAccounts } from '../../core/accounts.js';
+const { loadAccounts, addAccount } = await import('../../core/accounts.js');
+const { closeDatabase } = await import('../../core/database.js');
+
+addAccount('scheduler-first@example.test', 'fixture-password', 'scheduler-fixture-first');
+addAccount('scheduler-second@example.test', 'fixture-password', 'scheduler-fixture-second');
+
+after(() => {
+  closeDatabase();
+  process.chdir(originalCwd);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
 
 test('account scheduler: marks active load bucketed by base account (lanes share bucket)', () => {
   const base = 'sched-account-a';
@@ -33,10 +50,7 @@ test('account scheduler: marks active load bucketed by base account (lanes share
 test('account scheduler: getNextAccount prefers the least-loaded viable account', async () => {
   const accounts = loadAccounts();
   const viable = accounts.filter(a => a.id !== 'global').slice(0, 4);
-  if (viable.length < 2) {
-    assert.ok(getNextAccount() !== null || true, 'skip preference check without enough accounts');
-    return;
-  }
+  assert.strictEqual(viable.length, 2, 'the isolated fixture must provide two accounts');
 
   // Normalize scheduler state for the accounts we'll pin load onto.
   for (const a of viable) {
