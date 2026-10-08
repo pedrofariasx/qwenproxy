@@ -114,20 +114,29 @@ test('administrative HTTP stop reports failed teardown and preserves the registe
   });
   assert.equal(login.status, 200);
   const cookie = login.headers.get('set-cookie')!.split(';')[0];
+  const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
+  let attempts = 0;
+  let released = 0;
+  const controller = new AbortController();
+  const managed = manageQwenStream(new ReadableStream<Uint8Array>(), controller, 1000, 'fixture', async () => {
+    if (++attempts === 1) throw new Error('fixture teardown failure');
+  }, () => { released++; }, () => {});
   registry.registerStream('admin-http-fixture', {
-    abortController: new AbortController(), accountId: 'fixture', uiSessionId: 'fixture-chat',
-    targetResponseId: '', headers, stopToken: 'fixture', cancel: async () => { throw new Error('fixture teardown failure'); },
+    abortController: controller, accountId: 'fixture', uiSessionId: 'fixture-chat',
+    targetResponseId: '', headers, stopToken: 'fixture', cancel: managed.cancel, cleanup: managed.cancel,
   });
   try {
     const response = await adminApp.request('/api/streams/admin-http-fixture/stop', { method: 'POST', headers: { cookie } });
     assert.equal(response.status, 502);
     assert.deepEqual(await response.json(), { ok: false, transport_stopped: false, error: 'Transport teardown failed' });
     assert.ok(registry.getStream('admin-http-fixture'));
-    registry.getStream('admin-http-fixture')!.cancel = async () => {};
+    assert.equal(released, 0);
     const retry = await adminApp.request('/api/streams/admin-http-fixture/stop', { method: 'POST', headers: { cookie } });
     assert.equal(retry.status, 200);
     assert.deepEqual(await retry.json(), { ok: true });
     assert.equal(registry.getStream('admin-http-fixture'), undefined);
+    assert.equal(attempts, 2);
+    assert.equal(released, 1);
   } finally { registry.removeStream('admin-http-fixture'); }
 });
 

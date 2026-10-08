@@ -23,6 +23,10 @@ export function manageQwenStream(
   let finishing = false;
   let consumerCancelled = false;
   let finished: Promise<void> | undefined;
+  let readerCleanup: Promise<void> | undefined;
+  let readerReleased = false;
+  let transportStopped = false;
+  let outputSettled = false;
 
   const finish = (reason?: unknown, normal = false): Promise<void> => {
     if (finished) return finished;
@@ -32,20 +36,32 @@ export function manageQwenStream(
     parentSignal?.removeEventListener('abort', onParentAbort);
     finished = Promise.resolve().then(async () => {
       if (!normal && !controller.signal.aborted) controller.abort(reason);
+      readerCleanup ??= normal ? Promise.resolve() : cancelQwenReader(reader, reason);
       const results = await Promise.allSettled([
-        Promise.resolve().then(() => abortTransport?.(!normal)),
-        normal ? Promise.resolve() : cancelQwenReader(reader, reason),
+        Promise.resolve().then(async () => {
+          if (!transportStopped) {
+            await abortTransport?.(!normal);
+            transportStopped = true;
+          }
+        }),
+        readerCleanup,
       ]);
-      reader.releaseLock();
-      const failure = results.find(result => result.status === 'rejected');
-      if (failure?.status === 'rejected') throw failure.reason;
+      if (!readerReleased) { reader.releaseLock(); readerReleased = true; }
+      const [transportResult, readerResult] = results;
+      if (transportResult.status === 'rejected') throw transportResult.reason;
+      if (readerResult.status === 'rejected' && !abortTransport) throw readerResult.reason;
       onDone();
-      if (!consumerCancelled) {
+      if (!consumerCancelled && !outputSettled) {
+        outputSettled = true;
         if (normal) output.close();
         else output.error(reason instanceof Error ? reason : new Error(String(reason ?? 'Qwen stream cancelled')));
       }
     }).catch(error => {
-      if (!consumerCancelled) output.error(error);
+      finished = undefined;
+      if (!consumerCancelled && !outputSettled) {
+        outputSettled = true;
+        output.error(error);
+      }
       throw error;
     });
     return finished;

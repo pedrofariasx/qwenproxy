@@ -163,7 +163,7 @@ export async function browserStreamFetch(
       clearTimeout(deadline);
       cleanup();
     }
-  });
+  }).catch(error => { aborting = undefined; throw error; });
   const onAbort = () => { void abort().catch(() => {}); };
   const armTimeout = () => {
     clearTimeout(timeout);

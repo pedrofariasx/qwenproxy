@@ -165,6 +165,25 @@ test('actual browser relay tears down requests without affecting adjacent stream
       assert.equal(getAccountActiveLoad('browser-a'), 0);
     });
 
+    await t.test('failed teardown can retry the actual browser transport before releasing the account', async () => {
+      const result = await create('retry-abort');
+      const owned = context.pages().find(page => page !== baseA && page !== baseB)!;
+      const evaluate = t.mock.method(owned, 'evaluate', () => Promise.reject(new Error('fixture abort unavailable')));
+      const close = t.mock.method(owned, 'close', () => Promise.reject(new Error('fixture teardown unavailable')));
+      try {
+        await assert.rejects(result.cancel('fixture stop'), /fixture teardown unavailable/);
+        assert.equal(getAccountActiveLoad('browser-a'), 1);
+        assert.equal(owned.isClosed(), false);
+        assert.equal(closed.has('retry-abort'), false);
+      } finally { evaluate.mock.restore(); close.mock.restore(); }
+      await result.cancel('fixture retry stop');
+      await until(() => closed.has('retry-abort'));
+      assert.equal(owned.isClosed(), true);
+      assert.equal(getAccountActiveLoad('browser-a'), 0);
+      assert.equal(baseA.isClosed(), false);
+      assert.equal(baseB.isClosed(), false);
+    });
+
     await t.test('normal EOF cleans up without turning completion into an abort', async () => {
       const result = await create('normal-eof');
       responses.get('normal-eof')!.end('data: fixture\n\n');

@@ -258,10 +258,13 @@ test('a failed source cancellation must not release its lease even when it rejec
   const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
   const reason = new Error('fixture source cancellation failed');
   let released = false;
-  const source = new ReadableStream<Uint8Array>({ cancel(error) { return Promise.reject(error); } });
+  let calls = 0;
+  const source = new ReadableStream<Uint8Array>({ cancel(error) { calls++; return Promise.reject(error); } });
   const managed = manageQwenStream(source, new AbortController(), 1000, 'fixture', undefined,
     () => { released = true; }, () => {});
   await assert.rejects(managed.stream.cancel(reason), /fixture source cancellation failed/);
+  await assert.rejects(managed.cancel(), /fixture source cancellation failed/);
+  assert.equal(calls, 1);
   assert.equal(released, false);
 });
 
