@@ -63,9 +63,9 @@ globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.includes('/completions/stop')) { providerStops++; return Response.json({ success: true }); }
   if (url.includes('/completions?')) {
     payloads.push(JSON.parse(String(init?.body)));
-    const answer = 'The controlled fixture completed successfully. '.repeat(8);
+    const answer = 'The controlled request completed successfully. It produced a deterministic answer for the authorization fixture, without contacting a real provider or reading account data.';
     return new Response('data: ' + JSON.stringify({ 'response.created': { response_id: `fixture-response-${payloads.length}` } }) + '\n\n'
-      + 'data: ' + JSON.stringify({ choices: [{ delta: { content: answer, phase: 'answer' }, finish_reason: 'stop' }] }) + '\n\n'
+      + 'data: ' + JSON.stringify({ response_id: `fixture-response-${payloads.length}`, choices: [{ delta: { content: answer, phase: 'answer' }, finish_reason: 'stop' }] }) + '\n\n'
       + 'data: [DONE]\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
   }
   return Response.json({ success: true });
