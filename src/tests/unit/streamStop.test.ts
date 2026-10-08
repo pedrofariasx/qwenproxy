@@ -130,3 +130,24 @@ test('administrative HTTP stop reports failed teardown and preserves the registe
     assert.equal(registry.getStream('admin-http-fixture'), undefined);
   } finally { registry.removeStream('admin-http-fixture'); }
 });
+
+test('registry removal waits for confirmed cleanup and never removes a replacement entry', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const entry = { abortController: new AbortController(), accountId: 'fixture', uiSessionId: 'fixture-chat',
+    targetResponseId: '', headers, stopToken: 'fixture', cleanup: () => gate };
+  registry.registerStream('cleanup-fixture', entry);
+  const original = registry.getStream('cleanup-fixture')!;
+  const pending = registry.removeStream('cleanup-fixture');
+  assert.equal(registry.getStream('cleanup-fixture'), original);
+  registry.registerStream('cleanup-fixture', { ...entry, cleanup: async () => { throw new Error('fixture teardown failed'); } });
+  const replacement = registry.getStream('cleanup-fixture')!;
+  release();
+  assert.equal(await pending, false);
+  assert.equal(registry.getStream('cleanup-fixture'), replacement);
+  assert.equal(await registry.removeStream('cleanup-fixture'), false);
+  assert.equal(registry.getStream('cleanup-fixture'), replacement);
+  replacement.cleanup = async () => {};
+  assert.equal(await registry.removeStream('cleanup-fixture'), true);
+  assert.equal(registry.getStream('cleanup-fixture'), undefined);
+});

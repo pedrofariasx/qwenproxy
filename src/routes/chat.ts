@@ -467,11 +467,25 @@ export async function chatCompletions(c: Context) {
         targetResponseId: '',
         headers: result.headers,
         stopToken,
+        cleanup: result.cancel,
         cancel: async reason => {
           requestController.abort(reason);
           await result.cancel(reason);
         },
       });
+    };
+    const prepareStreamAttempt = async () => {
+      requestController.signal.throwIfAborted();
+      const previous = getStream(completionId);
+      if (previous?.cleanup) {
+        try { await previous.cleanup('preparing another attempt'); }
+        catch {
+          const failure = new QwenUpstreamError('Previous Qwen transport could not be terminated.', 'TransportTeardownFailed', 502);
+          requestController.abort(failure);
+          throw failure;
+        }
+      }
+      requestController.signal.throwIfAborted();
     };
     let lastError: any = null;
 
@@ -479,7 +493,7 @@ export async function chatCompletions(c: Context) {
       promptForStream: string,
       forceBootstrapOverride = false,
     ): Promise<{ stream: ReadableStream; uiSessionId: string; accountId: string }> => {
-      requestController.signal.throwIfAborted();
+      await prepareStreamAttempt();
       if (isGuestModeOnly) {
         console.log('[Chat] Guest mode only enabled. Bypassing account rotation.');
         try {
@@ -642,7 +656,7 @@ export async function chatCompletions(c: Context) {
         account = getNextAvailableAccount(triedAccountIds);
       }
 
-      removeStream(completionId);
+      await removeStream(completionId);
       const accounts = loadAccounts();
       const allOnCooldown = accounts.length === 0 || accounts.every(a => getAccountCooldownInfo(a.id) !== null);
 
@@ -717,6 +731,7 @@ export async function chatCompletions(c: Context) {
         console.warn(`[Chat] Non-streaming truncated response detected. Auto-continuing (${config.autoContinue.maxContinues - autoContinuesLeft}/${config.autoContinue.maxContinues})...`);
         const continuePrompt = 'Continue directly from where you left off. Do not repeat anything previously written, just continue immediately with the remainder of the response.';
         try {
+          await prepareStreamAttempt();
           const continuedStreamResult = await createQwenStream(
             continuePrompt,
             false,
@@ -798,6 +813,7 @@ export async function chatCompletions(c: Context) {
       },
       onAutoContinue: async (chatId: string, parentId: string) => {
         try {
+          await prepareStreamAttempt();
           const continuePrompt = 'Continue directly from where you left off. Do not repeat anything previously written, just continue immediately with the remainder of the response.';
           const result = await createQwenStream(
             continuePrompt,
@@ -832,7 +848,13 @@ export async function chatCompletions(c: Context) {
       } : {}),
     });
   } catch (err: any) {
-    if (activeCompletionId) removeStream(activeCompletionId);
+    const activeEntry = activeCompletionId ? getStream(activeCompletionId) : undefined;
+    let teardownFailed = false;
+    if (activeEntry?.cancel) {
+      try { await activeEntry.cancel('request failed'); }
+      catch { teardownFailed = true; }
+    }
+    if (activeCompletionId && !teardownFailed) await removeStream(activeCompletionId, activeEntry);
     releaseUserSlotOnce();
     console.error('Error in chatCompletions:', err)
     const status = err.upstreamStatus || 500
@@ -870,8 +892,9 @@ export async function chatCompletionsStop(c: Context) {
       return c.json({ error: 'response_id mismatch' }, 400);
     }
     const targetResponseId = entry.targetResponseId;
-    const localStop = entry.cancel
-      ? entry.cancel(new Error('Generation stopped by client'))
+    const cancel = entry.cancel ?? entry.cleanup;
+    const localStop = cancel
+      ? cancel(new Error('Generation stopped by client'))
       : Promise.resolve().then(() => entry.abortController.abort());
     const upstreamStop = async () => {
       if (!targetResponseId) return false;
@@ -899,7 +922,8 @@ export async function chatCompletionsStop(c: Context) {
     };
     const [local, upstream] = await Promise.allSettled([localStop, upstreamStop()]);
     if (local.status === 'rejected') return c.json({ error: 'Transport teardown failed', transport_stopped: false }, 502);
-    removeStream(key, entry);
+    const removed = await removeStream(key, entry);
+    if (!removed && getStream(key) === entry) return c.json({ error: 'Transport teardown failed', transport_stopped: false }, 502);
     if (upstream.status === 'rejected') {
       return c.json({ error: 'Upstream stop was not acknowledged', transport_stopped: true, upstream_stop_accepted: false }, 502);
     }

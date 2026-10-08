@@ -9,6 +9,7 @@ export interface StreamRegistryEntry {
   stopToken: string;
   createdAt: number;
   cancel?: (reason?: unknown) => Promise<void>;
+  cleanup?: (reason?: unknown) => Promise<void>;
 }
 
 const activeStreams = new Map<string, StreamRegistryEntry>();
@@ -56,22 +57,30 @@ export function findStream(identifier: string): { key: string; entry: StreamRegi
   return matches.length === 1 ? { key: matches[0][0], entry: matches[0][1] } : undefined;
 }
 
-export function removeStream(key: string, expected?: StreamRegistryEntry): void {
-  if (expected && activeStreams.get(key) !== expected) return;
+export async function removeStream(key: string, expected?: StreamRegistryEntry): Promise<boolean> {
+  const entry = activeStreams.get(key);
+  if (expected && entry !== expected) return false;
+  if (entry?.cleanup) {
+    try { await entry.cleanup('stream registry cleanup'); }
+    catch { return false; }
+    if (activeStreams.get(key) !== entry) return false;
+  }
   activeStreams.delete(key)
   updateStreamGauges()
+  return true;
 }
 
 export async function abortStream(key: string): Promise<boolean> {
   const entry = activeStreams.get(key)
   if (entry) {
-    if (entry.cancel) {
-      await entry.cancel(new Error('Stream stopped by administrator'));
-      removeStream(key, entry);
+    const cancel = entry.cancel ?? entry.cleanup;
+    if (cancel) {
+      await cancel(new Error('Stream stopped by administrator'));
     } else {
       entry.abortController.abort();
-      removeStream(key, entry);
     }
+    const removed = await removeStream(key, entry);
+    if (!removed && activeStreams.get(key) === entry) throw new Error('Transport teardown failed');
     return true
   }
   return false

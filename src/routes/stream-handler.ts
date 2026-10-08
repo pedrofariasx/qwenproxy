@@ -7,7 +7,7 @@ import { looksLikeUnwrappedToolCall, parseUnwrappedToolCalls } from './tool-hand
 import { textContainsToolCallStart } from '../tools/toolcall-tags.js';
 import { isDegenerateAnswer, canFastReleaseGuard } from '../utils/degenerate-answer.js';
 import { isOverloadMessage } from '../utils/overload-detector.js';
-import { removeStream, updateStreamResponseId } from '../core/stream-registry.js';
+import { removeStream, updateStreamResponseId, getStream } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
 import { recordToolCallEmission } from '../core/tool-call-registry.js';
 import { updateSessionParent, markHistoryComplete } from '../services/qwen.js';
@@ -86,16 +86,22 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     const clientSignal = (c.req.raw as any)?.signal as AbortSignal | undefined;
     const clientAborted = () => !!clientSignal?.aborted || !!streamWriter.aborted;
     let pendingTeardown: Promise<void> = Promise.resolve();
-    const releaseActiveStream = (reason: string) => {
+    let teardownFailed = false;
+    let teardownEntry: ReturnType<typeof getStream>;
+    const releaseActiveStream = (reason: string, abortRequest = false) => {
       const r = activeReader;
       const s = activeStream;
+      if (!r && !s) return pendingTeardown;
       activeStream = null;
       activeReader = null;
-      const cancel = r ? r.cancel(reason) : s?.cancel(reason);
-      if (cancel) pendingTeardown = Promise.all([pendingTeardown, cancel]).then(() => {}, () => {});
+      const entry = getStream(ctx.completionId);
+      teardownEntry = entry;
+      const cleanup = abortRequest ? entry?.cancel : entry?.cleanup ?? entry?.cancel;
+      const cancel = Promise.resolve().then(() => cleanup ? cleanup(reason) : r ? r.cancel(reason) : s?.cancel(reason));
+      pendingTeardown = Promise.all([pendingTeardown, cancel]).then(() => {}, () => { teardownFailed = true; });
       return pendingTeardown;
     };
-    const onClientAbort = () => { void releaseActiveStream('client aborted stream'); };
+    const onClientAbort = () => { void releaseActiveStream('client aborted stream', true); };
     streamWriter.onAbort(onClientAbort);
     if (clientSignal) {
       if (clientSignal.aborted) queueMicrotask(onClientAbort);
@@ -689,9 +695,9 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       await releaseActiveStream('stream teardown');
       flushWrites();
       clearInterval(heartbeatInterval);
-      removeStream(ctx.completionId);
-      ctx.onUsage?.(promptTokens, completionTokens);
-      ctx.onComplete?.();
+      if (!teardownFailed) await removeStream(ctx.completionId, teardownEntry);
+      try { ctx.onUsage?.(promptTokens, completionTokens); }
+      finally { ctx.onComplete?.(); }
     }
   });
 }
@@ -775,7 +781,7 @@ export async function collectNonStreamingResult(
 
   const upstreamError = parseQwenErrorPayload(buffer);
   if (upstreamError) {
-    removeStream(completionId);
+    await removeStream(completionId);
     completeOnce();
     return {
       status: upstreamError.status,
@@ -817,7 +823,7 @@ export async function collectNonStreamingResult(
   const isTruncated = toolCallsOut.length === 0 && isTruncatedResponse(finalContent, parserState.finishReason);
   const finishReason = toolCallsOut.length ? 'tool_calls' : (isTruncated ? 'length' : (parserState.finishReason || 'stop'));
 
-  removeStream(completionId);
+  await removeStream(completionId);
   markHistoryComplete(uiSessionId);
   completeOnce();
   return {

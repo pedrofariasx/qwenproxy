@@ -122,6 +122,82 @@ test('request abort before Node response metadata closes the connection and rele
   }
 });
 
+test('client teardown failure keeps its registry entry and account lease visible', { timeout: 3000 }, async () => {
+  const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
+  const { handleStreamingResponse } = await import('../../routes/stream-handler.js');
+  const { acquireAccountStreamSlot } = await import('../../core/account-manager.js');
+  const slot = await acquireAccountStreamSlot('fixture-handler-failure', 1000);
+  const controller = new AbortController();
+  const finished = deferred();
+  let usageCalls = 0;
+  let completeCalls = 0;
+  const managed = manageQwenStream(new ReadableStream<Uint8Array>({
+    cancel() { return Promise.reject(new Error('fixture cancellation failed')); },
+  }), controller, 1000, 'fixture', undefined, () => slot.release(), () => {});
+  registry.registerStream('handler-failure-fixture', {
+    abortController: controller, accountId: 'fixture-handler-failure', uiSessionId: 'fixture-chat',
+    targetResponseId: '', headers, stopToken: 'fixture', cancel: managed.cancel, cleanup: managed.cancel,
+  });
+  const entry = registry.getStream('handler-failure-fixture');
+  const app = new Hono();
+  app.get('/fixture', c => handleStreamingResponse(c, {
+    stream: managed.stream, completionId: 'handler-failure-fixture', uiSessionId: 'fixture-chat',
+    model: 'fixture', finalPrompt: 'fixture', hasTools: false, tools: [],
+    onUsage: () => { usageCalls++; },
+    onComplete: () => { completeCalls++; finished.resolve(); },
+  }));
+  try {
+    const response = await app.request('/fixture');
+    const reader = response.body!.getReader();
+    await reader.read();
+    await reader.cancel('client disconnected');
+    await finished.promise;
+    assert.equal(registry.getStream('handler-failure-fixture'), entry);
+    assert.equal(getAccountActiveLoad('fixture-handler-failure'), 1);
+    assert.equal(usageCalls, 1);
+    assert.equal(completeCalls, 1);
+  } finally {
+    const current = registry.getStream('handler-failure-fixture');
+    if (current) current.cleanup = async () => {};
+    await registry.removeStream('handler-failure-fixture');
+    slot.release();
+  }
+});
+
+test('a read error with successful teardown does not leave a phantom registry entry', { timeout: 3000 }, async () => {
+  const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
+  const { handleStreamingResponse } = await import('../../routes/stream-handler.js');
+  const { acquireAccountStreamSlot } = await import('../../core/account-manager.js');
+  const slot = await acquireAccountStreamSlot('fixture-read-failure', 1000);
+  const controller = new AbortController();
+  const finished = deferred();
+  let completed = 0;
+  const managed = manageQwenStream(new ReadableStream<Uint8Array>({
+    start(source) { source.error(new Error('fixture read error')); },
+  }), controller, 1000, 'fixture', undefined, () => slot.release(), () => {});
+  registry.registerStream('read-failure-fixture', {
+    abortController: controller, accountId: 'fixture-read-failure', uiSessionId: 'fixture-chat',
+    targetResponseId: '', headers, stopToken: 'fixture', cancel: managed.cancel, cleanup: managed.cancel,
+  });
+  const app = new Hono();
+  app.get('/fixture', c => handleStreamingResponse(c, {
+    stream: managed.stream, completionId: 'read-failure-fixture', uiSessionId: 'fixture-chat',
+    model: 'fixture', finalPrompt: 'fixture', hasTools: false, tools: [],
+    onComplete: () => { completed++; finished.resolve(); },
+  }));
+  try {
+    const response = await app.request('/fixture');
+    await response.text();
+    await finished.promise;
+    assert.equal(registry.getStream('read-failure-fixture'), undefined);
+    assert.equal(getAccountActiveLoad('fixture-read-failure'), 0);
+    assert.equal(completed, 1);
+  } finally {
+    await registry.removeStream('read-failure-fixture');
+    slot.release();
+  }
+});
+
 test('idle timeout ends a pending read and tears down exactly once', { timeout: 2000 }, async () => {
   const { manageQwenStream } = await import('../../services/stream-lifecycle.js');
   let cancelled = 0;
@@ -264,6 +340,57 @@ test('HTTP stop and client disconnect do not retry or confirm partial history', 
     assert.equal(posts, 5);
     assert.equal(cancellations, 4);
   } finally {
+    delete process.env.TEST_MOCK_PLAYWRIGHT;
+  }
+});
+
+test('non-streaming teardown failure keeps its account lease and registry entry', { timeout: 10000 }, async t => {
+  const { addAccount } = await import('../../core/accounts.js');
+  const { setSession, getSession } = await import('../../services/session-manager.js');
+  const { markAccountStreamEnd } = await import('../../core/account-manager.js');
+  addAccount('failed-http@example.invalid', 'fixture', 'failed-http-account');
+  setSession('failed-http-session', { chatId: 'failed-http-chat', accountId: 'failed-http-account', headers,
+    parentId: 'previous-response', historyComplete: true, updatedAt: Date.now() });
+  process.env.TEST_MOCK_PLAYWRIGHT = 'true';
+  const app = new Hono();
+  app.post('/chat', chatCompletions);
+  let posts = 0;
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
+    if (!String(input).includes('/completions?')) return Response.json({ success: true });
+    posts++;
+    return new Response(new ReadableStream<Uint8Array>({
+      cancel() { return Promise.reject(new Error('fixture teardown failure')); },
+    }), { headers: { 'Content-Type': 'text/event-stream' } });
+  });
+  const abort = new AbortController();
+  const pending = app.request('/chat', { method: 'POST', signal: abort.signal, headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'qwen3.7-plus', user: 'failed-http-session', stream: false,
+      messages: [{ role: 'user', content: 'fixture continuation' }] }),
+  });
+  let key: string | undefined;
+  try {
+    const deadline = Date.now() + 5000;
+    while (!key) {
+      key = [...registry.getStreamRegistry()].find(([, entry]) => entry.accountId === 'failed-http-account')?.[0];
+      if (Date.now() > deadline) throw new Error('Fixture stream was not registered');
+      if (!key) await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const entry = registry.getStream(key);
+    abort.abort();
+    assert.ok((await pending).status >= 400);
+    assert.equal(registry.getStream(key), entry);
+    assert.equal(getAccountActiveLoad('failed-http-account'), 1);
+    assert.equal(getSession('failed-http-session')?.historyComplete, false);
+    assert.equal(posts, 1);
+  } finally {
+    abort.abort();
+    await pending;
+    if (key) {
+      const entry = registry.getStream(key);
+      if (entry) entry.cleanup = async () => {};
+      await registry.removeStream(key);
+    }
+    markAccountStreamEnd('failed-http-account');
     delete process.env.TEST_MOCK_PLAYWRIGHT;
   }
 });
