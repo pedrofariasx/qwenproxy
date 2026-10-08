@@ -8,6 +8,7 @@ import { Hono } from 'hono';
 const cwd = process.cwd();
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-stop-'));
 process.chdir(directory);
+process.env.ADMIN_PASSWORD = 'fixture-admin';
 const { chatCompletionsStop } = await import('../../routes/chat.js');
 const registry = await import('../../core/stream-registry.js');
 const { closeDatabase } = await import('../../core/database.js');
@@ -104,4 +105,28 @@ test('administrative stop waits for transport cleanup before reporting completio
   assert.equal(await pending, true);
   assert.equal(registry.getStream('admin-fixture'), undefined);
   assert.equal(await registry.abortStream('missing-fixture'), false);
+});
+
+test('administrative HTTP stop reports failed teardown and preserves the registered stream', async () => {
+  const { adminApp } = await import('../../api/admin.js');
+  const login = await adminApp.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'fixture-admin' }),
+  });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie')!.split(';')[0];
+  registry.registerStream('admin-http-fixture', {
+    abortController: new AbortController(), accountId: 'fixture', uiSessionId: 'fixture-chat',
+    targetResponseId: '', headers, stopToken: 'fixture', cancel: async () => { throw new Error('fixture teardown failure'); },
+  });
+  try {
+    const response = await adminApp.request('/api/streams/admin-http-fixture/stop', { method: 'POST', headers: { cookie } });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { ok: false, transport_stopped: false, error: 'Transport teardown failed' });
+    assert.ok(registry.getStream('admin-http-fixture'));
+    registry.getStream('admin-http-fixture')!.cancel = async () => {};
+    const retry = await adminApp.request('/api/streams/admin-http-fixture/stop', { method: 'POST', headers: { cookie } });
+    assert.equal(retry.status, 200);
+    assert.deepEqual(await retry.json(), { ok: true });
+    assert.equal(registry.getStream('admin-http-fixture'), undefined);
+  } finally { registry.removeStream('admin-http-fixture'); }
 });

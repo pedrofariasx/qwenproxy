@@ -474,6 +474,23 @@ qwenproxy/
 
 ---
 
+## Testes
+
+`npm run test:unit` executa as verificações unitárias sem iniciar navegadores nem usar contas Qwen.
+
+`npm test` executa os testes unitários e a suíte e2e. Instale o Chromium antes de executá-lo:
+
+```bash
+npx playwright install chromium
+npm test
+```
+
+Parte da suíte e2e também requer contas e sessões Qwen configuradas. A fixture de cancelamento usa apenas servidores locais e pode ser executada separadamente, sem contas Qwen:
+
+```bash
+npx tsx --test src/tests/e2e/streamCancellation.test.ts
+```
+
 ## Troubleshooting
 
 | Problema                         | Solução                                                     |

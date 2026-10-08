@@ -463,8 +463,12 @@ adminApp.get('/api/streams', adminGuard, (c) => {
 })
 
 adminApp.post('/api/streams/:key/stop', adminGuard, async (c) => {
-  const stopped = await abortStream(c.req.param('key'))
-  return c.json({ ok: stopped })
+  try {
+    const stopped = await abortStream(c.req.param('key'))
+    return c.json({ ok: stopped })
+  } catch {
+    return c.json({ ok: false, transport_stopped: false, error: 'Transport teardown failed' }, 502)
+  }
 })
 
 // --- Bulk actions / exports -----------------------------------------------
