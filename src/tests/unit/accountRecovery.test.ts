@@ -14,7 +14,7 @@ const { recoverUnreadyAccounts } = await import('../../services/session-keeper.j
 const { markAccountReady, markAccountNotReady, isAccountReady, markAccountRateLimited, clearAccountCooldown, markAccountStreamStart, markAccountStreamEnd } = await import('../../core/account-manager.js');
 const { config } = await import('../../core/config.js');
 const { makeAccountLaneId } = await import('../../core/account-lanes.js');
-const { getUiMutex, getOrLaunchBrowser, setBrowser, accountPages, accountContexts, initPlaywrightForAccount } = await import('../../services/browser-manager.js');
+const { getUiMutex, getOrLaunchBrowser, setBrowser, accountPages, accountContexts, accountHeaderCaches, cookieCaches, cachedUserAgents, getAccountHeaderCache, initPlaywrightForAccount } = await import('../../services/browser-manager.js');
 const { chromium } = await import('playwright');
 const account = addAccount('recovery-fixture@example.test', 'fixture-password');
 
@@ -146,3 +146,64 @@ test('lane authentication confirms the base email instead of the lane label', as
     accountPages.delete(laneId);
   }
 });
+
+for (const stage of ['init-script', 'new-page', 'storage', 'navigation', 'rejected-login', 'unconfirmed-session', 'missing-credentials', 'close-error'] as const) {
+  test(`account setup failure at ${stage} closes and unregisters the context`, async () => {
+    const fixture = addAccount(`${stage}@example.test`, stage === 'missing-credentials' ? '' : 'fixture-password');
+    const needsLogin = stage === 'rejected-login';
+    const token = `fixture.${Buffer.from(JSON.stringify({ type: 'access_token', exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.fixture`;
+    let closes = 0;
+    const context = {
+      addInitScript: async () => { if (stage === 'init-script') throw new Error('Fixture init script failed'); },
+      newPage: async () => { if (stage === 'new-page') throw new Error('Fixture page creation failed'); return page; },
+      cookies: async () => needsLogin ? [] : [{ name: 'token', value: 'fixture-cookie' }],
+      storageState: async () => {
+        if (stage === 'storage') throw new Error('Fixture storage failed');
+        return { cookies: [], origins: needsLogin ? [] : [{ origin: 'https://chat.qwen.ai', localStorage: [{ name: 'token', value: token }] }] };
+      },
+      close: async () => { closes++; if (stage === 'close-error') throw new Error('Fixture context close failed'); },
+    };
+    const page = {
+      context: () => context,
+      goto: async () => { if (stage === 'navigation') throw new Error('Fixture navigation failed'); },
+      reload: async () => {},
+      locator: () => ({ count: async () => 0 }),
+      waitForFunction: async () => {},
+      waitForResponse: async () => { throw new Error('Fixture session not confirmed'); },
+      evaluate: async () => ({ ok: true, data: { success: false } }),
+    };
+    setBrowser({ isConnected: () => true, newContext: async () => context } as unknown as Browser);
+    getAccountHeaderCache(fixture.id);
+    cookieCaches.set(fixture.id, { cookie: 'fixture-cookie', timestamp: Date.now() });
+    cachedUserAgents.set(fixture.id, 'fixture-agent');
+    markAccountReady(fixture.id);
+    try {
+      const expected = {
+        'init-script': /Fixture init script failed/,
+        'new-page': /Fixture page creation failed/,
+        storage: /Fixture storage failed/,
+        navigation: /Fixture navigation failed/,
+        'rejected-login': /Qwen rejected account login/,
+        'unconfirmed-session': /Qwen rejected account login/,
+        'missing-credentials': /no login credentials were provided/,
+        'close-error': /Qwen rejected account login/,
+      }[stage];
+      await assert.rejects(initPlaywrightForAccount(fixture), expected);
+      assert.equal(closes, 1, 'every created context must be closed on setup failure');
+      assert.equal(accountContexts.has(fixture.id), false);
+      assert.equal(accountPages.has(fixture.id), false);
+      assert.equal(accountHeaderCaches.has(fixture.id), false);
+      assert.equal(cookieCaches.has(fixture.id), false);
+      assert.equal(cachedUserAgents.has(fixture.id), false);
+      assert.equal(isAccountReady(fixture.id), false);
+    } finally {
+      setBrowser(null);
+      accountContexts.delete(fixture.id);
+      accountPages.delete(fixture.id);
+      accountHeaderCaches.delete(fixture.id);
+      cookieCaches.delete(fixture.id);
+      cachedUserAgents.delete(fixture.id);
+      markAccountNotReady(fixture.id);
+    }
+  });
+}

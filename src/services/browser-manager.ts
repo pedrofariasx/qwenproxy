@@ -680,35 +680,35 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
     ...(storageState ? { storageState } : {}),
   });
 
-  await acctContext.addInitScript(getStealthScript(acctProfile));
-
-  const acctPage = await acctContext.newPage();
-  accountContexts.set(account.id, acctContext);
-  accountPages.set(account.id, acctPage);
-  touchAccountActivity(account.id);
-
-  const hasAuth = await hasValidAuthCookie(acctPage);
-  const savedState = await acctContext.storageState();
-  const hasBrowserToken = savedState.origins.some(origin =>
-    origin.origin === 'https://chat.qwen.ai' &&
-    origin.localStorage.some(item => {
-      if (item.name !== 'token' || !item.value.trim()) return false;
-      try {
-        const claims = JSON.parse(Buffer.from(item.value.split('.')[1], 'base64url').toString());
-        return claims.type === 'access_token' && claims.exp * 1000 > Date.now() + 30000;
-      } catch {
-        return false;
-      }
-    })
-  );
-
-  if ((!hasAuth || !hasBrowserToken) && loginAccount.email && loginAccount.password) {
-    if (!await loginToQwenWithContext(acctContext, acctPage, loginAccount.email, loginAccount.password)) {
-      throw new Error('Qwen rejected account login');
-    }
-  }
-
   try {
+    await acctContext.addInitScript(getStealthScript(acctProfile));
+
+    const acctPage = await acctContext.newPage();
+    accountContexts.set(account.id, acctContext);
+    accountPages.set(account.id, acctPage);
+    touchAccountActivity(account.id);
+
+    const hasAuth = await hasValidAuthCookie(acctPage);
+    const savedState = await acctContext.storageState();
+    const hasBrowserToken = savedState.origins.some(origin =>
+      origin.origin === 'https://chat.qwen.ai' &&
+      origin.localStorage.some(item => {
+        if (item.name !== 'token' || !item.value.trim()) return false;
+        try {
+          const claims = JSON.parse(Buffer.from(item.value.split('.')[1], 'base64url').toString());
+          return claims.type === 'access_token' && claims.exp * 1000 > Date.now() + 30000;
+        } catch {
+          return false;
+        }
+      })
+    );
+
+    if ((!hasAuth || !hasBrowserToken) && loginAccount.email && loginAccount.password) {
+      if (!await loginToQwenWithContext(acctContext, acctPage, loginAccount.email, loginAccount.password)) {
+        throw new Error('Qwen rejected account login');
+      }
+    }
+
     await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
     await dismissAgeModal(acctPage);
     try {
@@ -726,13 +726,19 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
       }
     }
     console.log(`[Playwright] Session validated for ${account.email}.`);
+    if (await hasValidAuthCookie(acctPage)) {
+      await saveStorageState(acctContext, baseAccountId);
+    }
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
+    accountContexts.delete(account.id);
+    accountPages.delete(account.id);
+    accountHeaderCaches.delete(account.id);
+    cookieCaches.delete(account.id);
+    cachedUserAgents.delete(account.id);
+    markAccountNotReady(account.id);
+    await acctContext.close().catch(() => {});
+    console.warn(`[Playwright] Failed to initialize account ${account.id}: ${err.message}`);
     throw err;
-  }
-
-  if (await hasValidAuthCookie(acctPage)) {
-    await saveStorageState(acctContext, baseAccountId);
   }
 }
 
