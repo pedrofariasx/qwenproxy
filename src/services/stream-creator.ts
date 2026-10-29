@@ -104,7 +104,7 @@ const DIRECT_FETCH_BLOCK_MS = 5 * 60 * 1000;
 
 function canUseDirectFetch(accountId?: string): boolean {
   if (!getRuntimeBool('QWEN_DIRECT_FETCH', config.directFetch.enabled)) return false;
-  if (!accountId || accountId === 'guest' || accountId === 'global') return false;
+  if (!accountId || accountId === 'guest') return false;
   const base = getBaseAccountId(accountId) || accountId;
   return (directFetchBlockedUntil.get(base) || 0) <= Date.now();
 }
@@ -396,10 +396,8 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
 
     const page = getPageForAccount(accountId);
     if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
-      let isolatedPage: Page | null = null;
       try {
-        isolatedPage = await openIsolatedQwenPage(page);
-        const result = await isolatedPage.evaluate(async ({ payload, timeoutMs, qwenVersion }) => {
+        const result = await page.evaluate(async ({ payload, timeoutMs, qwenVersion }) => {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
           try {
@@ -431,10 +429,8 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
         console.error(`[Qwen] Failed to disable native tools for ${cacheKey}: ${result.status} - ${result.body}`);
         return;
       } catch (err: any) {
-        console.warn('[Qwen] Isolated browser fetch failed for disableNativeTools with active Qwen context:', err.message);
+        console.warn('[Qwen] Browser fetch failed for disableNativeTools with active Qwen context:', err.message);
         return;
-      } finally {
-        await isolatedPage?.close().catch(() => {});
       }
     }
   } catch (err: any) {
@@ -535,10 +531,8 @@ export async function fetchQwenChatHistory(
 
   const page = getPageForAccount(accountId);
   if (page && !page.isClosed() && page.url().includes('chat.qwen.ai')) {
-    let isolatedPage: Page | null = null;
     try {
-      isolatedPage = await openIsolatedQwenPage(page);
-      const result = await isolatedPage.evaluate(async ({ url, timeoutMs }) => {
+      const result = await page.evaluate(async ({ url, timeoutMs }) => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         try {
@@ -563,8 +557,6 @@ export async function fetchQwenChatHistory(
       }
     } catch (err: any) {
       console.warn(`[Qwen] Browser fetch failed for chat history ${chatId}:`, err.message);
-    } finally {
-      await isolatedPage?.close().catch(() => {});
     }
   }
 
@@ -988,13 +980,14 @@ export async function createQwenStream(
     // skipping both the CDP bridge and the page-readiness wait. Anything but a
     // clean SSE success falls back to the browser relay below, and the
     // per-account circuit breaker opens after repeated failures.
+    const directAccountId = effectiveAccountId || 'global';
     if (
-      effectiveAccountId &&
+      directAccountId !== 'guest' &&
       !process.env.TEST_MOCK_PLAYWRIGHT &&
-      canUseDirectFetch(effectiveAccountId)
+      canUseDirectFetch(directAccountId)
     ) {
       const direct = await tryDirectCompletionFetch(
-        effectiveAccountId,
+        directAccountId,
         chatId,
         url,
         payloadJson,

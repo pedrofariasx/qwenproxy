@@ -6,6 +6,7 @@
  */
 
 import { isQuotaLimitMessage } from './quota-detector.js';
+import { isOverloadMessage } from './overload-detector.js';
 
 const DEGENERATE_PHRASES = [
   'yes',
@@ -61,15 +62,18 @@ export function canFastReleaseGuard(content: string): boolean {
   const trimmed = (content || '').trim();
   if (!trimmed || trimmed.length < 5) return false;
 
-  // A daily-limit notice is a long, well-formed sentence, so it would pass
-  // the substantive-answer checks below and be streamed to the client before
-  // the quota failover could hide it. Never fast release it.
+  // A daily-limit notice or overload notice is a sentence, so it must never be fast released.
   if (isQuotaLimitMessage(trimmed)) return false;
+  if (isOverloadMessage(trimmed)) return false;
 
-  // If it starts with any known degenerate word, do NOT fast release
+  // If it starts with any known degenerate word or phrase, do NOT fast release
   if (DEGENERATE_RE.test(trimmed)) return false;
   const firstWord = trimmed.split(/[\s,.:;!?]/)[0].toLowerCase();
   if (DEGENERATE_PHRASES.includes(firstWord)) return false;
+  const lower = trimmed.toLowerCase();
+  if (DEGENERATE_PHRASES.some(phrase => lower === phrase || lower.startsWith(phrase + ' ') || lower.startsWith(phrase + '.') || lower.startsWith(phrase + '!') || lower.startsWith(phrase + ','))) {
+    return false;
+  }
 
   // 1. Code blocks, markdown headers, lists, or JSON structures
   if (/^(```|#+ |\* |- |\d+\. |\{|\[|> )/.test(trimmed)) {
@@ -77,7 +81,7 @@ export function canFastReleaseGuard(content: string): boolean {
   }
 
   // 2. Multi-line content with reasonable length
-  if (trimmed.includes('\n') && trimmed.length >= 25) {
+  if (trimmed.includes('\n') && trimmed.length >= 20) {
     return true;
   }
 
@@ -86,8 +90,8 @@ export function canFastReleaseGuard(content: string): boolean {
     return true;
   }
 
-  // 4. Clearly substantive answers longer than 80 chars that aren't degenerate
-  if (trimmed.length >= 80) {
+  // 4. Clearly substantive answers longer than 30 chars that aren't degenerate or errors
+  if (trimmed.length >= 30) {
     return true;
   }
 

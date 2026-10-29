@@ -38,4 +38,16 @@ test('canFastReleaseGuard: does NOT release for degenerate acknowledgments', () 
   assert.strictEqual(canFastReleaseGuard('Okay.'), false);
   assert.strictEqual(canFastReleaseGuard('Claro'), false);
   assert.strictEqual(canFastReleaseGuard('Perfeito!'), false);
+  assert.strictEqual(canFastReleaseGuard('Claro que sim.'), false);
+  assert.strictEqual(canFastReleaseGuard('Com certeza!'), false);
+});
+
+test('canFastReleaseGuard: releases for concise substantive natural language sentences', () => {
+  assert.strictEqual(canFastReleaseGuard('A capital do Brasil é Brasília.'), true);
+  assert.strictEqual(canFastReleaseGuard('Aqui está o resultado do comando.'), true);
+});
+
+test('canFastReleaseGuard: does NOT release for overload messages', () => {
+  assert.strictEqual(canFastReleaseGuard('Service is overloaded. Please try again later.'), false);
+  assert.strictEqual(canFastReleaseGuard('Estamos com alta demanda no momento.'), false);
 });

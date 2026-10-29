@@ -69,7 +69,7 @@ const envSchema = z.object({
   HYBRID_SESSION_VERIFY: envBool(true),
   HYBRID_SESSION_VERIFY_EVERY_MS: envInt(60000, 0),
   HYBRID_SESSION_TTL_MS: envInt(86400000, 1),
-  STREAM_DEGENERATE_GUARD: z.enum(['prone', 'always', 'off']).default('always'),
+  STREAM_DEGENERATE_GUARD: z.enum(['prone', 'always', 'off']).default('prone'),
   AUTO_CONTINUE: envBool(true),
   MAX_AUTO_CONTINUES: envInt(3, 1),
   AUTH_REQUIRED: envBool(false),

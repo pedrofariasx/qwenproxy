@@ -82,10 +82,11 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     const WRITE_FLUSH_MS = 3;
 
     // Streaming degenerate guard: while active, all output is held instead of
-    // being written, and only released once enough content has accumulated or
-    // the upstream stream ends. A degenerate final answer can then be discarded
-    // and regenerated before the client ever sees it.
-    const GUARD_HOLD_BYTES = 800;
+    // being written, and only released once enough content has accumulated,
+    // substantive content is detected via fast-release, or the upstream stream ends.
+    // A degenerate final answer can then be discarded and regenerated before
+    // the client ever sees it.
+    const GUARD_HOLD_BYTES = 300;
     let guardActive = !!ctx.onDegenerateRetry || !!ctx.onToolCallRetry || !!ctx.onUpdateMemberRetry || !!ctx.onOverloadRetry;
     let heldOutput = '';
 
@@ -116,6 +117,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       if (heldOutput) {
         writeBuffer = heldOutput + writeBuffer;
         heldOutput = '';
+        flushWrites();
       }
     };
 
@@ -457,17 +459,18 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
               if (vStr === 'FINISHED') continue;
               if (isThinkingChunk) {
                 _reasoningBuffer += vStr;
-                if (guardActive && _reasoningBuffer.length >= 60) {
+                if (guardActive) {
                   releaseGuard();
                 }
                 fastWriteReasoning(vStr);
               } else {
-                // The daily-limit notice is a long, well-formed sentence, so
-                // it would pass the "substantive answer" fast-release check and
-                // reach the client before the quota signal is evaluated. Keep
-                // the guard closed while a quota notice is still possible.
-                const quotaStillPossible = ctx.onQuotaLimitRetry && !sawQuotaLimitSignal;
-                if (guardActive && !sawOverloadSignal && !quotaStillPossible && canFastReleaseGuard(lastFullContent)) {
+                if (
+                  guardActive &&
+                  !sawOverloadSignal &&
+                  !sawQuotaLimitSignal &&
+                  !sawUpdateMemberSignal &&
+                  canFastReleaseGuard(lastFullContent)
+                ) {
                   releaseGuard();
                 }
                 if (ctx.hasTools && toolParser) {
