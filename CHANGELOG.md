@@ -1,3 +1,10 @@
+## [1.37.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.37.0...v1.37.1) (2026-10-29)
+
+
+### Performance Improvements
+
+* optimize streaming latency and eliminate response buffering bottlenecks ([abae050](https://github.com/pedrofariasx/qwenproxy/commit/abae050c9baa32a4616101ed1fba5b4f29952e9e))
+
 # [1.37.0](https://github.com/pedrofariasx/qwenproxy/compare/v1.36.1...v1.37.0) (2026-10-21)
 
 
