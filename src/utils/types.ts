@@ -31,8 +31,8 @@ export interface MessageToolCall {
 }
 
 export interface Message {
-  role: string;
-  content: string | null;
+  role: 'system' | 'developer' | 'user' | 'assistant' | 'tool' | 'function';
+  content: string | null | MessageContentPart[];
   /** Present on assistant messages that invoked tools */
   tool_calls?: MessageToolCall[];
   /** Present on tool/function response messages to link back to a call */
@@ -43,12 +43,37 @@ export interface Message {
   reasoning_content?: string;
 }
 
+export interface MessageContentPart {
+  type: string;
+  text?: string;
+  image_url?: { url: string; detail?: 'auto' | 'low' | 'high' };
+  video_url?: { url: string };
+  audio_url?: { url: string };
+  input_audio?: { data: string; format: string };
+  file_url?: { url: string };
+}
+
 // --- Request Types ---
 
 export interface OpenAIRequest {
   model: string;
   messages: Message[];
   stream?: boolean;
+  n?: number;
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  max_completion_tokens?: number;
+  stop?: string | string[] | null;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  logit_bias?: Record<string, number> | null;
+  user?: string;
+  seed?: number;
+  response_format?: { type: 'text' | 'json_object' | 'json_schema'; json_schema?: Record<string, unknown> };
+  parallel_tool_calls?: boolean;
+  modalities?: string[];
+  audio?: Record<string, unknown>;
   tools?: FunctionToolDefinition[];
   tool_choice?: ToolChoice;
   stream_options?: {

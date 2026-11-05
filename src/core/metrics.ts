@@ -34,6 +34,7 @@ export class Metrics extends EventEmitter {
       ['requests.errors', 'counter', 'Requests answered with 4xx/5xx status'],
       ['requests.4xx', 'counter', 'Requests answered with 4xx status'],
       ['requests.5xx', 'counter', 'Requests answered with 5xx status'],
+      ['requests.by_status', 'counter', 'Requests by HTTP status code'],
       ['requests.completions', 'counter', 'Chat completions requests'],
       ['latency.request', 'histogram', 'Request latency (ms)'],
       ['latency.completion', 'histogram', 'Completion latency to response start (ms)'],

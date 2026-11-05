@@ -22,6 +22,7 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "docker:verify": "node scripts/check-docker-versions.mjs",
+    "config:check": "node scripts/check-env-docs.mjs",
     "docker:build": "npm run docker:verify && docker compose build",
     "docker:up": "npm run docker:verify && docker compose up -d && docker compose ps",
     "docker:down": "docker compose down",

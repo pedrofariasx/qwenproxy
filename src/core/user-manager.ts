@@ -33,18 +33,46 @@ function defaultIdentity(id: string, email: string | null, isGlobal: boolean): U
   };
 }
 
+export function parseApiKeyConfig(value: string): Array<{
+  label: string
+  key: string
+  rateLimitRpm: number
+  maxConcurrency: number
+}> {
+  const raw = value.trim()
+  const entries = raw.includes(';')
+    ? raw.split(';')
+    : /^[^:]+:[^,]+,\d+,\d+$/.test(raw)
+      ? [raw]
+      : raw.split(',').filter(entry => entry.includes(':'))
+  return entries.flatMap(entry => {
+    const [first, ...parts] = entry.trim().split(':')
+    if (!first) return []
+    if (parts.length === 1 && parts[0].includes(',')) {
+      const [key, rpm, concurrency] = parts[0].split(',')
+      return key ? [{
+        label: first,
+        key: key.trim(),
+        rateLimitRpm: Number(rpm) || config.users.defaultRateLimitRpm,
+        maxConcurrency: Number(concurrency) || config.users.defaultMaxConcurrency,
+      }] : []
+    }
+    return [{
+      label: parts.join(':') || `user-${first.slice(0, 6)}`,
+      key: first,
+      rateLimitRpm: config.users.defaultRateLimitRpm,
+      maxConcurrency: config.users.defaultMaxConcurrency,
+    }]
+  })
+}
+
 function seedEnvApiKeys(): void {
   if (!config.users.apiKeys) return;
   const existing = new Set(listUsers().map(u => u.id));
-  for (const entry of config.users.apiKeys.split(',')) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    const [key, ...labelParts] = trimmed.split(':');
-    if (!key) continue;
-    const label = labelParts.join(':') || `user-${key.slice(0, 6)}`;
+  for (const { label, key, rateLimitRpm, maxConcurrency } of parseApiKeyConfig(config.users.apiKeys)) {
     if (!existing.has(label)) {
       try {
-        upsertUser({ id: label, email: label, apiKey: key });
+        upsertUser({ id: label, email: label, apiKey: key, rateLimitRpm, maxConcurrency });
       } catch { /* ignore duplicate key */ }
     }
   }

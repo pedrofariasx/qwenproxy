@@ -244,6 +244,102 @@ curl http://localhost:3000/v1/chat/completions \
   }'
 ```
 
+### Imagens, vídeos e áudios
+
+O fluxo multimodal tem duas etapas:
+
+1. Envie o arquivo como `multipart/form-data` para `/v1/upload` (ou `/v1/upload/`).
+2. Use o campo `url` retornado no conteúdo da mensagem. Para áudio e vídeo use
+   `audio_url` e `video_url`; para clientes OpenAI que enviam áudio inline,
+   `input_audio` também é aceito.
+
+```bash
+UPLOAD=$(curl -fsS http://localhost:3000/v1/upload \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "file=@./sample.mp4")
+
+VIDEO_URL=$(printf '%s' "$UPLOAD" | jq -r .url)
+
+curl -fsS http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d "$(jq -n --arg url "$VIDEO_URL" '{
+    model: "qwen-plus",
+    messages: [{role: "user", content: [
+      {type: "text", text: "Descreva este vídeo."},
+      {type: "video_url", video_url: {url: $url}}
+    ]}],
+    stream: false
+  }')"
+```
+
+Para áudio, troque `sample.mp4` por um arquivo de áudio e use:
+
+```json
+{"type":"audio_url","audio_url":{"url":"https://.../url-retornada-pelo-upload"}}
+```
+
+Clientes que usam o formato OpenAI `input_audio` podem enviar os dados
+base64 diretamente:
+
+```json
+{
+  "type": "input_audio",
+  "input_audio": {"data": "<base64>", "format": "wav"}
+}
+```
+
+Exemplo mínimo em C++ usando libcurl:
+
+```cpp
+#include <curl/curl.h>
+#include <string>
+
+// 1) Faça o upload multipart e extraia o campo JSON "url".
+CURL *upload = curl_easy_init();
+curl_easy_setopt(upload, CURLOPT_URL, "http://localhost:3000/v1/upload");
+curl_easy_setopt(upload, CURLOPT_CUSTOMREQUEST, "POST");
+curl_mime *mime = curl_mime_init(upload);
+curl_mimepart *part = curl_mime_addpart(mime);
+curl_mime_name(part, "file");
+curl_mime_filedata(part, "./sample.mp3");
+curl_easy_setopt(upload, CURLOPT_MIMEPOST, mime);
+struct curl_slist *uploadHeaders = nullptr;
+uploadHeaders = curl_slist_append(uploadHeaders, "Authorization: Bearer YOUR_API_KEY");
+curl_easy_setopt(upload, CURLOPT_HTTPHEADER, uploadHeaders);
+curl_easy_perform(upload);
+curl_slist_free_all(uploadHeaders);
+curl_mime_free(mime);
+curl_easy_cleanup(upload);
+
+// 2) Use a URL retornada pelo upload no JSON abaixo.
+std::string body = R"({
+  "model":"qwen-plus",
+  "messages":[{"role":"user","content":[
+    {"type":"text","text":"Transcreva este áudio."},
+    {"type":"audio_url","audio_url":{"url":"https://URL_RETORNADA_PELO_UPLOAD"}}
+  ]}],
+  "stream":false
+})";
+
+CURL *curl = curl_easy_init();
+curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:3000/v1/chat/completions");
+curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+struct curl_slist *headers = nullptr;
+headers = curl_slist_append(headers, "Content-Type: application/json");
+headers = curl_slist_append(headers, "Authorization: Bearer YOUR_API_KEY");
+curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+curl_easy_perform(curl);
+curl_slist_free_all(headers);
+curl_easy_cleanup(curl);
+```
+
+O proxy encaminha o arquivo ao armazenamento da Qwen e o associa ao próximo
+chat. A capacidade final de transcrever áudio ou analisar vídeo ainda depende
+do modelo e da disponibilidade desse recurso na conta/upstream da Qwen; um
+erro como `can't transcribe` é retornado pelo upstream, não pelo formato do
+endpoint.
+
 ## Sessões híbridas (economia de contexto) e upload de arquivos .txt
 
 Para conversas longas o proxy usa a **estrutura híbrida**: a primeira mensagem de
