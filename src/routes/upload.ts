@@ -11,6 +11,59 @@ import { config } from "../core/config.js";
 import { cache } from "../cache/memory-cache.js";
 import crypto from "crypto";
 
+const MIME_BY_EXTENSION: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  mp4: "video/mp4", mov: "video/quicktime", avi: "video/x-msvideo", webm: "video/webm", mkv: "video/x-matroska",
+  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", flac: "audio/flac", m4a: "audio/mp4", aac: "audio/aac",
+  pdf: "application/pdf", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json", xml: "application/xml",
+  html: "text/html", zip: "application/zip",
+};
+
+export function validateUploadMetadata(filename: string, size: number, declaredType: string): {
+  extension: string;
+  fileType: string;
+  qwenFileType: "image" | "video" | "audio" | "file";
+  maxSize: number;
+} {
+  const hasControlCharacter = [...filename].some(character => {
+    const code = character.charCodeAt(0)
+    return code < 0x20 || code === 0x7f
+  })
+  if (!filename || filename.length > 255 || hasControlCharacter || filename.includes("/") || filename.includes("\\")) {
+    throw new Error("Invalid filename");
+  }
+  const extension = filename.split(".").pop()?.toLowerCase() || "";
+  const expectedType = MIME_BY_EXTENSION[extension];
+  if (!expectedType) throw new Error("Unsupported file type. Use a supported image, video, audio, or document extension");
+  const fileType = declaredType && declaredType !== "application/octet-stream" ? declaredType : expectedType;
+  if (declaredType && declaredType !== "application/octet-stream" && declaredType !== expectedType) {
+    throw new Error("File type does not match its extension");
+  }
+  const qwenFileType = fileType.startsWith("video/") ? "video"
+    : fileType.startsWith("audio/") ? "audio"
+      : fileType.startsWith("image/") ? "image" : "file";
+  const maxSize = qwenFileType === "video" ? 100 * 1024 * 1024
+    : qwenFileType === "audio" ? 50 * 1024 * 1024 : 20 * 1024 * 1024;
+  if (!Number.isSafeInteger(size) || size < 1 || size > maxSize) {
+    throw new Error(`File too large. Max size: ${qwenFileType === "video" ? "100MB (video)" : qwenFileType === "audio" ? "50MB (audio)" : "20MB (image/doc)"}`);
+  }
+  return { extension, fileType, qwenFileType, maxSize };
+}
+
+function validateFileSignature(buffer: ArrayBuffer, extension: string): void {
+  const bytes = new Uint8Array(buffer);
+  const startsWith = (...values: number[]) => values.every((value, index) => bytes[index] === value);
+  const valid = extension === "png" ? startsWith(0x89, 0x50, 0x4e, 0x47)
+    : ["jpg", "jpeg"].includes(extension) ? startsWith(0xff, 0xd8, 0xff)
+      : extension === "gif" ? startsWith(0x47, 0x49, 0x46, 0x38)
+        : extension === "pdf" ? startsWith(0x25, 0x50, 0x44, 0x46)
+          : extension === "zip" ? startsWith(0x50, 0x4b, 0x03, 0x04) : true;
+  if (!valid) throw new Error("File content does not match its extension");
+}
+
 interface STSResponse {
   success: boolean;
   request_id: string;
@@ -234,61 +287,8 @@ export async function uploadFile(c: Context) {
       return c.json({ error: "No file provided" }, 400);
     }
 
-    // Detect MIME from filename if browser sends generic type
-    let fileType = file.type;
-    if (fileType === "application/octet-stream" || !fileType) {
-      const ext = file.name.split(".").pop()?.toLowerCase() || "";
-      const extMimeMap: Record<string, string> = {
-        jpg: "image/jpeg",
-        jpeg: "image/jpeg",
-        png: "image/png",
-        gif: "image/gif",
-        webp: "image/webp",
-        mp4: "video/mp4",
-        mov: "video/quicktime",
-        avi: "video/x-msvideo",
-        webm: "video/webm",
-        mkv: "video/x-matroska",
-        mp3: "audio/mpeg",
-        wav: "audio/wav",
-        ogg: "audio/ogg",
-        flac: "audio/flac",
-        m4a: "audio/mp4",
-        aac: "audio/aac",
-        pdf: "application/pdf",
-        doc: "application/msword",
-        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        xls: "application/vnd.ms-excel",
-        xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ppt: "application/vnd.ms-powerpoint",
-        pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        txt: "text/plain",
-        md: "text/markdown",
-        csv: "text/csv",
-        json: "application/json",
-        xml: "application/xml",
-        html: "text/html",
-        zip: "application/zip",
-      };
-      fileType = extMimeMap[ext] || "application/octet-stream";
-    }
-
-    // Determine media category for size limits
-    const isVideo = fileType.startsWith("video/");
-    const isAudio = fileType.startsWith("audio/");
-    const isImage = fileType.startsWith("image/");
-    let maxSize = 20 * 1024 * 1024; // 20MB default for docs/images
-    if (isVideo)
-      maxSize = 100 * 1024 * 1024; // 100MB for video
-    else if (isAudio) maxSize = 50 * 1024 * 1024; // 50MB for audio
-    if (file.size > maxSize) {
-      const sizeLabel = isVideo
-        ? "100MB (video)"
-        : isAudio
-          ? "50MB (audio)"
-          : "20MB (image/doc)";
-      return c.json({ error: `File too large. Max size: ${sizeLabel}` }, 400);
-    }
+    const metadata = validateUploadMetadata(file.name, file.size, file.type);
+    const { extension, qwenFileType } = metadata;
 
     // Get full Qwen headers with bx-ua/bx-umidtoken
     let headers: Record<string, string> | null = null;
@@ -316,11 +316,6 @@ export async function uploadFile(c: Context) {
     }
 
     // Determine Qwen filetype for STS token
-    let qwenFileType = "file";
-    if (isVideo) qwenFileType = "video";
-    else if (isAudio) qwenFileType = "audio";
-    else if (isImage) qwenFileType = "image";
-
     const stsData = await getSTSToken(
       file.name,
       file.size,
@@ -328,6 +323,7 @@ export async function uploadFile(c: Context) {
       headers,
     );
     const fileBuffer = await file.arrayBuffer();
+    validateFileSignature(fileBuffer, extension);
     const fileUrl = await uploadToOSS(fileBuffer, stsData, file.name);
 
     return c.json({

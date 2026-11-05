@@ -70,6 +70,7 @@ import { getRuntimeBool } from '../core/runtime-config.js';
 import { TOOL_CALL_OPEN, TOOL_CALL_CLOSE, wrapToolCallPayload } from '../tools/toolcall-tags.js';
 import type { UserIdentity } from '../core/user-manager.js';
 import { trackUsage, trackModelUsage } from '../core/usage-tracker.js';
+import { openaiError } from '../utils/openai.js';
 
 export { getIncrementalDelta } from './sse-parser.js';
 export type { DeltaResult } from './sse-parser.js';
@@ -123,7 +124,7 @@ async function verifyServerContextMatches(sessionKey: string, session: SessionEn
  * like to-do lists, file edits, or other actions it performed on prior turns.
  */
 function buildRecentToolContext(
-  messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
+  messages: Array<{ role: string; content: unknown; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
 ): string {
   if (!messages || messages.length === 0) return '';
 
@@ -197,22 +198,59 @@ export async function chatCompletions(c: Context) {
   const completionStart = Date.now();
 
   try {
-    const body: OpenAIRequest = await c.req.json();
+    const rawBody = await c.req.json().catch(() => null);
+    if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
+      const error = openaiError('Invalid JSON request body', 400);
+      return c.json(error.body, error.status);
+    }
+    const body = rawBody as OpenAIRequest;
+    if (typeof body.model !== 'string' || !body.model.trim()) {
+      const error = openaiError('Missing required parameter: model', 400, 'invalid_request_error', 'model');
+      return c.json(error.body, error.status);
+    }
+    if (!Array.isArray(body.messages) || body.messages.length === 0) {
+      const error = openaiError('Missing required parameter: messages', 400, 'invalid_request_error', 'messages');
+      return c.json(error.body, error.status);
+    }
+    if (body.n !== undefined && body.n !== 1) {
+      const error = openaiError('Only n=1 is supported', 400, 'invalid_request_error', 'n');
+      return c.json(error.body, error.status);
+    }
+    if (body.stream !== undefined && typeof body.stream !== 'boolean') {
+      const error = openaiError('stream must be a boolean', 400, 'invalid_request_error', 'stream');
+      return c.json(error.body, error.status);
+    }
+    if (body.response_format?.type === 'json_schema') {
+      const error = openaiError('response_format json_schema is not supported by the Qwen upstream', 400, 'invalid_request_error', 'response_format');
+      return c.json(error.body, error.status);
+    }
+    if (body.response_format && !['text', 'json_object'].includes(body.response_format.type)) {
+      const error = openaiError('response_format.type must be text or json_object', 400, 'invalid_request_error', 'response_format.type');
+      return c.json(error.body, error.status);
+    }
     const isStream = body.stream ?? false;
 
     const VALID_REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
     if (body.reasoning_effort !== undefined && !VALID_REASONING_EFFORTS.includes(body.reasoning_effort)) {
-      return c.json({ error: { message: `Invalid reasoning_effort: '${body.reasoning_effort}'. Valid values: ${VALID_REASONING_EFFORTS.join(', ')}` } }, 400);
+      const error = openaiError(
+        `Invalid reasoning_effort: '${body.reasoning_effort}'. Valid values: ${VALID_REASONING_EFFORTS.join(', ')}`,
+        400,
+        'invalid_request_error',
+        'reasoning_effort',
+      );
+      return c.json(error.body, error.status);
     }
 
     metrics.increment('requests.completions');
 
     if (user) {
       if (!checkUserRateLimit(user.id, user.rateLimitRpm)) {
-        return c.json({ error: { message: `Rate limit exceeded for user ${user.id}` } }, 429);
+        const error = openaiError(`Rate limit exceeded for user ${user.id}`, 429, 'rate_limit_error');
+        return c.json(error.body, error.status);
       }
       if (!tryAcquireUserSlot(user.id, user.maxConcurrency)) {
-        return c.json({ error: { message: `Concurrency limit exceeded for user ${user.id} (max ${user.maxConcurrency})` } }, 429);
+        const error = openaiError(`Concurrency limit exceeded for user ${user.id} (max ${user.maxConcurrency})`, 429, 'rate_limit_error');
+        return c.json(error.body, error.status);
       }
       userSlotHeld = true;
       if (getUserActiveStreams(user.id) <= user.maxConcurrency) {
@@ -257,7 +295,17 @@ export async function chatCompletions(c: Context) {
         const textParts: string[] = [];
         const multimodalParts: Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }> = [];
         
-        for (const p of msg.content as any[]) {
+        for (const rawPart of msg.content as any[]) {
+          // OpenAI audio clients use `input_audio`; normalize it to the same
+          // internal data-URI path used by audio_url.
+          const p = rawPart?.type === 'input_audio' && rawPart.input_audio?.data
+            ? {
+              type: 'audio_url',
+              audio_url: {
+                url: `data:audio/${rawPart.input_audio.format || 'wav'};base64,${rawPart.input_audio.data}`,
+              },
+            }
+            : rawPart
           if (p.type === "text" && p.text) {
             textParts.push(p.text);
           } else if (
@@ -280,7 +328,7 @@ export async function chatCompletions(c: Context) {
         contentStr = msg.content || '';
       }
 
-      if (msg.role === 'system') {
+      if (msg.role === 'system' || msg.role === 'developer') {
         systemPromptParts.push((contentStr || '') + '\n');
       } else if (msg.role === 'user') {
         lastUserContent = contentStr || '';
@@ -382,6 +430,9 @@ export async function chatCompletions(c: Context) {
 
     if (hasTools && toolChoiceMode === 'none') {
       finalPrompt += '\n\n[TOOL USE DISABLED]\nDo not call tools in this response. Answer directly using available context.';
+    }
+    if (body.response_format?.type === 'json_object') {
+      finalPrompt += '\n\n[JSON MODE]\nReturn only one valid JSON object. Do not wrap it in Markdown fences or add commentary outside the JSON object.';
     }
 
     if (hasTools && toolChoiceMode !== 'none') {
@@ -866,7 +917,8 @@ export async function chatCompletions(c: Context) {
     metrics.histogram('latency.completion', Date.now() - completionStart)
     trackUsage(user ? user.id : 'anonymous', usageInputText, true);
     trackModelUsage(usageModel);
-    return c.json({ error: { message: err.message } }, status)
+    const error = openaiError(err.message, status, status === 429 ? 'rate_limit_error' : 'server_error');
+    return c.json(error.body, error.status)
   }
 }
 

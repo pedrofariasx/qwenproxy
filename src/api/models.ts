@@ -5,6 +5,8 @@ import { loadAccounts } from '../core/accounts.js'
 import { getAccountCooldownInfo } from '../core/account-manager.js'
 import { cache } from '../cache/memory-cache.js'
 import { syncModelContextWindows } from '../core/model-registry.js'
+import crypto from 'crypto'
+import { openaiError } from '../utils/openai.js'
 
 const app = new Hono()
 
@@ -13,15 +15,19 @@ function buildCatalog(rawModels: any[]): any[] {
     const caps = model?.info?.meta?.capabilities
     return Array.isArray(caps) ? caps.filter((c: any) => typeof c === 'string') : undefined
   }
-  const entry = (model: any, id: string, name?: string) => ({
+  const entry = (model: any, id: string, name?: string) => {
+    const rawCreated = Number(model.info?.created_at)
+    const created = rawCreated > 10_000_000_000 ? Math.floor(rawCreated / 1000) : rawCreated || Math.floor(Date.now() / 1000)
+    return {
     id,
     name,
     object: 'model',
-    owned_by: model.owned_by,
-    created: model.info?.created_at || Date.now(),
+    owned_by: model.owned_by || 'qwen',
+    created,
     context_window: model.info?.meta?.max_context_length,
     capabilities: capabilitiesOf(model),
-  })
+    }
+  }
   return rawModels.map((model: any) => entry(model, model.id, model.name))
 }
 
@@ -147,7 +153,8 @@ app.get('/v1/models', async (c) => {
     return c.json(formatted)
   } catch (error: any) {
     console.error('Error fetching models:', error)
-    return c.json({ error: error.message }, 500)
+    const response = openaiError(error.message, 502, 'upstream_error')
+    return c.json(response.body, response.status)
   }
 })
 
@@ -213,13 +220,15 @@ app.get('/v1/models/:model', async (c) => {
     const model = models.find((m: any) => m.id === modelId)
     
     if (!model) {
-      return c.json({ error: 'Model not found' }, 404)
+      const response = openaiError('The model does not exist', 404, 'invalid_request_error', 'model', 'model_not_found')
+      return c.json(response.body, response.status)
     }
     
     return c.json(model)
   } catch (error: any) {
     console.error('Error fetching model:', error)
-    return c.json({ error: error.message }, 500)
+    const response = openaiError(error.message, 502, 'upstream_error')
+    return c.json(response.body, response.status)
   }
 })
 

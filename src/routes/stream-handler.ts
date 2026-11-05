@@ -747,7 +747,6 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         model: ctx.model,
         session_id: ctx.uiSessionId,
         choices: [makeChoice({}, finalFinishReason)],
-        ...(ctx.streamOptions?.include_usage ? {} : { usage })
       });
 
       if (ctx.streamOptions?.include_usage) {
@@ -890,7 +889,7 @@ export async function collectNonStreamingResult(
     total_tokens: parserState.promptTokens + parserState.completionTokens,
     prompt_tokens_details: { cached_tokens: 0 }
   };
-  const message: any = { role: 'assistant', content: toolCallsOut.length ? (finalContent || '') : finalContent };
+  const message: any = { role: 'assistant', content: toolCallsOut.length ? (finalContent || null) : finalContent };
   if (parserState.reasoningBuffer) message.reasoning_content = parserState.reasoningBuffer;
   if (toolCallsOut.length) toolCallsOut.forEach((tc, idx) => tc.index = idx);
   if (toolCallsOut.length) message.tool_calls = toolCallsOut;

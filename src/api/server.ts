@@ -14,6 +14,8 @@ import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
 import { uploadFile } from '../routes/upload.js'
 import { adminApp } from './admin.js'
 import { getBaseAccountId, makeAccountLaneId } from '../core/account-lanes.js'
+import crypto from 'crypto'
+import { openaiError } from '../utils/openai.js'
 
 const app = new Hono()
 
@@ -39,6 +41,9 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 }
 
 app.use('*', async (c, next) => {
+  const requestId = c.req.header('X-Request-ID')?.trim() || crypto.randomUUID()
+  c.header('X-Request-ID', requestId)
+  ;(c as any).set('requestId', requestId)
   metrics.increment('requests.total')
   const start = Date.now()
   await next()
@@ -49,6 +54,7 @@ app.use('*', async (c, next) => {
   // Accurate error accounting by status: every 4xx/5xx response is an error.
   // (Previously only >=500 counted, so waves of 429/401 looked like "success".)
   const status = c.res.status
+  metrics.increment('requests.by_status', 1, { status: String(status) })
   if (status >= 500) {
     metrics.increment('requests.errors')
     metrics.increment('requests.5xx')
@@ -62,17 +68,16 @@ app.use('/v1/*', async (c, next) => {
   const apiKey = process.env.API_KEY || config.apiKey
   const authRequired = config.authRequired || Boolean(apiKey)
   if (authRequired) {
-    if (!apiKey) {
-      return c.json({ error: 'AUTH_REQUIRED=true but no API_KEY is configured' }, 500)
-    }
     const auth = c.req.header('Authorization')
     if (!auth?.startsWith('Bearer ')) {
-      return c.json({ error: 'Missing or invalid Authorization header' }, 401)
+      const error = openaiError('Missing or invalid Authorization header', 401)
+      return c.json(error.body, error.status)
     }
     const { resolveUserFromAuthHeader } = await import('../core/user-manager.js')
     const identity = resolveUserFromAuthHeader(auth)
     if (!identity) {
-      return c.json({ error: 'Invalid API key' }, 401)
+      const error = openaiError('Invalid API key', 401)
+      return c.json(error.body, error.status)
     }
     ;(c as any).set('user', identity)
   }
@@ -82,10 +87,20 @@ app.use('/v1/*', async (c, next) => {
 app.route('', modelsApp)
 app.post('/v1/chat/completions', bodyLimit({
   maxSize: 52 * 1024 * 1024,
-  onError: (c: Context) => c.json({ error: { message: 'Request body too large' } }, 413),
+  onError: (c: Context) => {
+    const error = openaiError('Request body too large', 413, 'invalid_request_error')
+    return c.json(error.body, error.status)
+  },
 }), chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
-app.post('/v1/upload', uploadFile)
+app.post('/v1/upload', bodyLimit({
+  maxSize: 100 * 1024 * 1024,
+  onError: (c: Context) => c.json({ error: { message: 'Upload body too large' } }, 413),
+}), uploadFile)
+app.post('/v1/upload/', bodyLimit({
+  maxSize: 100 * 1024 * 1024,
+  onError: (c: Context) => c.json({ error: { message: 'Upload body too large' } }, 413),
+}), uploadFile)
 
 // Admin dashboard (served at /admin).
 app.route('/admin', adminApp)
@@ -110,11 +125,15 @@ app.get('/metrics', (c) => {
 app.onError((err, c) => {
   metrics.increment('requests.errors')
   metrics.increment('requests.5xx')
-  console.error('API Error:', err)
-  return c.json({ error: err.message }, 500)
+  const requestId = (c as any).get?.('requestId') as string | undefined
+  console.error('API Error:', { requestId, error: err.message })
+  return c.json({ error: err.message, request_id: requestId }, 500)
 })
 
-app.notFound((c) => c.json({ error: 'Not found' }, 404))
+app.notFound((c) => {
+  const error = openaiError('Not found', 404)
+  return c.json(error.body, error.status)
+})
 
 export interface ServerOverrides {
   port?: number
