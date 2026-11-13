@@ -311,6 +311,9 @@ export async function ensureAuthorization(
   accountId?: string,
   page?: Page,
 ): Promise<string | null> {
+  if (process.env.TEST_MOCK_PLAYWRIGHT === "true") {
+    return process.env.TEST_BEARER_TOKEN || "Bearer MOCK_TOKEN";
+  }
   if (isAuthorizationUsable(accountId)) {
     const cached = getAuthorizationHeader(accountId);
     if (cached) return cached;
