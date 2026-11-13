@@ -178,40 +178,42 @@ async function tierPageReload(
   return renewAccessTokenViaPage(page, timeoutMs);
 }
 
-async function tierReLogin(
+export async function tierReLogin(
   accountId: string,
   page: Page,
 ): Promise<string | null> {
-  const creds = getAccountCredentials(getBaseAccountId(accountId) || accountId);
+  const baseId = getBaseAccountId(accountId) || accountId;
+
+  // Fallback to environment variables if the baseId is "global" (the default context)
+  const creds =
+    getAccountCredentials(baseId) ??
+    (baseId === "global"
+      ? { email: process.env.QWEN_EMAIL, password: process.env.QWEN_PASSWORD }
+      : undefined);
+
   if (!creds?.email || !creds.password) return null;
-  const {
-    loginToQwenWithContext,
-    saveStorageState,
-    installAccessTokenCapture,
-  } = await import("./browser-manager.js");
-  const ctx = page.context();
-  const capture = installAccessTokenCapture(page);
-  const ok = await loginToQwenWithContext(
-    ctx,
-    page,
-    creds.email,
-    creds.password,
-  );
-  if (!ok) return null;
-  const captured = await capture.waitForToken(15000);
-  if (captured) {
-    await saveStorageState(ctx, getBaseAccountId(accountId) || accountId).catch(
-      () => {},
+
+  const { loginToQwenWithContext, saveStorageState } =
+    await import("./browser-manager.js");
+
+  // Continue with your existing re-login flow...
+  try {
+    const success = await loginToQwenWithContext(
+      page.context(),
+      page,
+      creds.email,
+      creds.password,
     );
-    return captured;
-  }
-  const direct = await tierDirectRequest(page, 10000);
-  if (direct) {
-    await saveStorageState(ctx, getBaseAccountId(accountId) || accountId).catch(
-      () => {},
+    if (success) {
+      await saveStorageState(page.context(), baseId);
+      return creds.email;
+    }
+  } catch (err: any) {
+    console.warn(
+      `[AuthSession] Re-login failed for ${creds.email}: ${err.message}`,
     );
-    return direct;
   }
+
   return null;
 }
 
