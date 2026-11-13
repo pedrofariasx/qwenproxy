@@ -1,19 +1,23 @@
-import { getBasicHeaders, waitForAccountPage } from './playwright.js';
-import { recordAccountBlock } from '../core/account-isolation.js';
-import { config } from '../core/config.js';
-import { getRuntimeInt, getRuntimeBool } from '../core/runtime-config.js';
-import { QwenUpstreamError } from './error-handler.js';
-import { getClientHintsHeaders } from './browser-manager.js';
-import { ensureAuthorization } from './auth-session.js';
-import { isBearerTokenExpired } from '../utils/access-token.js';
-import type { Page } from 'playwright';
-import crypto from 'crypto';
-import { sleep } from '../utils/sleep.js';
-import { CACHED_TIMEZONE } from '../utils/qwen-constants.js';
-import { getQwenWebVersion } from './qwen-versions.js';
+import { getBasicHeaders, waitForAccountPage } from "./playwright.js";
+import { recordAccountBlock } from "../core/account-isolation.js";
+import { config } from "../core/config.js";
+import { getRuntimeInt, getRuntimeBool } from "../core/runtime-config.js";
+import { QwenUpstreamError } from "./error-handler.js";
+import { getClientHintsHeaders } from "./browser-manager.js";
+import { ensureAuthorization } from "./auth-session.js";
+import { isBearerTokenExpired } from "../utils/access-token.js";
+import type { Page } from "patchright";
+import crypto from "crypto";
+import { sleep } from "../utils/sleep.js";
+import { CACHED_TIMEZONE } from "../utils/qwen-constants.js";
+import { getQwenWebVersion } from "./qwen-versions.js";
 
 function isTmdChallenge(text: string): boolean {
-  return text.includes('FAIL_SYS_USER_VALIDATE') || text.includes('_____tmd_____') || text.includes('RGV587_ERROR');
+  return (
+    text.includes("FAIL_SYS_USER_VALIDATE") ||
+    text.includes("_____tmd_____") ||
+    text.includes("RGV587_ERROR")
+  );
 }
 
 export interface WarmPoolEntry {
@@ -33,10 +37,12 @@ const refillNextAttemptAt: Map<string, number> = new Map();
 
 // Read at call time so WARM_POOL_* can be tuned live from the admin dashboard
 // without restarting the server.
-const getPoolSize = () => getRuntimeInt('WARM_POOL_SIZE', config.warmPool.size);
-const getTtlMs = () => getRuntimeInt('WARM_POOL_TTL_MS', config.warmPool.ttlMs);
-const getLowWater = () => getRuntimeInt('WARM_POOL_LOW_WATER', config.warmPool.lowWater);
-const getRefillBackoffBaseMs = () => getRuntimeInt('WARM_POOL_REFILL_BACKOFF_MS', config.warmPool.refillBackoffMs);
+const getPoolSize = () => getRuntimeInt("WARM_POOL_SIZE", config.warmPool.size);
+const getTtlMs = () => getRuntimeInt("WARM_POOL_TTL_MS", config.warmPool.ttlMs);
+const getLowWater = () =>
+  getRuntimeInt("WARM_POOL_LOW_WATER", config.warmPool.lowWater);
+const getRefillBackoffBaseMs = () =>
+  getRuntimeInt("WARM_POOL_REFILL_BACKOFF_MS", config.warmPool.refillBackoffMs);
 
 function cleanupStalePool(accountId: string) {
   const pool = warmPool.get(accountId);
@@ -45,7 +51,7 @@ function cleanupStalePool(accountId: string) {
   for (let i = pool.length - 1; i >= 0; i--) {
     const e = pool[i];
     const isOld = now - e.timestamp > getTtlMs();
-    const auth = e.headers['authorization'];
+    const auth = e.headers["authorization"];
     const isExpired = auth ? isBearerTokenExpired(auth) : false;
     if (isOld || isExpired) {
       pool.splice(i, 1);
@@ -67,20 +73,26 @@ export function releaseWarmChat(accountId: string, chatId: string) {
 
 /** Per-account ready warm chat counts (used by the admin dashboard). */
 export function getWarmPoolStats(): Record<string, number> {
-  const out: Record<string, number> = {}
+  const out: Record<string, number> = {};
   for (const [accountId, pool] of warmPool.entries()) {
-    const now = Date.now()
-    const ready = pool.filter(e => now - e.timestamp <= getTtlMs() && !isWarmChatInFlight(accountId, e.chatId)).length
-    if (ready > 0) out[accountId] = ready
+    const now = Date.now();
+    const ready = pool.filter(
+      (e) =>
+        now - e.timestamp <= getTtlMs() &&
+        !isWarmChatInFlight(accountId, e.chatId),
+    ).length;
+    if (ready > 0) out[accountId] = ready;
   }
-  return out
+  return out;
 }
 
 function isWarmChatInFlight(accountId: string, chatId: string) {
   return inFlightWarmChats.has(warmChatKey(accountId, chatId));
 }
 
-async function getBasicQwenHeaders(accountId?: string): Promise<Record<string, string>> {
+async function getBasicQwenHeaders(
+  accountId?: string,
+): Promise<Record<string, string>> {
   const basic = await getBasicHeaders(accountId);
   let authorization = basic.authorization;
   if (!authorization) {
@@ -88,154 +100,243 @@ async function getBasicQwenHeaders(accountId?: string): Promise<Record<string, s
   }
   const { cookie, userAgent, bxV, bxUa, bxUmidtoken } = basic;
   if (!cookie || !userAgent || !bxV || !bxUa || !bxUmidtoken) {
-    throw new Error('Missing required browser anti-bot headers for warm pool');
+    throw new Error("Missing required browser anti-bot headers for warm pool");
   }
   if (!authorization) {
-    throw new Error('Missing Qwen authorization token for warm pool');
+    throw new Error("Missing Qwen authorization token for warm pool");
   }
   return {
     cookie,
-    'user-agent': userAgent,
-    'bx-v': bxV,
-    'bx-ua': bxUa,
-    'bx-umidtoken': bxUmidtoken,
-    'authorization': authorization,
+    "user-agent": userAgent,
+    "bx-v": bxV,
+    "bx-ua": bxUa,
+    "bx-umidtoken": bxUmidtoken,
+    authorization: authorization,
   };
 }
 
-function buildWarmPoolNodeHeaders(headers: Record<string, string>, accountId?: string): Record<string, string> {
+function buildWarmPoolNodeHeaders(
+  headers: Record<string, string>,
+  accountId?: string,
+): Record<string, string> {
   const result: Record<string, string> = {
-    'accept': 'application/json, text/plain, */*',
-    'content-type': 'application/json',
-    'cookie': headers['cookie'],
-    'origin': 'https://chat.qwen.ai',
-    'referer': accountId === 'guest' ? 'https://chat.qwen.ai/c/guest' : 'https://chat.qwen.ai/',
-    'sec-fetch-dest': 'empty',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'same-origin',
-    'timezone': CACHED_TIMEZONE,
-    'user-agent': headers['user-agent'],
-    'version': getQwenWebVersion(),
-    'x-request-id': crypto.randomUUID(),
-    'bx-v': headers['bx-v'],
-    'bx-ua': headers['bx-ua'],
-    'bx-umidtoken': headers['bx-umidtoken'],
-    'source': 'web',
+    accept: "application/json, text/plain, */*",
+    "content-type": "application/json",
+    cookie: headers["cookie"],
+    origin: "https://chat.qwen.ai",
+    referer:
+      accountId === "guest"
+        ? "https://chat.qwen.ai/c/guest"
+        : "https://chat.qwen.ai/",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    timezone: CACHED_TIMEZONE,
+    "user-agent": headers["user-agent"],
+    version: getQwenWebVersion(),
+    "x-request-id": crypto.randomUUID(),
+    "bx-v": headers["bx-v"],
+    "bx-ua": headers["bx-ua"],
+    "bx-umidtoken": headers["bx-umidtoken"],
+    source: "web",
   };
-  if (headers['authorization']) {
-    result['authorization'] = headers['authorization'];
+  if (headers["authorization"]) {
+    result["authorization"] = headers["authorization"];
   }
   return { ...result, ...getClientHintsHeaders(accountId) };
 }
 
-async function nodeJsonFetch<T>(url: string, options: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<{ status: number; body: string; json: T | null }> {
+async function nodeJsonFetch<T>(
+  url: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+  },
+): Promise<{ status: number; body: string; json: T | null }> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    options.timeoutMs || 30000,
+  );
   try {
     const response = await fetch(url, {
-      method: options.method || 'GET',
+      method: options.method || "GET",
       headers: options.headers || {},
       body: options.body,
       signal: controller.signal,
     });
     const body = await response.text();
     let json: T | null = null;
-    try { json = JSON.parse(body) as T; } catch { /* not json */ }
+    try {
+      json = JSON.parse(body) as T;
+    } catch {
+      /* not json */
+    }
     return { status: response.status, body, json };
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
-async function browserJsonFetch<T>(page: Page, url: string, options: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<{ status: number; body: string; json: T | null }> {
-  return await page.evaluate(async ({ url, options }) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
-    try {
-      const response = await fetch(url, {
-        method: options.method || 'GET',
-        headers: options.headers || {},
-        body: options.body,
-        signal: controller.signal,
-      });
-      const body = await response.text();
-      let json = null;
-      try { json = JSON.parse(body); } catch { /* not json */ }
-      return { status: response.status, body, json };
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }, { url, options });
+async function browserJsonFetch<T>(
+  page: Page,
+  url: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+  },
+): Promise<{ status: number; body: string; json: T | null }> {
+  return await page.evaluate(
+    async ({ url, options }) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(
+        () => controller.abort(),
+        options.timeoutMs || 30000,
+      );
+      try {
+        const response = await fetch(url, {
+          method: options.method || "GET",
+          headers: options.headers || {},
+          body: options.body,
+          signal: controller.signal,
+        });
+        const body = await response.text();
+        let json = null;
+        try {
+          json = JSON.parse(body);
+        } catch {
+          /* not json */
+        }
+        return { status: response.status, body, json };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    },
+    { url, options },
+  );
 }
 
 function extractChatId(json: any): string {
   const chatId = json.chat_id || json.id || json.data?.chat_id || json.data?.id;
-  if (!chatId) throw new Error(`Unexpected chat response: ${JSON.stringify(json).slice(0, 200)}`);
+  if (!chatId)
+    throw new Error(
+      `Unexpected chat response: ${JSON.stringify(json).slice(0, 200)}`,
+    );
   return chatId;
 }
 
 function throwIfErrorJson(json: any): void {
   if (json && json.success === false) {
-    const code = json.data?.code || json.code || 'UpstreamError';
-    const details = json.data?.details || json.message || 'Qwen returned an error';
-    const wait = json.data?.num !== undefined ? ` Wait about ${json.data.num} hour(s) before trying again.` : '';
+    const code = json.data?.code || json.code || "UpstreamError";
+    const details =
+      json.data?.details || json.message || "Qwen returned an error";
+    const wait =
+      json.data?.num !== undefined
+        ? ` Wait about ${json.data.num} hour(s) before trying again.`
+        : "";
     let status = 502;
-    if (code === 'RateLimited') status = 429;
-    throw new QwenUpstreamError(`Qwen upstream error: ${code}: ${details}.${wait}`, code, status);
+    if (code === "RateLimited") status = 429;
+    throw new QwenUpstreamError(
+      `Qwen upstream error: ${code}: ${details}.${wait}`,
+      code,
+      status,
+    );
   }
 }
 
-async function createRealQwenChat(headers: Record<string, string>, accountId?: string): Promise<string> {
+async function createRealQwenChat(
+  headers: Record<string, string>,
+  accountId?: string,
+): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) {
     return process.env.TEST_SESSION_ID || `mock-chat-${crypto.randomUUID()}`;
   }
 
   const body = JSON.stringify({
-    title: 'Nova Conversa',
-    models: ['qwen3.7-plus'],
-    chat_mode: 'normal',
-    chat_type: 't2t',
+    title: "Nova Conversa",
+    models: ["qwen3.7-plus"],
+    chat_mode: "normal",
+    chat_type: "t2t",
     timestamp: Date.now(),
-    project_id: '',
+    project_id: "",
   });
 
-  const useDirect = getRuntimeBool('QWEN_DIRECT_FETCH', config.directFetch.enabled);
-  if (useDirect && accountId && accountId !== 'guest' && accountId !== 'global') {
+  const useDirect = getRuntimeBool(
+    "QWEN_DIRECT_FETCH",
+    config.directFetch.enabled,
+  );
+  if (
+    useDirect &&
+    accountId &&
+    accountId !== "guest" &&
+    accountId !== "global"
+  ) {
     try {
-      const result = await nodeJsonFetch<any>('https://chat.qwen.ai/api/v2/chats/new', {
-        method: 'POST',
-        headers: buildWarmPoolNodeHeaders(headers, accountId),
-        body,
-        timeoutMs: config.timeouts.http,
-      });
+      const result = await nodeJsonFetch<any>(
+        "https://chat.qwen.ai/api/v2/chats/new",
+        {
+          method: "POST",
+          headers: buildWarmPoolNodeHeaders(headers, accountId),
+          body,
+          timeoutMs: config.timeouts.http,
+        },
+      );
 
       if (result.status === 429) {
-        throw new QwenUpstreamError('Qwen upstream error: RateLimited: Too many requests.', 'RateLimited', 429);
+        throw new QwenUpstreamError(
+          "Qwen upstream error: RateLimited: Too many requests.",
+          "RateLimited",
+          429,
+        );
       }
       if (isTmdChallenge(result.body)) {
-        recordAccountBlock(accountId, 'captcha', `TMD challenge during warm-pool direct fetch: ${result.body.slice(0, 200)}`);
-        throw new QwenUpstreamError('Qwen anti-bot (TMD) challenge detected during warm-pool chat creation', 'FAIL_SYS_USER_VALIDATE', 403);
+        recordAccountBlock(
+          accountId,
+          "captcha",
+          `TMD challenge during warm-pool direct fetch: ${result.body.slice(0, 200)}`,
+        );
+        throw new QwenUpstreamError(
+          "Qwen anti-bot (TMD) challenge detected during warm-pool chat creation",
+          "FAIL_SYS_USER_VALIDATE",
+          403,
+        );
       }
       if (result.status && result.status >= 400) {
-        throw new Error(`Failed to create chat: ${result.status} - ${result.body}`);
+        throw new Error(
+          `Failed to create chat: ${result.status} - ${result.body}`,
+        );
       }
       const json = result.json ?? JSON.parse(result.body);
       throwIfErrorJson(json);
       return extractChatId(json);
     } catch (err: any) {
       if (err instanceof QwenUpstreamError) {
-        if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
+        if (err.upstreamCode === "RateLimited" || err.upstreamStatus === 429) {
           const hourHint = err.message?.match(/Wait about (\d+) hour/);
-          const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : undefined;
-          recordAccountBlock(accountId, 'rate-limited', err.message, { cooldownMs });
-          console.warn(`[WarmPool] Account ${accountId} rate-limited during chat creation. Quarantined.`);
+          const cooldownMs = hourHint
+            ? parseInt(hourHint[1]) * 60 * 60 * 1000
+            : undefined;
+          recordAccountBlock(accountId, "rate-limited", err.message, {
+            cooldownMs,
+          });
+          console.warn(
+            `[WarmPool] Account ${accountId} rate-limited during chat creation. Quarantined.`,
+          );
           throw err;
         }
         // For non-rate-limit errors (e.g. Unauthorized), fall through to browser path
         // which sends cookies automatically and may have the Bearer token via page context.
-        console.warn(`[WarmPool] Direct HTTP chat creation failed for ${accountId}, falling back to browser: ${err.message}`);
+        console.warn(
+          `[WarmPool] Direct HTTP chat creation failed for ${accountId}, falling back to browser: ${err.message}`,
+        );
       } else {
-        console.warn(`[WarmPool] Direct HTTP chat creation failed for ${accountId}, falling back to browser: ${err.message}`);
+        console.warn(
+          `[WarmPool] Direct HTTP chat creation failed for ${accountId}, falling back to browser: ${err.message}`,
+        );
       }
     }
   }
@@ -247,37 +348,60 @@ async function createRealQwenChat(headers: Record<string, string>, accountId?: s
       // Browser path: use minimal headers. Cookies are sent automatically by
       // the browser; Qwen's frontend adds anti-bot headers via its own fetch
       // interceptor when navigating the UI.
-      const result = await browserJsonFetch<any>(page, 'https://chat.qwen.ai/api/v2/chats/new', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-request-id': crypto.randomUUID(),
-          'timezone': CACHED_TIMEZONE,
+      const result = await browserJsonFetch<any>(
+        page,
+        "https://chat.qwen.ai/api/v2/chats/new",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-request-id": crypto.randomUUID(),
+            timezone: CACHED_TIMEZONE,
+          },
+          body,
+          timeoutMs: config.timeouts.http,
         },
-        body,
-        timeoutMs: config.timeouts.http,
-      });
+      );
 
       if (result.status === 429) {
-        throw new QwenUpstreamError('Qwen upstream error: RateLimited: Too many requests.', 'RateLimited', 429);
+        throw new QwenUpstreamError(
+          "Qwen upstream error: RateLimited: Too many requests.",
+          "RateLimited",
+          429,
+        );
       }
       if (isTmdChallenge(result.body)) {
-        recordAccountBlock(accountId!, 'captcha', `TMD challenge during warm-pool browser fetch: ${result.body.slice(0, 200)}`);
-        throw new QwenUpstreamError('Qwen anti-bot (TMD) challenge detected during warm-pool browser chat creation', 'FAIL_SYS_USER_VALIDATE', 403);
+        recordAccountBlock(
+          accountId!,
+          "captcha",
+          `TMD challenge during warm-pool browser fetch: ${result.body.slice(0, 200)}`,
+        );
+        throw new QwenUpstreamError(
+          "Qwen anti-bot (TMD) challenge detected during warm-pool browser chat creation",
+          "FAIL_SYS_USER_VALIDATE",
+          403,
+        );
       }
       if (!result.status || result.status >= 400) {
-        throw new Error(`Failed to create chat: ${result.status} - ${result.body}`);
+        throw new Error(
+          `Failed to create chat: ${result.status} - ${result.body}`,
+        );
       }
       const json = result.json ?? JSON.parse(result.body);
       throwIfErrorJson(json);
       return extractChatId(json);
     } catch (err: any) {
       if (err instanceof QwenUpstreamError) throw err;
-      throw new Error(`Browser chat creation failed with active Qwen page: ${err.message}`, { cause: err });
+      throw new Error(
+        `Browser chat creation failed with active Qwen page: ${err.message}`,
+        { cause: err },
+      );
     }
   }
 
-  throw new Error(`Cannot create Qwen chat outside an active Qwen browser page for ${accountId || 'global'}. Refusing direct fetch to avoid TMD challenge.`);
+  throw new Error(
+    `Cannot create Qwen chat outside an active Qwen browser page for ${accountId || "global"}. Refusing direct fetch to avoid TMD challenge.`,
+  );
 }
 
 function parseUnusedChats(body: string): string[] {
@@ -286,7 +410,10 @@ function parseUnusedChats(body: string): string[] {
     if (!json.success || !Array.isArray(json.data)) return [];
     const unused: string[] = [];
     for (const chat of json.data) {
-      if (chat.title === 'Nova Conversa' && chat.created_at === chat.updated_at) {
+      if (
+        chat.title === "Nova Conversa" &&
+        chat.created_at === chat.updated_at
+      ) {
         unused.push(chat.id);
       }
     }
@@ -296,50 +423,69 @@ function parseUnusedChats(body: string): string[] {
   }
 }
 
-async function fetchUnusedChats(headers: Record<string, string>, accountId?: string): Promise<string[]> {
+async function fetchUnusedChats(
+  headers: Record<string, string>,
+  accountId?: string,
+): Promise<string[]> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return [];
 
-  const url = 'https://chat.qwen.ai/api/v2/chats/?page=1&exclude_project=true';
+  const url = "https://chat.qwen.ai/api/v2/chats/?page=1&exclude_project=true";
 
-  const useDirect = getRuntimeBool('QWEN_DIRECT_FETCH', config.directFetch.enabled);
+  const useDirect = getRuntimeBool(
+    "QWEN_DIRECT_FETCH",
+    config.directFetch.enabled,
+  );
   if (useDirect) {
     try {
       const nodeHeaders = { ...buildWarmPoolNodeHeaders(headers, accountId) };
-      delete nodeHeaders['content-type'];
+      delete nodeHeaders["content-type"];
       const result = await nodeJsonFetch<any>(url, {
-        method: 'GET',
+        method: "GET",
         headers: nodeHeaders,
         timeoutMs: config.timeouts.http,
       });
       if (result.status && result.status < 400 && result.body) {
         if (accountId && isTmdChallenge(result.body)) {
-          recordAccountBlock(accountId, 'captcha', `TMD challenge during warm-pool chat list fetch: ${result.body.slice(0, 200)}`);
+          recordAccountBlock(
+            accountId,
+            "captcha",
+            `TMD challenge during warm-pool chat list fetch: ${result.body.slice(0, 200)}`,
+          );
         }
         return parseUnusedChats(result.body);
       }
     } catch (err: any) {
-      console.warn(`[WarmPool] Direct HTTP chat list fetch failed for ${accountId || 'global'}, falling back to browser: ${err.message}`);
+      console.warn(
+        `[WarmPool] Direct HTTP chat list fetch failed for ${accountId || "global"}, falling back to browser: ${err.message}`,
+      );
     }
   }
 
   const page = await waitForAccountPage(accountId, 10000);
 
-  let body = '';
+  let body = "";
   if (page) {
     try {
       const result = await browserJsonFetch<any>(page, url, {
-        method: 'GET',
+        method: "GET",
         headers: buildWarmPoolNodeHeaders(headers, accountId),
         timeoutMs: config.timeouts.http,
       });
       if (result.status && result.status < 400) {
         if (accountId && isTmdChallenge(result.body)) {
-          recordAccountBlock(accountId, 'captcha', `TMD challenge during warm-pool browser chat list fetch: ${result.body.slice(0, 200)}`);
+          recordAccountBlock(
+            accountId,
+            "captcha",
+            `TMD challenge during warm-pool browser chat list fetch: ${result.body.slice(0, 200)}`,
+          );
         }
         body = result.body;
       }
     } catch (err: any) {
-      console.warn('[WarmPool] Isolated browser fetch failed for chat list with active Qwen context:', err.message);
+      console.warn(
+        "[WarmPool] Isolated browser fetch failed for chat list with active Qwen context:",
+        err.message,
+      );
       return [];
     }
   }
@@ -353,14 +499,17 @@ async function refillPoolForAccount(accountId: string) {
   if (Date.now() < nextAt) return;
 
   let pool = warmPool.get(accountId);
-  if (!pool) { pool = []; warmPool.set(accountId, pool); }
+  if (!pool) {
+    pool = [];
+    warmPool.set(accountId, pool);
+  }
   cleanupStalePool(accountId);
   const need = Math.max(0, getPoolSize() - pool.length);
   if (need === 0) return;
 
   let headers: Record<string, string>;
   try {
-    const acctId = accountId === 'global' ? undefined : accountId;
+    const acctId = accountId === "global" ? undefined : accountId;
     headers = await getBasicQwenHeaders(acctId);
     refillConsecutiveFailures.delete(accountId);
     refillNextAttemptAt.delete(accountId);
@@ -368,14 +517,19 @@ async function refillPoolForAccount(accountId: string) {
     const failures = (refillConsecutiveFailures.get(accountId) || 0) + 1;
     refillConsecutiveFailures.set(accountId, failures);
     const baseMs = getRefillBackoffBaseMs();
-    const delay = Math.min(120000, baseMs * Math.pow(2, Math.min(failures - 1, 5))) + Math.floor(Math.random() * 1000);
+    const delay =
+      Math.min(120000, baseMs * Math.pow(2, Math.min(failures - 1, 5))) +
+      Math.floor(Math.random() * 1000);
     refillNextAttemptAt.set(accountId, Date.now() + delay);
-    console.error(`[WarmPool] header fetch failed for ${accountId} (attempt ${failures}, retry in ${Math.round(delay / 1000)}s):`, (err as Error).message);
+    console.error(
+      `[WarmPool] header fetch failed for ${accountId} (attempt ${failures}, retry in ${Math.round(delay / 1000)}s):`,
+      (err as Error).message,
+    );
     return;
   }
 
-  const acctId = accountId === 'global' ? undefined : accountId;
-  const existingIds = new Set(pool.map(e => e.chatId));
+  const acctId = accountId === "global" ? undefined : accountId;
+  const existingIds = new Set(pool.map((e) => e.chatId));
 
   let reused = 0;
   try {
@@ -389,10 +543,15 @@ async function refillPoolForAccount(accountId: string) {
       reused++;
     }
     if (reused > 0) {
-      console.log(`[WarmPool] Reused ${reused} existing unused chats for ${accountId}`);
+      console.log(
+        `[WarmPool] Reused ${reused} existing unused chats for ${accountId}`,
+      );
     }
   } catch (err: any) {
-    console.warn(`[WarmPool] Failed to fetch unused chats for ${accountId}:`, err.message);
+    console.warn(
+      `[WarmPool] Failed to fetch unused chats for ${accountId}:`,
+      err.message,
+    );
   }
 
   const stillNeed = Math.max(0, need - reused);
@@ -405,58 +564,82 @@ async function refillPoolForAccount(accountId: string) {
       pool.push({ chatId, headers, accountId, timestamp: Date.now() });
     } catch (err: any) {
       if (err instanceof QwenUpstreamError) {
-        if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
+        if (err.upstreamCode === "RateLimited" || err.upstreamStatus === 429) {
           const hourHint = err.message?.match(/Wait about (\d+) hour/);
-          const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : undefined;
-          recordAccountBlock(accountId, 'rate-limited', err.message, { cooldownMs });
-          console.warn(`[WarmPool] Account ${accountId} rate-limited during chat creation. Quarantined.`);
+          const cooldownMs = hourHint
+            ? parseInt(hourHint[1]) * 60 * 60 * 1000
+            : undefined;
+          recordAccountBlock(accountId, "rate-limited", err.message, {
+            cooldownMs,
+          });
+          console.warn(
+            `[WarmPool] Account ${accountId} rate-limited during chat creation. Quarantined.`,
+          );
           break;
         }
       }
-      console.error(`[WarmPool] chat creation failed for ${accountId}:`, (err as Error).message);
+      console.error(
+        `[WarmPool] chat creation failed for ${accountId}:`,
+        (err as Error).message,
+      );
     }
   }
 }
 
 export async function getWarmedChat(accountId?: string) {
   if (getPoolSize() <= 0) {
-    const acctId = accountId === 'global' ? undefined : accountId;
+    const acctId = accountId === "global" ? undefined : accountId;
     const headers = await getBasicQwenHeaders(acctId);
     const chatId = await createRealQwenChat(headers, acctId);
-    const key = accountId || 'global';
+    const key = accountId || "global";
     markWarmChatInFlight(key, chatId);
     return { chatId, headers, accountId: key, timestamp: Date.now() };
   }
 
-  const key = accountId || 'global';
+  const key = accountId || "global";
   let pool = warmPool.get(key);
-  if (!pool) { pool = []; warmPool.set(key, pool); }
+  if (!pool) {
+    pool = [];
+    warmPool.set(key, pool);
+  }
   cleanupStalePool(key);
 
   if (pool.length < getLowWater() && !refillPromises.has(key)) {
-    refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+    refillPromises.set(
+      key,
+      refillPoolForAccount(key).finally(() => refillPromises.delete(key)),
+    );
   }
 
   if (pool.length === 0) {
     if (!refillPromises.has(key)) {
-      refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+      refillPromises.set(
+        key,
+        refillPoolForAccount(key).finally(() => refillPromises.delete(key)),
+      );
     }
     await refillPromises.get(key);
   }
   if (pool.length === 0) {
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 200));
     if (!refillPromises.has(key)) {
-      refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+      refillPromises.set(
+        key,
+        refillPoolForAccount(key).finally(() => refillPromises.delete(key)),
+      );
     }
     await refillPromises.get(key);
   }
-  if (pool.length === 0) throw new Error(`Warm pool empty after retry for ${key}`);
+  if (pool.length === 0)
+    throw new Error(`Warm pool empty after retry for ${key}`);
   const entry = pool.shift()!;
   markWarmChatInFlight(key, entry.chatId);
   try {
-    const freshAuth = (await ensureAuthorization(key === 'global' ? undefined : key)) ?? undefined;
+    const freshAuth =
+      (await ensureAuthorization(key === "global" ? undefined : key)) ??
+      undefined;
     if (freshAuth) {
-      entry.headers['authorization'] = freshAuth;
+      entry.headers["authorization"] = freshAuth;
     }
     return entry;
   } catch (err) {

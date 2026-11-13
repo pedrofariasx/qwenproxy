@@ -1,11 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Playwright ships the browser binaries that match the npm package exactly.
-# The version MUST stay in sync with the `playwright` dependency in
-# package.json — a mismatch makes Chromium fail to launch with
-# "Executable doesn't exist at /ms-playwright/chromium-*/chrome-linux/chrome".
-# `npm run docker:verify` checks that; CI runs it on every build.
-ARG PLAYWRIGHT_VERSION=1.60.0
+ARG PLAYWRIGHT_VERSION=1.64.1
 ARG NODE_VERSION=22.22.0
 ARG APP_VERSION=dev
 
@@ -13,10 +8,10 @@ FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble
 
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="qwenproxy" \
-      org.opencontainers.image.description="OpenAI-compatible proxy for Qwen (chat.qwen.ai) via Playwright" \
-      org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.source="https://github.com/pedrofariasx/qwenproxy" \
-      org.opencontainers.image.licenses="ISC"
+    org.opencontainers.image.description="OpenAI-compatible proxy for Qwen (chat.qwen.ai) via Patchright" \
+    org.opencontainers.image.version="${APP_VERSION}" \
+    org.opencontainers.image.source="https://github.com/pedrofariasx/qwenproxy" \
+    org.opencontainers.image.licenses="ISC"
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
@@ -32,10 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends dumb-init gosu 
 WORKDIR /app
 
 # --- Backend dependencies (cached layer) -------------------------------------
-# package-lock.json is required: `npm ci` is reproducible and fails loudly
-# when the lockfile is out of sync with package.json.
-# `--include=dev` is explicit so the build never depends on the ambient
-# NODE_ENV (npm silently drops devDependencies when it is "production").
 COPY package.json package-lock.json ./
 RUN npm ci --include=dev --no-fund --no-audit && npm cache clean --force
 
@@ -43,19 +34,19 @@ RUN npm ci --include=dev --no-fund --no-audit && npm cache clean --force
 COPY tsconfig.json tsconfig.build.json ./
 COPY src/ ./src/
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
+
+# Ensure Patchright binaries match correctly inside the playwright path
+RUN npx patchright install --with-deps
+
 RUN npm run build && npm prune --omit=dev
 
 # --- Admin dashboard build ---------------------------------------------------
-# The dashboard is a separate npm workspace; its output is served from
-# web/dist by the API server.
 COPY web/package.json web/package-lock.json ./web/
 RUN npm --prefix web ci --include=dev --no-fund --no-audit
 COPY web/ ./web/
 RUN npm --prefix web run build && rm -rf web/node_modules
 
 # --- Runtime layout ----------------------------------------------------------
-# The two directories below hold everything that must survive a container
-# replacement: the SQLite database and the per-account browser profiles.
 RUN mkdir -p /app/data /app/qwen_profiles /tmp/playwright \
     && chown -R pwuser:pwuser /app /tmp/playwright \
     && chmod +x /app/docker-entrypoint.sh

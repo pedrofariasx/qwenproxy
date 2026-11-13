@@ -51,7 +51,7 @@
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
     "hono": "^4.12.21",
-    "playwright": "^1.60.0",
+    "patchright": "^1.64.3",
     "tiktoken": "^1.0.22",
     "uuid": "^14.0.0",
     "zod": "^4.4.3"
