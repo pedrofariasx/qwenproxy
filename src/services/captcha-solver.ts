@@ -275,6 +275,18 @@ export async function solveBaxiaCaptcha(page: Page): Promise<boolean> {
   );
 
   try {
+    // Release pointer/mouse locks at the browser engine level before interacting
+    await page
+      .evaluate(() => {
+        try {
+          if (document.exitPointerLock) document.exitPointerLock();
+          window.focus();
+        } catch {
+          /* safely ignored */
+        }
+      })
+      .catch(() => {});
+
     const maxAttempts = getMaxCaptchaAttempts();
     const sliderTimeoutMs = getSliderTimeoutMs();
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {

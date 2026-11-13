@@ -21,7 +21,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
 # dumb-init gives us correct signal handling (PID 1 reaping + SIGTERM
 # forwarding); gosu drops the root privileges without breaking the
 # setuid semantics of `su`.
-RUN apt-get update && apt-get install -y --no-install-recommends dumb-init gosu tini ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends dumb-init gosu tini ca-certificates build-essential python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

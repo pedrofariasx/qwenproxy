@@ -1120,9 +1120,7 @@ export async function initPlaywrightForAccount(
   accountPages.set(account.id, acctPage);
   touchAccountActivity(account.id);
 
-  // Capture the Qwen access token from the auth refresh response. Qwen's
-  // frontend calls auth.qwen.ai/api/v2/auths/refresh right after signin and
-  // the response body carries the JWT used as `authorization: Bearer <token>`.
+  // Capture the Qwen access token from the auth refresh response.
   const tokenCapture = installAccessTokenCapture(acctPage);
 
   const storeAccessToken = (token: string | null): boolean => {
@@ -1140,13 +1138,8 @@ export async function initPlaywrightForAccount(
     timeout: config.timeouts.navigation,
   });
 
-  // Detect the live Qwen web version and Aliyun Baxia version so the
-  // `version` and `bx-v` headers always match what the deployment expects.
   await refreshQwenVersions(acctPage).catch(() => undefined);
 
-  // Always attempt UI login when credentials are available. The Bearer token
-  // (authorization header) is only issued by the signin flow, so a cached
-  // session without a valid refresh_token cookie cannot produce API calls.
   if (account.email && account.password) {
     const ok = await loginToQwenWithContext(
       acctContext,
@@ -1155,8 +1148,6 @@ export async function initPlaywrightForAccount(
       account.password,
     );
     if (ok) {
-      // The signin flow triggers auth.qwen.ai/api/v2/auths/refresh, whose
-      // response body contains the access token.
       for (let i = 0; i < 20; i++) {
         if (tokenCapture.getToken()) break;
         await sleep(500);
@@ -1220,20 +1211,24 @@ export async function initPlaywrightForAccount(
     );
   }
 
-  // If we still have no access token (e.g. session was already valid and the
-  // refresh happened before the listener was installed), force a refresh.
+  // GUARANTEED TOKEN FALLBACK: If we still have no access token, force a page reload
+  // so the frontend triggers its auth refresh API call and the listener captures it.
   if (!getAccountHeaderCache(account.id).currentHeaders["authorization"]) {
-    for (let i = 0; i < 20; i++) {
-      if (tokenCapture.getToken()) break;
-      await sleep(500);
-    }
-    let token = tokenCapture.getToken();
-    if (!token) {
-      token = await refreshQwenAccessToken(acctPage);
-    }
-    if (storeAccessToken(token)) {
-      console.log(
-        `[Playwright] Captured Qwen access token for ${account.email}.`,
+    console.log(
+      `[Playwright] Forcing token acquisition fallback for ${account.email}...`,
+    );
+    try {
+      await acctPage.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+      const token =
+        tokenCapture.getToken() || (await refreshQwenAccessToken(acctPage));
+      if (storeAccessToken(token)) {
+        console.log(
+          `[Playwright] Successfully captured fallback access token for ${account.email}.`,
+        );
+      }
+    } catch (err: any) {
+      console.warn(
+        `[Playwright] Fallback token capture failed for ${account.email}: ${err.message}`,
       );
     }
   }
