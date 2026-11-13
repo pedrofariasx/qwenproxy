@@ -6,7 +6,7 @@ services:
       args:
         # Keep in sync with the `playwright` dependency in package.json.
         # `npm run docker:verify` validates this.
-        PLAYWRIGHT_VERSION: "1.60.0"
+        PLAYWRIGHT_VERSION: "1.64.3"
     image: qwenproxy:local
     ports:
       # Both sides use the same PORT: the container listens on the port the
