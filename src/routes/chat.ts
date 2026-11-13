@@ -877,7 +877,7 @@ export async function chatCompletions(c: Context) {
     releaseUserSlotOnce();
     console.error('Error in chatCompletions:', err)
     const action = failureAction(err);
-    const status = err.upstreamStatus || action.clientStatus || 500
+    const status = action.category === 'auth' ? action.clientStatus : (err.upstreamStatus || action.clientStatus || 500)
     metrics.histogram('latency.completion', Date.now() - completionStart)
     trackUsage(user ? user.id : 'anonymous', usageInputText, true);
     trackModelUsage(usageModel);

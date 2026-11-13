@@ -9,7 +9,7 @@ import { markAccountNotReady, markAccountReady } from '../core/account-manager.j
 import { getRuntimeInt, getRuntimeBool } from '../core/runtime-config.js';
 import { getStealthScript } from './stealth.js';
 import { rememberQwenVersions, refreshQwenVersions, getQwenWebVersion } from './qwen-versions.js';
-import { solveAliyunWafCaptcha } from './captcha-solver.js';
+import { solveAliyunWafCaptcha, solveBaxiaCaptcha } from './captcha-solver.js';
 import { registerHeaderStoreAccessor, noteAccessToken } from './auth-session.js';
 import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
 import { setFingerprintRotationListener } from '../core/account-isolation.js';
@@ -562,12 +562,30 @@ export async function loginToQwenWithContext(acctContext: BrowserContext, acctPa
   }
 
   // Fill email and password in the UI inputs
-  const emailSel = 'input[name="email"], input[type="text"], input[type="email"]';
-  await acctPage.waitForSelector(emailSel, { timeout: config.timeouts.page });
+  const emailSel = 'input[name="email"], input[type="text"], input[type="email"], input#email, input[placeholder*="email" i], input[placeholder*="e-mail" i], input[placeholder*="账号" i]';
+  const hasCaptchaBefore = await acctPage.locator('#aliyunCaptcha-sliding-slider, #waf_nc_block, iframe#baxia-dialog-content').count() > 0;
+  if (hasCaptchaBefore) {
+    console.log(`[Playwright] Pre-login captcha detected for ${email}, attempting solve...`);
+    await solveAliyunWafCaptcha(acctPage).catch(() => {});
+    await solveBaxiaCaptcha(acctPage).catch(() => {});
+  }
+
+  try {
+    await acctPage.waitForSelector(emailSel, { timeout: config.timeouts.page });
+  } catch (err: any) {
+    const pageBlocked = await acctPage.evaluate(() => {
+      const text = document.body?.innerText || '';
+      return text.includes('405') || text.includes('blocked') || text.includes('security threat');
+    }).catch(() => false);
+    if (pageBlocked) {
+      throw new Error(`Auth page blocked by anti-bot WAF: ${err.message}`, { cause: err });
+    }
+    throw err;
+  }
   await acctPage.fill(emailSel, email);
   await sleep(300);
 
-  const passSel = 'input[name="password"], input[type="password"]';
+  const passSel = 'input[name="password"], input[type="password"], input#password, input[placeholder*="password" i], input[placeholder*="senha" i], input[placeholder*="密码" i]';
   await acctPage.waitForSelector(passSel, { timeout: config.timeouts.page });
   await acctPage.fill(passSel, password);
   await sleep(300);

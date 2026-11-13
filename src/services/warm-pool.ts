@@ -42,13 +42,15 @@ function cleanupStalePool(accountId: string) {
   const pool = warmPool.get(accountId);
   if (!pool) return;
   const now = Date.now();
-  const filtered = pool.filter(e => {
-    if (now - e.timestamp > getTtlMs()) return false;
+  for (let i = pool.length - 1; i >= 0; i--) {
+    const e = pool[i];
+    const isOld = now - e.timestamp > getTtlMs();
     const auth = e.headers['authorization'];
-    if (auth && isBearerTokenExpired(auth)) return false;
-    return true;
-  });
-  if (filtered.length !== pool.length) warmPool.set(accountId, filtered);
+    const isExpired = auth ? isBearerTokenExpired(auth) : false;
+    if (isOld || isExpired) {
+      pool.splice(i, 1);
+    }
+  }
 }
 
 function warmChatKey(accountId: string, chatId: string) {
@@ -450,12 +452,17 @@ export async function getWarmedChat(accountId?: string) {
   }
   if (pool.length === 0) throw new Error(`Warm pool empty after retry for ${key}`);
   const entry = pool.shift()!;
-  const freshAuth = (await ensureAuthorization(key === 'global' ? undefined : key)) ?? undefined;
-  if (freshAuth) {
-    entry.headers['authorization'] = freshAuth;
-  }
   markWarmChatInFlight(key, entry.chatId);
-  return entry;
+  try {
+    const freshAuth = (await ensureAuthorization(key === 'global' ? undefined : key)) ?? undefined;
+    if (freshAuth) {
+      entry.headers['authorization'] = freshAuth;
+    }
+    return entry;
+  } catch (err) {
+    releaseWarmChat(key, entry.chatId);
+    throw err;
+  }
 }
 
 export async function warmAllPools(accountIds: string[]) {

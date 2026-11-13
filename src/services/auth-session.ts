@@ -113,8 +113,7 @@ export function invalidateAccessToken(accountId: string | undefined, reason: str
   s.state = 'degraded'
   s.lastFailureAt = Date.now()
   s.consecutiveFailures += 1
-  const backoff = Math.min(60000, 2000 * Math.pow(2, Math.min(s.consecutiveFailures, 5)))
-  s.nextAttemptAt = Date.now() + backoff
+  s.nextAttemptAt = 0
   const store = getStore(accountId)
   if (store && store.currentHeaders) {
     delete store.currentHeaders['authorization']
@@ -250,9 +249,10 @@ export async function renewAuthorization(accountId?: string, page?: Page): Promi
 
 export async function ensureAuthorization(accountId?: string, page?: Page): Promise<string | null> {
   if (isAuthorizationUsable(accountId)) {
-    return getAuthorizationHeader(accountId)
+    const cached = getAuthorizationHeader(accountId);
+    if (cached) return cached;
   }
-  return renewAuthorization(accountId, page)
+  return renewAuthorization(accountId, page);
 }
 
 export function getAuthSessionStats(): Record<string, { state: AuthState; expiresAt: number | null; renewals: number; failures: number; lastTier: string | null }> {
