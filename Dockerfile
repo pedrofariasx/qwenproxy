@@ -30,13 +30,13 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --include=dev --no-fund --no-audit && npm cache clean --force
 
+# Ensure Patchright binaries match correctly inside the playwright path
+RUN npx patchright install --with-deps
+
 # --- Backend build -----------------------------------------------------------
 COPY tsconfig.json tsconfig.build.json ./
 COPY src/ ./src/
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
-
-# Ensure Patchright binaries match correctly inside the playwright path
-RUN npx patchright install --with-deps
 
 RUN npm run build && npm prune --omit=dev
 
