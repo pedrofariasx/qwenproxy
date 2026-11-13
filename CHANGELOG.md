@@ -1,3 +1,11 @@
+## [1.37.2](https://github.com/pedrofariasx/qwenproxy/compare/v1.37.1...v1.37.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **review:** address CodeRabbit feedback and harden login WAF detection ([5ef40de](https://github.com/pedrofariasx/qwenproxy/commit/5ef40deb40430710962211695eadcec172f2738c))
+* **stability:** implement token lifecycle authority, circuit breaker recovery, and warm pool healing ([f4a81a8](https://github.com/pedrofariasx/qwenproxy/commit/f4a81a81161f7dede8f0fcd31f9951bafd18d15f))
+
 ## [1.37.1](https://github.com/pedrofariasx/qwenproxy/compare/v1.37.0...v1.37.1) (2026-10-29)
 
 
