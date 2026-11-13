@@ -328,8 +328,6 @@ async function createRealQwenChat(
           );
           throw err;
         }
-        // For non-rate-limit errors (e.g. Unauthorized), fall through to browser path
-        // which sends cookies automatically and may have the Bearer token via page context.
         console.warn(
           `[WarmPool] Direct HTTP chat creation failed for ${accountId}, falling back to browser: ${err.message}`,
         );
@@ -345,9 +343,6 @@ async function createRealQwenChat(
 
   if (page) {
     try {
-      // Browser path: use minimal headers. Cookies are sent automatically by
-      // the browser; Qwen's frontend adds anti-bot headers via its own fetch
-      // interceptor when navigating the UI.
       const result = await browserJsonFetch<any>(
         page,
         "https://chat.qwen.ai/api/v2/chats/new",
@@ -632,15 +627,24 @@ export async function getWarmedChat(accountId?: string) {
   }
   if (pool.length === 0)
     throw new Error(`Warm pool empty after retry for ${key}`);
+
   const entry = pool.shift()!;
   markWarmChatInFlight(key, entry.chatId);
+
   try {
-    const freshAuth =
-      (await ensureAuthorization(key === "global" ? undefined : key)) ??
-      undefined;
-    if (freshAuth) {
-      entry.headers["authorization"] = freshAuth;
+    const freshAuth = await ensureAuthorization(
+      key === "global" ? undefined : key,
+    );
+
+    // CRITICAL FIX: Reject null/undefined renewal results to avoid reusing invalidated tokens
+    if (!freshAuth) {
+      releaseWarmChat(key, entry.chatId);
+      throw new Error(
+        `[WarmPool] Token renewal failed or returned null for pool key: ${key}`,
+      );
     }
+
+    entry.headers["authorization"] = freshAuth;
     return entry;
   } catch (err) {
     releaseWarmChat(key, entry.chatId);
