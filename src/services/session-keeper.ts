@@ -11,8 +11,26 @@ let running = false;
 let intervalId: ReturnType<typeof setInterval> | null = null;
 const lastNavigation = new Map<string, number>();
 
+// Track consecutive failures and next allowed retry timestamps for proactive session recovery
+interface RetryState {
+  failures: number;
+  nextAttemptAt: number;
+}
+const sessionRetries = new Map<string, RetryState>();
+
 async function performKeepAlive(accountId: string, page: Page): Promise<void> {
   if (page.isClosed()) return;
+
+  const retryState = sessionRetries.get(accountId) || {
+    failures: 0,
+    nextAttemptAt: 0,
+  };
+  const now = Date.now();
+
+  // If session is currently in a degraded backoff state, skip until nextAttemptAt passes
+  if (retryState.failures > 0 && now < retryState.nextAttemptAt) {
+    return;
+  }
 
   try {
     const viewport = page.viewportSize();
@@ -32,7 +50,6 @@ async function performKeepAlive(accountId: string, page: Page): Promise<void> {
       await humanScroll(page);
     }
 
-    const now = Date.now();
     const lastNav = lastNavigation.get(accountId) || 0;
 
     if (now - lastNav > NAVIGATION_INTERVAL_MS) {
@@ -59,13 +76,26 @@ async function performKeepAlive(accountId: string, page: Page): Promise<void> {
       }
       lastNavigation.set(accountId, now);
     }
+
+    // Success: reset retry tracking counters
+    if (retryState.failures > 0) {
+      sessionRetries.delete(accountId);
+    }
   } catch (err: any) {
     if (
       !err.message?.includes("Target closed") &&
       !err.message?.includes("Page is closed")
     ) {
+      // Implement exponential backoff for degraded keeper states: 2s * 2^failures (capped at 5 mins)
+      const nextFailures = Math.min(retryState.failures + 1, 5);
+      const backoff = Math.min(2000 * Math.pow(2, nextFailures), 5 * 60 * 1000);
+      sessionRetries.set(accountId, {
+        failures: nextFailures,
+        nextAttemptAt: Date.now() + backoff,
+      });
+
       console.warn(
-        `[SessionKeeper] Keep-alive failed for ${accountId}:`,
+        `[SessionKeeper] Keep-alive failed for ${accountId} (state: degraded, retrying in ${Math.round(backoff / 1000)}s):`,
         err.message,
       );
     }
@@ -122,5 +152,6 @@ export function stopSessionKeeper(): void {
     intervalId = null;
   }
   lastNavigation.clear();
+  sessionRetries.clear();
   console.log("[SessionKeeper] Stopped");
 }
