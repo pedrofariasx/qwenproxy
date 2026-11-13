@@ -8,8 +8,9 @@ import { getBaseAccountId } from '../core/account-lanes.js';
 import { markAccountNotReady, markAccountReady } from '../core/account-manager.js';
 import { getRuntimeInt, getRuntimeBool } from '../core/runtime-config.js';
 import { getStealthScript } from './stealth.js';
-import { rememberQwenVersions, refreshQwenVersions } from './qwen-versions.js';
+import { rememberQwenVersions, refreshQwenVersions, getQwenWebVersion } from './qwen-versions.js';
 import { solveAliyunWafCaptcha } from './captcha-solver.js';
+import { registerHeaderStoreAccessor, noteAccessToken } from './auth-session.js';
 import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
 import { setFingerprintRotationListener } from '../core/account-isolation.js';
 import { sleep } from '../utils/sleep.js';
@@ -175,6 +176,10 @@ export function getAccountHeaderCache(accountId: string): AccountHeaderCache {
   return cache;
 }
 
+registerHeaderStoreAccessor((accountId: string) => {
+  return getAccountHeaderCache(accountId);
+});
+
 /** Returns the account/lane ids that currently have cached anti-bot headers. */
 export function listHeaderAccountIds(): string[] {
   return [...accountHeaderCaches.keys()];
@@ -273,7 +278,7 @@ export async function refreshQwenAccessToken(page: Page, timeoutMs = 15000): Pro
       headers: {
         'accept': 'application/json',
         'source': 'web',
-        'version': '0.3.20',
+        'version': getQwenWebVersion(),
         'x-request-origin': 'https://chat.qwen.ai',
         'referer': 'https://chat.qwen.ai/',
       },
@@ -860,6 +865,7 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
     const cache = getAccountHeaderCache(account.id);
     cache.currentHeaders['authorization'] = `Bearer ${token}`;
     cache.lastHeadersTime = Date.now();
+    noteAccessToken(account.id, token, 'login-capture');
     markAccountReady(account.id);
     return true;
   };

@@ -2,10 +2,15 @@ import type { Page } from 'playwright';
 import { humanDrag } from './human-behavior.js';
 import { acquireMouseLock, releaseMouseLock } from './mouse-lock.js';
 import { sleep } from '../utils/sleep.js';
+import { config } from '../core/config.js';
+import { getRuntimeInt } from '../core/runtime-config.js';
 
-export const BAXIA_IFRAME_SELECTOR = 'iframe#baxia-dialog-content, iframe[src*="_____tmd_____/punish"]';
+export const BAXIA_IFRAME_SELECTOR = 'iframe#baxia-dialog-content, iframe[src*="_____tmd_____/punish"], iframe[src*="nocaptcha"]';
 export const ALIYUN_WAF_CAPTCHA_SELECTOR = '#waf_nc_block';
 export const ALIYUN_WAF_CAPTCHA_WIDGET = '#aliyunCaptcha-window-embed';
+
+const getSliderTimeoutMs = () => getRuntimeInt('CAPTCHA_SLIDER_TIMEOUT_MS', config.captcha.sliderTimeoutMs);
+const getMaxCaptchaAttempts = () => getRuntimeInt('CAPTCHA_MAX_ATTEMPTS', config.captcha.maxAttempts);
 
 /**
  * Solves the Aliyun WAF puzzle captcha that appears during Qwen login.
@@ -205,13 +210,14 @@ export async function solveBaxiaCaptcha(page: Page): Promise<boolean> {
   console.log('[Captcha] Baxia captcha iframe detected. Attempting to solve...');
 
   try {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  const maxAttempts = getMaxCaptchaAttempts();
+  const sliderTimeoutMs = getSliderTimeoutMs();
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const frame = page.frameLocator(BAXIA_IFRAME_SELECTOR);
-      const slider = frame.locator('#nc_1_n1z, .btn_slide');
+      const slider = frame.locator('#nc_1_n1z, .btn_slide, .nc_iconfont.btn_slide, span[id*="_n1z"]');
 
-      // Wait for the slider element to be visible inside the frame
-      await slider.waitFor({ state: 'visible', timeout: 5000 });
+      await slider.waitFor({ state: 'visible', timeout: sliderTimeoutMs });
 
       const sliderBox = await slider.boundingBox();
       if (!sliderBox) {

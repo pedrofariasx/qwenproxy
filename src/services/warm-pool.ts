@@ -4,6 +4,8 @@ import { config } from '../core/config.js';
 import { getRuntimeInt, getRuntimeBool } from '../core/runtime-config.js';
 import { QwenUpstreamError } from './error-handler.js';
 import { getClientHintsHeaders } from './browser-manager.js';
+import { ensureAuthorization } from './auth-session.js';
+import { isBearerTokenExpired } from '../utils/access-token.js';
 import type { Page } from 'playwright';
 import crypto from 'crypto';
 import { sleep } from '../utils/sleep.js';
@@ -26,18 +28,26 @@ const warmPool: Map<string, WarmPoolEntry[]> = new Map();
 const inFlightWarmChats = new Set<string>();
 
 const refillPromises: Map<string, Promise<void>> = new Map();
+const refillConsecutiveFailures: Map<string, number> = new Map();
+const refillNextAttemptAt: Map<string, number> = new Map();
 
 // Read at call time so WARM_POOL_* can be tuned live from the admin dashboard
 // without restarting the server.
 const getPoolSize = () => getRuntimeInt('WARM_POOL_SIZE', config.warmPool.size);
 const getTtlMs = () => getRuntimeInt('WARM_POOL_TTL_MS', config.warmPool.ttlMs);
 const getLowWater = () => getRuntimeInt('WARM_POOL_LOW_WATER', config.warmPool.lowWater);
+const getRefillBackoffBaseMs = () => getRuntimeInt('WARM_POOL_REFILL_BACKOFF_MS', config.warmPool.refillBackoffMs);
 
 function cleanupStalePool(accountId: string) {
   const pool = warmPool.get(accountId);
   if (!pool) return;
   const now = Date.now();
-  const filtered = pool.filter(e => now - e.timestamp <= getTtlMs());
+  const filtered = pool.filter(e => {
+    if (now - e.timestamp > getTtlMs()) return false;
+    const auth = e.headers['authorization'];
+    if (auth && isBearerTokenExpired(auth)) return false;
+    return true;
+  });
   if (filtered.length !== pool.length) warmPool.set(accountId, filtered);
 }
 
@@ -69,7 +79,12 @@ function isWarmChatInFlight(accountId: string, chatId: string) {
 }
 
 async function getBasicQwenHeaders(accountId?: string): Promise<Record<string, string>> {
-  const { cookie, userAgent, bxV, bxUa, bxUmidtoken, authorization } = await getBasicHeaders(accountId);
+  const basic = await getBasicHeaders(accountId);
+  let authorization = basic.authorization;
+  if (!authorization) {
+    authorization = (await ensureAuthorization(accountId)) ?? undefined;
+  }
+  const { cookie, userAgent, bxV, bxUa, bxUmidtoken } = basic;
   if (!cookie || !userAgent || !bxV || !bxUa || !bxUmidtoken) {
     throw new Error('Missing required browser anti-bot headers for warm pool');
   }
@@ -332,6 +347,9 @@ async function fetchUnusedChats(headers: Record<string, string>, accountId?: str
 }
 
 async function refillPoolForAccount(accountId: string) {
+  const nextAt = refillNextAttemptAt.get(accountId) || 0;
+  if (Date.now() < nextAt) return;
+
   let pool = warmPool.get(accountId);
   if (!pool) { pool = []; warmPool.set(accountId, pool); }
   cleanupStalePool(accountId);
@@ -342,8 +360,15 @@ async function refillPoolForAccount(accountId: string) {
   try {
     const acctId = accountId === 'global' ? undefined : accountId;
     headers = await getBasicQwenHeaders(acctId);
+    refillConsecutiveFailures.delete(accountId);
+    refillNextAttemptAt.delete(accountId);
   } catch (err) {
-    console.error(`[WarmPool] header fetch failed for ${accountId}:`, (err as Error).message);
+    const failures = (refillConsecutiveFailures.get(accountId) || 0) + 1;
+    refillConsecutiveFailures.set(accountId, failures);
+    const baseMs = getRefillBackoffBaseMs();
+    const delay = Math.min(120000, baseMs * Math.pow(2, Math.min(failures - 1, 5))) + Math.floor(Math.random() * 1000);
+    refillNextAttemptAt.set(accountId, Date.now() + delay);
+    console.error(`[WarmPool] header fetch failed for ${accountId} (attempt ${failures}, retry in ${Math.round(delay / 1000)}s):`, (err as Error).message);
     return;
   }
 
@@ -425,6 +450,10 @@ export async function getWarmedChat(accountId?: string) {
   }
   if (pool.length === 0) throw new Error(`Warm pool empty after retry for ${key}`);
   const entry = pool.shift()!;
+  const freshAuth = (await ensureAuthorization(key === 'global' ? undefined : key)) ?? undefined;
+  if (freshAuth) {
+    entry.headers['authorization'] = freshAuth;
+  }
   markWarmChatInFlight(key, entry.chatId);
   return entry;
 }

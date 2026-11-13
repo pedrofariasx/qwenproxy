@@ -16,6 +16,8 @@ import { sleep } from '../utils/sleep.js';
 import { CACHED_TIMEZONE } from '../utils/qwen-constants.js';
 import { getQwenWebVersion } from './qwen-versions.js';
 import { hasExpiredBearerToken } from '../utils/access-token.js';
+import { ensureAuthorization, invalidateAccessToken } from './auth-session.js';
+import { classifyFailure } from './failure-class.js';
 import crypto from 'crypto';
 
 export { updateSessionParent };
@@ -99,19 +101,27 @@ function buildNodeCompletionHeaders(headers: Record<string, string>, chatId: str
 
 const directFetchFailures = new Map<string, number>();
 const directFetchBlockedUntil = new Map<string, number>();
-const DIRECT_FETCH_FAILURE_THRESHOLD = 3;
-const DIRECT_FETCH_BLOCK_MS = 5 * 60 * 1000;
+const getDirectFetchFailureThreshold = () => getRuntimeInt('DIRECT_FETCH_FAILURE_THRESHOLD', config.directFetch.failureThreshold);
+const getDirectFetchBlockMs = () => getRuntimeInt('DIRECT_FETCH_BLOCK_MS', config.directFetch.blockMs);
 
 function canUseDirectFetch(accountId?: string): boolean {
   if (!getRuntimeBool('QWEN_DIRECT_FETCH', config.directFetch.enabled)) return false;
   if (!accountId || accountId === 'guest') return false;
   const base = getBaseAccountId(accountId) || accountId;
-  return (directFetchBlockedUntil.get(base) || 0) <= Date.now();
+  const blockedUntil = directFetchBlockedUntil.get(base) || 0;
+  if (blockedUntil > Date.now()) return false;
+  if (blockedUntil > 0) {
+    directFetchBlockedUntil.delete(base);
+    directFetchFailures.delete(base);
+  }
+  return true;
 }
 
 function recordDirectFetchSuccess(accountId?: string): void {
   if (!accountId) return;
-  directFetchFailures.delete(getBaseAccountId(accountId) || accountId);
+  const base = getBaseAccountId(accountId) || accountId;
+  directFetchFailures.delete(base);
+  directFetchBlockedUntil.delete(base);
 }
 
 function recordDirectFetchFailure(accountId?: string): void {
@@ -119,9 +129,11 @@ function recordDirectFetchFailure(accountId?: string): void {
   const base = getBaseAccountId(accountId) || accountId;
   const failures = (directFetchFailures.get(base) || 0) + 1;
   directFetchFailures.set(base, failures);
-  if (failures >= DIRECT_FETCH_FAILURE_THRESHOLD) {
-    directFetchBlockedUntil.set(base, Date.now() + DIRECT_FETCH_BLOCK_MS);
-    console.warn(`[Qwen] Direct fetch circuit opened for account ${base} for ${DIRECT_FETCH_BLOCK_MS / 1000}s after ${failures} consecutive failures`);
+  const threshold = getDirectFetchFailureThreshold();
+  const blockMs = getDirectFetchBlockMs();
+  if (failures >= threshold) {
+    directFetchBlockedUntil.set(base, Date.now() + blockMs);
+    console.warn(`[Qwen] Direct fetch circuit opened for account ${base} for ${blockMs / 1000}s after ${failures} consecutive failures`);
   }
 }
 
@@ -168,6 +180,10 @@ async function tryDirectCompletionFetch(
     return undefined;
   } catch (err: any) {
     controller.abort();
+    if (classifyFailure(err) === 'auth') {
+      invalidateAccessToken(accountId, 'direct-fetch-auth-failure');
+      throw err;
+    }
     if (err instanceof QwenUpstreamError || err instanceof RetryableQwenStreamError) throw err;
     recordDirectFetchFailure(accountId);
     return undefined;
@@ -722,6 +738,10 @@ export async function createQwenStream(
     // A persisted session can hold an access token that expired long ago
     // (the token lives 15 minutes, sessions live for hours). Renew it instead
     // of replaying a token that upstream will reject as Unauthorized.
+    const liveAuth = await ensureAuthorization(sessionAccountId);
+    if (liveAuth) {
+      chatHeaders['authorization'] = liveAuth;
+    }
     if (!chatHeaders['cookie'] || !chatHeaders['bx-ua'] || !chatHeaders['bx-umidtoken'] || hasExpiredBearerToken(chatHeaders)) {
       try {
         const { headers } = await getQwenHeaders(true, sessionAccountId);
