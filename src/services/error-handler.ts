@@ -31,6 +31,7 @@ export function handleErrorBody(peekText: string, status: number): never {
       const wait = errorJson.data?.num !== undefined ? ` Wait about ${errorJson.data.num} hour(s) before trying again.` : '';
       let errStatus = 502;
       if (code === 'RateLimited') errStatus = 429;
+      else if (code === 'Unauthorized' || code === 'Unauthenticated' || details.toLowerCase().includes('token has expired') || details.toLowerCase().includes('please log in again')) errStatus = 401;
       throw new QwenUpstreamError(`Qwen upstream error: ${code}: ${details}.${wait}`, code, errStatus);
     }
   } catch (e) {
@@ -53,6 +54,7 @@ export function handleJsonErrorBody(errText: string): never {
       let status: number;
       if (code === 'RateLimited') status = 429;
       else if (code === 'Not_Found') status = 404;
+      else if (code === 'Unauthorized' || code === 'Unauthenticated' || details.toLowerCase().includes('token has expired') || details.toLowerCase().includes('please log in again')) status = 401;
       else status = 502;
       throw new QwenUpstreamError(`Qwen upstream error: ${code}: ${details}.${wait}`, code, status);
     }

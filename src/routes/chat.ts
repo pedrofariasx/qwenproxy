@@ -2,6 +2,8 @@ import type { Context } from 'hono';
 import crypto from 'crypto';
 import { createQwenStream, RetryableQwenStreamError, QwenUpstreamError } from '../services/qwen.js';
 import { recordAccountBlock, requiresCrossAccountBootstrap, noteAccountRecovery } from '../core/account-isolation.js';
+import { failureAction } from '../services/failure-class.js';
+import { renewAuthorization } from '../services/auth-session.js';
 import type { OpenAIRequest } from '../utils/types.js';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.js';
@@ -588,6 +590,18 @@ export async function chatCompletions(c: Context) {
               return { stream: result.stream, uiSessionId: result.uiSessionId, accountId };
             } catch (err: any) {
               retries--;
+              const action = failureAction(err);
+
+              if (action.category === 'auth') {
+                console.warn(`[Chat] Auth failure on account ${accountEmail} (${accountId}): ${err.message}. Triggering token renewal.`);
+                await renewAuthorization(accountId).catch(() => null);
+                if (retries > 0) {
+                  await new Promise(r => setTimeout(r, 500));
+                  continue;
+                }
+                lastError = err;
+                break;
+              }
 
               if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
                 const hourHint = err.message?.match(/Wait about (\d+) hour/);
@@ -610,7 +624,7 @@ export async function chatCompletions(c: Context) {
               }
 
               if (retries === 0) {
-                if (err instanceof QwenUpstreamError && err.upstreamStatus && err.upstreamStatus >= 500) {
+                if (err instanceof QwenUpstreamError && err.upstreamStatus && err.upstreamStatus >= 500 && err.upstreamStatus !== 502) {
                   recordAccountBlock(accountId, 'server-error', err.message);
                   console.warn(`[Chat] Account ${accountEmail} (${accountId}) returned server error. Marked for cooldown.`);
                 }
@@ -622,7 +636,7 @@ export async function chatCompletions(c: Context) {
               if (err instanceof RetryableQwenStreamError && err.retryAfterMs !== undefined) {
                 useDelay = err.retryAfterMs;
               }
-              const isRetryable = err instanceof RetryableQwenStreamError || err.message?.includes('in progress') || err.message?.includes('Bad_Request');
+              const isRetryable = err instanceof RetryableQwenStreamError || err.message?.includes('in progress') || err.message?.includes('Bad_Request') || action.canRetry;
               if (!isRetryable) {
                 lastError = err;
                 break;
@@ -862,7 +876,8 @@ export async function chatCompletions(c: Context) {
   } catch (err: any) {
     releaseUserSlotOnce();
     console.error('Error in chatCompletions:', err)
-    const status = err.upstreamStatus || 500
+    const action = failureAction(err);
+    const status = action.category === 'auth' ? action.clientStatus : (err.upstreamStatus || action.clientStatus || 500)
     metrics.histogram('latency.completion', Date.now() - completionStart)
     trackUsage(user ? user.id : 'anonymous', usageInputText, true);
     trackModelUsage(usageModel);

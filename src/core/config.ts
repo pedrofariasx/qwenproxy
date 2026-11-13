@@ -77,6 +77,16 @@ const envSchema = z.object({
   USER_MAX_CONCURRENCY: envInt(8, 1),
   USER_API_KEYS: z.string().default(''),
   ADMIN_PASSWORD: z.string().default(''),
+  AUTH_SESSION_ENABLED: envBool(true),
+  TOKEN_REFRESH_SKEW_MS: envInt(120000, 0),
+  TOKEN_REFRESH_MAX_ATTEMPTS: envInt(3, 1),
+  FAILURE_TAXONOMY_ENABLED: envBool(true),
+  DIRECT_FETCH_BLOCK_MS: envInt(60000, 1000),
+  DIRECT_FETCH_FAILURE_THRESHOLD: envInt(5, 1),
+  WARM_POOL_REFILL_BACKOFF_MS: envInt(5000, 500),
+  CAPTCHA_SLIDER_TIMEOUT_MS: envInt(15000, 1000),
+  CAPTCHA_MAX_ATTEMPTS: envInt(3, 1),
+  LOGIN_FAILURE_BACKOFF_MS: envInt(30000, 1000),
 })
 
 const env = envSchema.parse(process.env)
@@ -85,6 +95,21 @@ export const config = {
   server: {
     port: env.PORT,
     host: env.HOST,
+  },
+  authSession: {
+    enabled: env.AUTH_SESSION_ENABLED,
+    skewMs: env.TOKEN_REFRESH_SKEW_MS,
+    maxAttempts: env.TOKEN_REFRESH_MAX_ATTEMPTS,
+  },
+  failureTaxonomy: {
+    enabled: env.FAILURE_TAXONOMY_ENABLED,
+  },
+  captcha: {
+    sliderTimeoutMs: env.CAPTCHA_SLIDER_TIMEOUT_MS,
+    maxAttempts: env.CAPTCHA_MAX_ATTEMPTS,
+  },
+  login: {
+    failureBackoffMs: env.LOGIN_FAILURE_BACKOFF_MS,
   },
   browser: {
     headless: env.HEADLESS,
@@ -150,6 +175,7 @@ export const config = {
     lowWater: env.WARM_POOL_LOW_WATER,
     ttlMs: env.WARM_POOL_TTL_MS,
     startup: env.WARM_POOL_STARTUP,
+    refillBackoffMs: env.WARM_POOL_REFILL_BACKOFF_MS,
   },
   sessionKeeper: {
     enabled: env.SESSION_KEEPER_ENABLED,
@@ -167,6 +193,8 @@ export const config = {
   },
   directFetch: {
     enabled: env.QWEN_DIRECT_FETCH,
+    blockMs: env.DIRECT_FETCH_BLOCK_MS,
+    failureThreshold: env.DIRECT_FETCH_FAILURE_THRESHOLD,
   },
   precapture: {
     headersStartup: env.PRECAPTURE_HEADERS_STARTUP,

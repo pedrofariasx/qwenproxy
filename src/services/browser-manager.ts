@@ -1,87 +1,118 @@
-import type { Browser, BrowserContext, BrowserContextOptions, Page } from 'playwright';
-import { chromium, firefox, webkit } from 'playwright';
-import path from 'path';
-import fs from 'fs';
-import type { QwenAccount } from '../core/accounts.js';
-import { config } from '../core/config.js';
-import { getBaseAccountId } from '../core/account-lanes.js';
-import { markAccountNotReady, markAccountReady } from '../core/account-manager.js';
-import { getRuntimeInt, getRuntimeBool } from '../core/runtime-config.js';
-import { getStealthScript } from './stealth.js';
-import { rememberQwenVersions, refreshQwenVersions } from './qwen-versions.js';
-import { solveAliyunWafCaptcha } from './captcha-solver.js';
-import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
-import { setFingerprintRotationListener } from '../core/account-isolation.js';
-import { sleep } from '../utils/sleep.js';
+import type {
+  Browser,
+  BrowserContext,
+  BrowserContextOptions,
+  Page,
+} from "patchright";
+import { chromium } from "patchright";
+import path from "path";
+import fs from "fs";
+import type { QwenAccount } from "../core/accounts.js";
+import { config } from "../core/config.js";
+import { getBaseAccountId } from "../core/account-lanes.js";
+import {
+  markAccountNotReady,
+  markAccountReady,
+} from "../core/account-manager.js";
+import { getRuntimeInt, getRuntimeBool } from "../core/runtime-config.js";
+import { getStealthScript } from "./stealth.js";
+import {
+  rememberQwenVersions,
+  refreshQwenVersions,
+  getQwenWebVersion,
+} from "./qwen-versions.js";
+import { solveAliyunWafCaptcha, solveBaxiaCaptcha } from "./captcha-solver.js";
+import {
+  registerHeaderStoreAccessor,
+  noteAccessToken,
+} from "./auth-session.js";
+import {
+  getFingerprintProfile,
+  type FingerprintProfile,
+} from "./fingerprint.js";
+import { setFingerprintRotationListener } from "../core/account-isolation.js";
+import { sleep } from "../utils/sleep.js";
 
 export { sleep };
-export type BrowserType = 'chromium' | 'firefox' | 'webkit' | 'chrome' | 'edge';
+export type BrowserType = "chromium" | "firefox" | "webkit" | "chrome" | "edge";
 
 interface BrowserEngineConfig {
-  engine: typeof chromium | typeof firefox | typeof webkit;
+  engine: typeof chromium;
   channel?: string;
 }
 
-export function resolveBrowserEngine(browserType: BrowserType): BrowserEngineConfig {
-  switch (browserType) {
-    case 'firefox': return { engine: firefox };
-    case 'webkit': return { engine: webkit };
-    case 'chrome': return { engine: chromium, channel: 'chrome' };
-    case 'edge': return { engine: chromium, channel: 'msedge' };
-    case 'chromium':
-    default: return { engine: chromium };
-  }
+export function resolveBrowserEngine(): BrowserEngineConfig {
+  return {
+    engine: chromium,
+  };
 }
 
 export interface AccountHeaderCache {
   currentHeaders: Record<string, string>;
-  cachedQwenHeaders: { headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null } | null;
+  cachedQwenHeaders: {
+    headers: Record<string, string>;
+    chatSessionId: string;
+    parentMessageId: string | null;
+  } | null;
   lastHeadersTime: number;
   refreshInProgress: boolean;
 }
 
-export const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
-export const CHROME_CLIENT_HINTS = '"Chromium";v="137", "Google Chrome";v="137", "Not/A)Brand";v="99"';
+export const CHROME_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+export const CHROME_CLIENT_HINTS =
+  '"Chromium";v="137", "Google Chrome";v="137", "Not/A)Brand";v="99"';
 export const BROWSER_VIEWPORT = { width: 1366, height: 768 };
-export const BROWSER_LOCALE = 'pt-BR';
-export const BROWSER_TIMEZONE = 'America/Sao_Paulo';
+export const BROWSER_LOCALE = "pt-BR";
+export const BROWSER_TIMEZONE = "America/Sao_Paulo";
 
-export function getBrowserIdentity(accountId?: string): { userAgent: string; secChUa: string; platform: string; profile?: FingerprintProfile } {
+export function getBrowserIdentity(accountId?: string): {
+  userAgent: string;
+  secChUa: string;
+  platform: string;
+  profile?: FingerprintProfile;
+} {
   const profile = accountId ? getFingerprintProfile(accountId) : undefined;
   return {
     userAgent: profile?.userAgent || CHROME_UA,
     secChUa: profile?.secChUa || CHROME_CLIENT_HINTS,
-    platform: profile?.platform || 'Windows',
+    platform: profile?.platform || "Windows",
     profile,
   };
 }
 
-export function getClientHintsHeaders(accountId?: string): Record<string, string> {
+export function getClientHintsHeaders(
+  accountId?: string,
+): Record<string, string> {
   const identity = getBrowserIdentity(accountId);
   return {
-    'sec-ch-ua': identity.secChUa,
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': `"${identity.platform}"`,
+    "sec-ch-ua": identity.secChUa,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": `"${identity.platform}"`,
   };
 }
 
 function getBrowserLaunchArgs(): string[] {
-  return Array.from(new Set([
-    ...config.browser.args,
-    '--disable-blink-features=AutomationControlled',
-    '--disable-features=IsolateOrigins,site-per-process',
-    '--disable-infobars',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--no-sandbox',
-    '--disable-dev-shm-usage',
-    '--enable-webgl',
-    '--ignore-gpu-blocklist',
-    '--enable-accelerated-2d-canvas',
-  ]));
+  return Array.from(
+    new Set([
+      ...config.browser.args,
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--disable-infobars",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--enable-webgl",
+      "--ignore-gpu-blocklist",
+      "--enable-accelerated-2d-canvas",
+    ]),
+  );
 }
 
-export function sharedContextOptions(accountId?: string): BrowserContextOptions {
+export function sharedContextOptions(
+  accountId?: string,
+): BrowserContextOptions {
   const identity = getBrowserIdentity(accountId);
 
   if (accountId && identity.profile) {
@@ -94,7 +125,7 @@ export function sharedContextOptions(accountId?: string): BrowserContextOptions 
       deviceScaleFactor: 1,
       isMobile: false,
       hasTouch: false,
-      colorScheme: 'light',
+      colorScheme: "light",
       ignoreHTTPSErrors: true,
       extraHTTPHeaders: {
         ...config.browser.headers,
@@ -110,7 +141,7 @@ export function sharedContextOptions(accountId?: string): BrowserContextOptions 
     deviceScaleFactor: 1,
     isMobile: false,
     hasTouch: false,
-    colorScheme: 'light',
+    colorScheme: "light",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       ...config.browser.headers,
@@ -127,10 +158,13 @@ export const GUEST_HEADERS_TTL = 30 * 60 * 1000;
 // Header TTL / background refresh are read at call time so they can be tuned
 // live from the admin dashboard without restarting the server.
 export function getHeadersTtlMs(): number {
-  return getRuntimeInt('HEADERS_TTL_MS', config.headers.ttlMs)
+  return getRuntimeInt("HEADERS_TTL_MS", config.headers.ttlMs);
 }
 export function getBackgroundHeaderRefresh(): boolean {
-  return getRuntimeBool('BACKGROUND_HEADER_REFRESH', config.headers.backgroundRefresh)
+  return getRuntimeBool(
+    "BACKGROUND_HEADER_REFRESH",
+    config.headers.backgroundRefresh,
+  );
 }
 
 export const PROFILES_DIR = path.resolve(config.browser.userDataDir);
@@ -139,27 +173,62 @@ export const accountContexts = new Map<string, BrowserContext>();
 export const accountPages = new Map<string, Page>();
 export const accountHeaderCaches = new Map<string, AccountHeaderCache>();
 export const cachedUserAgents = new Map<string, string>();
-export const cookieCaches = new Map<string, { cookie: string, timestamp: number }>();
+export const cookieCaches = new Map<
+  string,
+  { cookie: string; timestamp: number }
+>();
 
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 export let activePage: Page | null = null;
 let guestContext: BrowserContext | null = null;
 let guestPage: Page | null = null;
-let guestHeadersCache: { headers: Record<string, string>, timestamp: number } | null = null;
+let guestHeadersCache: {
+  headers: Record<string, string>;
+  timestamp: number;
+} | null = null;
 
-export function getBrowser(): Browser | null { return browser; }
-export function setBrowser(b: Browser | null) { browser = b; }
-export function getContext(): BrowserContext | null { return context; }
-export function setContext(c: BrowserContext | null) { context = c; }
-export function getActivePage(): Page | null { return activePage; }
-export function setActivePage(p: Page | null) { activePage = p; }
-export function getGuestContext(): BrowserContext | null { return guestContext; }
-export function setGuestContext(c: BrowserContext | null) { guestContext = c; }
-export function getGuestPage(): Page | null { return guestPage; }
-export function setGuestPage(p: Page | null) { guestPage = p; }
-export function getGuestHeadersCache(): { headers: Record<string, string>, timestamp: number } | null { return guestHeadersCache; }
-export function setGuestHeadersCache(c: { headers: Record<string, string>, timestamp: number } | null) { guestHeadersCache = c; }
+export function getBrowser(): Browser | null {
+  return browser;
+}
+export function setBrowser(b: Browser | null) {
+  browser = b;
+}
+export function getContext(): BrowserContext | null {
+  return context;
+}
+export function setContext(c: BrowserContext | null) {
+  context = c;
+}
+export function getActivePage(): Page | null {
+  return activePage;
+}
+export function setActivePage(p: Page | null) {
+  activePage = p;
+}
+export function getGuestContext(): BrowserContext | null {
+  return guestContext;
+}
+export function setGuestContext(c: BrowserContext | null) {
+  guestContext = c;
+}
+export function getGuestPage(): Page | null {
+  return guestPage;
+}
+export function setGuestPage(p: Page | null) {
+  guestPage = p;
+}
+export function getGuestHeadersCache(): {
+  headers: Record<string, string>;
+  timestamp: number;
+} | null {
+  return guestHeadersCache;
+}
+export function setGuestHeadersCache(
+  c: { headers: Record<string, string>; timestamp: number } | null,
+) {
+  guestHeadersCache = c;
+}
 
 export function getAccountHeaderCache(accountId: string): AccountHeaderCache {
   let cache = accountHeaderCaches.get(accountId);
@@ -174,6 +243,10 @@ export function getAccountHeaderCache(accountId: string): AccountHeaderCache {
   }
   return cache;
 }
+
+registerHeaderStoreAccessor((accountId: string) => {
+  return getAccountHeaderCache(accountId);
+});
 
 /** Returns the account/lane ids that currently have cached anti-bot headers. */
 export function listHeaderAccountIds(): string[] {
@@ -203,12 +276,12 @@ export function installAccessTokenCapture(page: Page): AccessTokenCapture {
 
   const handler = async (res: any) => {
     const url = res.url();
-    if (!url.includes('auth.qwen.ai/api/v2/auths/refresh')) return;
+    if (!url.includes("auth.qwen.ai/api/v2/auths/refresh")) return;
     try {
       const text = await res.text();
       const json = JSON.parse(text);
       const token = json?.data?.access_token;
-      if (typeof token === 'string' && token.length > 20) {
+      if (typeof token === "string" && token.length > 20) {
         accessToken = token;
         while (waiters.length > 0) {
           const resolve = waiters.shift();
@@ -220,11 +293,11 @@ export function installAccessTokenCapture(page: Page): AccessTokenCapture {
     }
   };
 
-  page.on('response', handler);
+  page.on("response", handler);
 
   const requestHandler = (req: any) => {
     const url = req.url();
-    if (!url.includes('/api/v2/')) return;
+    if (!url.includes("/api/v2/")) return;
     let headers: Record<string, string>;
     try {
       headers = req.headers();
@@ -232,31 +305,32 @@ export function installAccessTokenCapture(page: Page): AccessTokenCapture {
       return;
     }
     rememberQwenVersions({
-      webVersion: headers['version'] || null,
-      bxVersion: headers['bx-v'] || null,
+      webVersion: headers["version"] || null,
+      bxVersion: headers["bx-v"] || null,
     });
   };
 
-  page.on('request', requestHandler);
+  page.on("request", requestHandler);
 
   return {
     getToken: () => accessToken,
-    waitForToken: (timeoutMs = 15000) => new Promise<string | null>((resolve) => {
-      if (accessToken) {
-        resolve(accessToken);
-        return;
-      }
-      const timer = setTimeout(() => {
-        const index = waiters.indexOf(onToken);
-        if (index >= 0) waiters.splice(index, 1);
-        resolve(null);
-      }, timeoutMs);
-      const onToken = (token: string | null) => {
-        clearTimeout(timer);
-        resolve(token);
-      };
-      waiters.push(onToken);
-    }),
+    waitForToken: (timeoutMs = 15000) =>
+      new Promise<string | null>((resolve) => {
+        if (accessToken) {
+          resolve(accessToken);
+          return;
+        }
+        const timer = setTimeout(() => {
+          const index = waiters.indexOf(onToken);
+          if (index >= 0) waiters.splice(index, 1);
+          resolve(null);
+        }, timeoutMs);
+        const onToken = (token: string | null) => {
+          clearTimeout(timer);
+          resolve(token);
+        };
+        waiters.push(onToken);
+      }),
   };
 }
 
@@ -267,24 +341,29 @@ export function installAccessTokenCapture(page: Page): AccessTokenCapture {
  * Uses the browser context's APIRequestContext, which shares the cookie jar
  * but is not subject to CORS preflight rules the way page-context fetch is.
  */
-export async function refreshQwenAccessToken(page: Page, timeoutMs = 15000): Promise<string | null> {
+export async function refreshQwenAccessToken(
+  page: Page,
+  timeoutMs = 15000,
+): Promise<string | null> {
   try {
-    const response = await page.context().request.get('https://auth.qwen.ai/api/v2/auths/refresh', {
-      headers: {
-        'accept': 'application/json',
-        'source': 'web',
-        'version': '0.3.20',
-        'x-request-origin': 'https://chat.qwen.ai',
-        'referer': 'https://chat.qwen.ai/',
-      },
-      timeout: timeoutMs,
-    });
+    const response = await page
+      .context()
+      .request.get("https://auth.qwen.ai/api/v2/auths/refresh", {
+        headers: {
+          accept: "application/json",
+          source: "web",
+          version: getQwenWebVersion(),
+          "x-request-origin": "https://chat.qwen.ai",
+          referer: "https://chat.qwen.ai/",
+        },
+        timeout: timeoutMs,
+      });
 
     const text = await response.text();
     try {
       const json = JSON.parse(text);
       const token = json?.data?.access_token;
-      return typeof token === 'string' && token.length > 20 ? token : null;
+      return typeof token === "string" && token.length > 20 ? token : null;
     } catch {
       return null;
     }
@@ -303,12 +382,18 @@ export async function refreshQwenAccessToken(page: Page, timeoutMs = 15000): Pro
  * with its own headers, and the resulting token is captured from the
  * response.
  */
-export async function renewAccessTokenViaPage(page: Page, timeoutMs = 20000): Promise<string | null> {
+export async function renewAccessTokenViaPage(
+  page: Page,
+  timeoutMs = 20000,
+): Promise<string | null> {
   const capture = installAccessTokenCapture(page);
   const pending = capture.waitForToken(timeoutMs);
 
   try {
-    await page.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await page.goto("https://chat.qwen.ai/", {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
   } catch {
     /* navigation errors are handled by the wait below */
   }
@@ -325,15 +410,19 @@ export function loadStorageState(accountId: string): string | undefined {
   if (!fs.existsSync(p)) return undefined;
 
   try {
-    const raw = fs.readFileSync(p, 'utf8');
+    const raw = fs.readFileSync(p, "utf8");
     const state = JSON.parse(raw);
-    if (!state || typeof state !== 'object') {
-      console.warn(`[Playwright] Invalid storageState structure for ${accountId}, discarding.`);
+    if (!state || typeof state !== "object") {
+      console.warn(
+        `[Playwright] Invalid storageState structure for ${accountId}, discarding.`,
+      );
       fs.rmSync(p, { force: true });
       return undefined;
     }
     if (!Array.isArray(state.cookies)) {
-      console.warn(`[Playwright] StorageState for ${accountId} missing cookies array, discarding.`);
+      console.warn(
+        `[Playwright] StorageState for ${accountId} missing cookies array, discarding.`,
+      );
       fs.rmSync(p, { force: true });
       return undefined;
     }
@@ -349,31 +438,47 @@ export function loadStorageState(accountId: string): string | undefined {
     });
 
     if (validCookies.length === 0) {
-      console.warn(`[Playwright] StorageState for ${accountId} has no valid cookies, discarding.`);
+      console.warn(
+        `[Playwright] StorageState for ${accountId} has no valid cookies, discarding.`,
+      );
       fs.rmSync(p, { force: true });
       return undefined;
     }
 
     if (validCookies.length !== state.cookies.length) {
-      console.log(`[Playwright] Pruned ${state.cookies.length - validCookies.length} expired cookies for ${accountId}.`);
+      console.log(
+        `[Playwright] Pruned ${state.cookies.length - validCookies.length} expired cookies for ${accountId}.`,
+      );
       state.cookies = validCookies;
       fs.writeFileSync(p, JSON.stringify(state, null, 2));
     }
 
     return p;
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to read storageState for ${accountId}: ${err.message}. Discarding.`);
-    try { fs.rmSync(p, { force: true }); } catch { /* ignore */ }
+    console.warn(
+      `[Playwright] Failed to read storageState for ${accountId}: ${err.message}. Discarding.`,
+    );
+    try {
+      fs.rmSync(p, { force: true });
+    } catch {
+      /* ignore */
+    }
     return undefined;
   }
 }
 
-export async function saveStorageState(ctx: BrowserContext, accountId: string): Promise<void> {
+export async function saveStorageState(
+  ctx: BrowserContext,
+  accountId: string,
+): Promise<void> {
   try {
-    if (!fs.existsSync(PROFILES_DIR)) fs.mkdirSync(PROFILES_DIR, { recursive: true });
+    if (!fs.existsSync(PROFILES_DIR))
+      fs.mkdirSync(PROFILES_DIR, { recursive: true });
     await ctx.storageState({ path: storageStatePath(accountId) });
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to save storageState for ${accountId}: ${err.message}`);
+    console.warn(
+      `[Playwright] Failed to save storageState for ${accountId}: ${err.message}`,
+    );
   }
 }
 
@@ -383,39 +488,56 @@ export async function clearPageRuntimeState(page: Page | null): Promise<void> {
   try {
     await page.context().clearCookies();
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to clear cookies during profile reset: ${err.message}`);
+    console.warn(
+      `[Playwright] Failed to clear cookies during profile reset: ${err.message}`,
+    );
   }
 
   try {
     await page.context().clearPermissions();
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to clear permissions during profile reset: ${err.message}`);
+    console.warn(
+      `[Playwright] Failed to clear permissions during profile reset: ${err.message}`,
+    );
   }
 
   try {
     await page.evaluate(() => {
-      try { window.localStorage.clear(); } catch { /* ignore */ }
-      try { window.sessionStorage.clear(); } catch { /* ignore */ }
+      try {
+        window.localStorage.clear();
+      } catch {
+        /* ignore */
+      }
+      try {
+        window.sessionStorage.clear();
+      } catch {
+        /* ignore */
+      }
     });
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to clear page storage during profile reset: ${err.message}`);
+    console.warn(
+      `[Playwright] Failed to clear page storage during profile reset: ${err.message}`,
+    );
   }
 }
 
-export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'): Promise<Browser> {
+export async function getOrLaunchBrowser(
+  browserType: BrowserType = "chromium",
+): Promise<Browser> {
   if (browser?.isConnected()) return browser;
-  const { engine, channel } = resolveBrowserEngine(browserType);
-  console.log(`[Playwright] Launching shared ${browserType} browser...`);
+
+  console.log(
+    `[Playwright] Launching shared ${browserType} browser via Patchright...`,
+  );
 
   const launchArgs = getBrowserLaunchArgs();
 
-  browser = await engine.launch({
+  browser = await chromium.launch({
     headless: config.browser.headless,
-    channel,
-    ignoreDefaultArgs: ['--enable-automation', '--enable-blink-features'],
+    ignoreDefaultArgs: ["--enable-automation", "--enable-blink-features"],
     args: launchArgs,
   });
-  browser.on('disconnected', () => {
+  browser.on("disconnected", () => {
     browser = null;
     accountContexts.clear();
     accountPages.clear();
@@ -426,7 +548,7 @@ export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'):
     activePage = null;
     guestContext = null;
     guestPage = null;
-    for (const id of [...accountPages.keys(), '_default', 'guest']) {
+    for (const id of [...accountPages.keys(), "_default", "guest"]) {
       markAccountNotReady(id);
     }
   });
@@ -442,7 +564,7 @@ export class Mutex {
       this.locked = true;
       return () => this.release();
     }
-    return new Promise<() => void>(resolve => {
+    return new Promise<() => void>((resolve) => {
       this.queue.push(() => {
         resolve(() => this.release());
       });
@@ -469,12 +591,14 @@ export function getUiMutex(accountId: string): Mutex {
   return m;
 }
 
-export async function checkSessionAuthenticated(page: Page | null): Promise<boolean> {
+export async function checkSessionAuthenticated(
+  page: Page | null,
+): Promise<boolean> {
   if (!page || page.isClosed()) return false;
   try {
     return await page.evaluate(async () => {
       try {
-        const res = await fetch('/api/v2/users/status');
+        const res = await fetch("/api/v2/users/status");
         const data = await res.json();
         return data?.data === true;
       } catch {
@@ -490,9 +614,15 @@ export async function hasValidAuthCookie(page: Page | null): Promise<boolean> {
   if (!page || page.isClosed()) return false;
   try {
     const cookies = await page.context().cookies();
-    const hasCookie = cookies.some(c => c.name.toLowerCase().includes('token') || c.name.toLowerCase().includes('session'));
+    const hasCookie = cookies.some(
+      (c) =>
+        c.name.toLowerCase().includes("token") ||
+        c.name.toLowerCase().includes("session"),
+    );
     if (hasCookie) return true;
-    const hasStorage = await page.evaluate(() => !!localStorage.getItem('token')).catch(() => false);
+    const hasStorage = await page
+      .evaluate(() => !!localStorage.getItem("token"))
+      .catch(() => false);
     return hasStorage;
   } catch {
     return false;
@@ -505,11 +635,17 @@ export async function hasValidAuthCookie(page: Page | null): Promise<boolean> {
  * report an authenticated session using legacy cookies that can no longer
  * obtain an access token, so it is not a reliable signal on its own.
  */
-export async function hasRefreshTokenCookie(page: Page | null): Promise<boolean> {
+export async function hasRefreshTokenCookie(
+  page: Page | null,
+): Promise<boolean> {
   if (!page || page.isClosed()) return false;
   try {
     const cookies = await page.context().cookies();
-    return cookies.some(c => c.name === 'refresh_token' && (c.expires === -1 || c.expires > Date.now() / 1000));
+    return cookies.some(
+      (c) =>
+        c.name === "refresh_token" &&
+        (c.expires === -1 || c.expires > Date.now() / 1000),
+    );
   } catch {
     return false;
   }
@@ -520,49 +656,113 @@ async function checkValidSession(): Promise<boolean> {
   try {
     const hasAuth = await hasValidAuthCookie(activePage);
     if (!hasAuth) return false;
-    await activePage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    await activePage.goto("https://chat.qwen.ai/c/new-chat", {
+      waitUntil: "domcontentloaded",
+      timeout: config.timeouts.navigation,
+    });
     return await checkSessionAuthenticated(activePage);
   } catch {
     return false;
   }
 }
 
-export async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
+export async function loginToQwenWithContext(
+  acctContext: BrowserContext,
+  acctPage: Page,
+  email: string,
+  password: string,
+): Promise<boolean> {
   console.log(`[Playwright] Starting UI login for ${email}...`);
   try {
-    await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    await acctPage.goto("https://chat.qwen.ai/auth", {
+      waitUntil: "domcontentloaded",
+      timeout: config.timeouts.navigation,
+    });
   } catch (err: any) {
-    console.warn(`[Playwright] Navigation to auth page warning: ${err.message}`);
+    console.warn(
+      `[Playwright] Navigation to auth page warning: ${err.message}`,
+    );
   }
   await sleep(1000);
 
   // Only skip the interactive login when we still hold a refresh_token cookie,
   // which is what allows minting a fresh access token. A session that only has
   // legacy cookies passes /api/v2/users/status but cannot call the API.
-  if (await hasRefreshTokenCookie(acctPage) && await checkSessionAuthenticated(acctPage)) {
+  if (
+    (await hasRefreshTokenCookie(acctPage)) &&
+    (await checkSessionAuthenticated(acctPage))
+  ) {
     console.log(`[Playwright] Already authenticated for ${email}.`);
     return true;
   }
 
   // Switch to password login mode if on verification code mode
   try {
-    const passwordBtn = acctPage.locator('button:has-text("senha"), button:has-text("password"), button:has-text("Password"), a:has-text("senha"), a:has-text("password")');
-    if (await passwordBtn.count() > 0 && await passwordBtn.first().isVisible().catch(() => false)) {
+    const passwordBtn = acctPage.locator(
+      'button:has-text("senha"), button:has-text("password"), button:has-text("Password"), a:has-text("senha"), a:has-text("password")',
+    );
+    if (
+      (await passwordBtn.count()) > 0 &&
+      (await passwordBtn
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
       console.log(`[Playwright] Switching to password mode for ${email}...`);
-      await passwordBtn.first().click().catch(() => {});
+      await passwordBtn
+        .first()
+        .click()
+        .catch(() => {});
       await sleep(1000);
     }
   } catch (err: any) {
-    console.warn(`[Playwright] Error switching to password login: ${err.message}`);
+    console.warn(
+      `[Playwright] Error switching to password login: ${err.message}`,
+    );
   }
 
   // Fill email and password in the UI inputs
-  const emailSel = 'input[name="email"], input[type="text"], input[type="email"]';
-  await acctPage.waitForSelector(emailSel, { timeout: config.timeouts.page });
+  const emailSel =
+    'input[name="email"], input[type="text"], input[type="email"], input#email, input[placeholder*="email" i], input[placeholder*="e-mail" i], input[placeholder*="账号" i]';
+  const hasCaptchaBefore =
+    (await acctPage
+      .locator(
+        "#aliyunCaptcha-sliding-slider, #waf_nc_block, iframe#baxia-dialog-content",
+      )
+      .count()) > 0;
+  if (hasCaptchaBefore) {
+    console.log(
+      `[Playwright] Pre-login captcha detected for ${email}, attempting solve...`,
+    );
+    await solveAliyunWafCaptcha(acctPage).catch(() => {});
+    await solveBaxiaCaptcha(acctPage).catch(() => {});
+  }
+
+  try {
+    await acctPage.waitForSelector(emailSel, { timeout: config.timeouts.page });
+  } catch (err: any) {
+    const pageBlocked = await acctPage
+      .evaluate(() => {
+        const text = document.body?.innerText || "";
+        return (
+          text.includes("405") ||
+          text.includes("blocked") ||
+          text.includes("security threat")
+        );
+      })
+      .catch(() => false);
+    if (pageBlocked) {
+      throw new Error(`Auth page blocked by anti-bot WAF: ${err.message}`, {
+        cause: err,
+      });
+    }
+    throw err;
+  }
   await acctPage.fill(emailSel, email);
   await sleep(300);
 
-  const passSel = 'input[name="password"], input[type="password"]';
+  const passSel =
+    'input[name="password"], input[type="password"], input#password, input[placeholder*="password" i], input[placeholder*="senha" i], input[placeholder*="密码" i]';
   await acctPage.waitForSelector(passSel, { timeout: config.timeouts.page });
   await acctPage.fill(passSel, password);
   await sleep(300);
@@ -572,16 +772,24 @@ export async function loginToQwenWithContext(acctContext: BrowserContext, acctPa
   // Only target the real submit button. Text-based selectors such as
   // "Fazer login" also match the login-mode tabs, which would silently
   // prevent the form from being submitted.
-  const submitBtn = acctPage.locator('button.qwenchat-auth-pc-submit-button, button[type="submit"]');
-  if (await submitBtn.count() > 0) {
-    await submitBtn.first().click().catch(() => {});
+  const submitBtn = acctPage.locator(
+    'button.qwenchat-auth-pc-submit-button, button[type="submit"]',
+  );
+  if ((await submitBtn.count()) > 0) {
+    await submitBtn
+      .first()
+      .click()
+      .catch(() => {});
   } else {
-    await acctPage.keyboard.press('Enter');
+    await acctPage.keyboard.press("Enter");
   }
 
   // Wait for navigation away from auth page (signin processing)
   try {
-    await acctPage.waitForURL(url => !url.href.includes('/auth') && !url.href.includes('/login'), { timeout: 15000 });
+    await acctPage.waitForURL(
+      (url) => !url.href.includes("/auth") && !url.href.includes("/login"),
+      { timeout: 15000 },
+    );
   } catch {
     /* navigation may not change URL if signin returns JSON */
   }
@@ -590,9 +798,14 @@ export async function loginToQwenWithContext(acctContext: BrowserContext, acctPa
   for (let i = 0; i < 25; i++) {
     await sleep(1000);
 
-    const hasCaptcha = await acctPage.locator('#aliyunCaptcha-sliding-slider, #waf_nc_block').count() > 0;
+    const hasCaptcha =
+      (await acctPage
+        .locator("#aliyunCaptcha-sliding-slider, #waf_nc_block")
+        .count()) > 0;
     if (hasCaptcha) {
-      console.log(`[Playwright] Aliyun captcha detected during login for ${email}, attempting solve...`);
+      console.log(
+        `[Playwright] Aliyun captcha detected during login for ${email}, attempting solve...`,
+      );
       await solveAliyunWafCaptcha(acctPage);
     }
 
@@ -604,7 +817,7 @@ export async function loginToQwenWithContext(acctContext: BrowserContext, acctPa
     }
     if (await checkSessionAuthenticated(acctPage)) {
       const url = acctPage.url();
-      if (!url.includes('/auth') && !url.includes('/login')) {
+      if (!url.includes("/auth") && !url.includes("/login")) {
         console.log(`[Playwright] Login confirmed for ${email}.`);
         return true;
       }
@@ -615,51 +828,74 @@ export async function loginToQwenWithContext(acctContext: BrowserContext, acctPa
   return false;
 }
 
-export async function loginToQwen(email: string, password: string): Promise<boolean> {
-  if (!activePage) throw new Error('Playwright not initialized');
+export async function loginToQwen(
+  email: string,
+  password: string,
+): Promise<boolean> {
+  if (!activePage) throw new Error("Playwright not initialized");
   console.log(`[Playwright] Attempting API login for ${email}...`);
-  return loginToQwenWithContext(activePage.context(), activePage, email, password);
+  return loginToQwenWithContext(
+    activePage.context(),
+    activePage,
+    email,
+    password,
+  );
 }
 
-async function loginToQwenUI(email: string, password: string): Promise<boolean> {
-  if (!activePage) throw new Error('Playwright not initialized');
+async function loginToQwenUI(
+  email: string,
+  password: string,
+): Promise<boolean> {
+  if (!activePage) throw new Error("Playwright not initialized");
 
-  console.log('[Playwright] Attempting UI login...');
-  await activePage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
+  console.log("[Playwright] Attempting UI login...");
+  await activePage.goto("https://chat.qwen.ai/auth", {
+    waitUntil: "domcontentloaded",
+  });
   await sleep(2000);
 
-  if (!activePage.url().includes('/auth')) {
-    console.log('[Playwright] Already logged in');
+  if (!activePage.url().includes("/auth")) {
+    console.log("[Playwright] Already logged in");
     return true;
   }
 
   try {
-    await activePage.waitForSelector('input[type="email"], input[placeholder*="Email"]', { timeout: config.timeouts.page });
+    await activePage.waitForSelector(
+      'input[type="email"], input[placeholder*="Email"]',
+      { timeout: config.timeouts.page },
+    );
   } catch {
-    if (activePage.url().includes('/auth')) throw new Error('Email input not found');
-    console.log('[Playwright] Already logged in');
+    if (activePage.url().includes("/auth"))
+      throw new Error("Email input not found");
+    console.log("[Playwright] Already logged in");
     return true;
   }
 
-  console.log('[Playwright] UI: Filling email...');
-  await activePage.fill('input[type="email"], input[placeholder*="Email"]', email);
-  await activePage.keyboard.press('Enter');
+  console.log("[Playwright] UI: Filling email...");
+  await activePage.fill(
+    'input[type="email"], input[placeholder*="Email"]',
+    email,
+  );
+  await activePage.keyboard.press("Enter");
   await sleep(1000);
 
-  await activePage.waitForSelector('input[type="password"]', { timeout: config.timeouts.page });
-  console.log('[Playwright] UI: Filling password...');
+  await activePage.waitForSelector('input[type="password"]', {
+    timeout: config.timeouts.page,
+  });
+  console.log("[Playwright] UI: Filling password...");
   await activePage.fill('input[type="password"]', password);
-  await activePage.keyboard.press('Enter');
+  await activePage.keyboard.press("Enter");
 
   await sleep(2000);
 
-  const isLogged = !activePage.url().includes('auth') && !activePage.url().includes('login');
+  const isLogged =
+    !activePage.url().includes("auth") && !activePage.url().includes("login");
   if (isLogged) {
-    console.log('[Playwright] UI login OK');
+    console.log("[Playwright] UI login OK");
     return true;
   }
 
-  console.log('[Playwright] UI login failed');
+  console.log("[Playwright] UI login failed");
   return false;
 }
 
@@ -667,31 +903,38 @@ async function attemptAutoLogin(): Promise<void> {
   const email = process.env.QWEN_EMAIL;
   const password = process.env.QWEN_PASSWORD;
   if (!email || !password) return;
-  console.log('[Playwright] Attempting auto-login with credentials from .env...');
+  console.log(
+    "[Playwright] Attempting auto-login with credentials from .env...",
+  );
   try {
     const success = await loginToQwen(email, password);
     if (success) {
-      console.log('[Playwright] Auto-login successful.');
+      console.log("[Playwright] Auto-login successful.");
       return;
     }
-    console.warn('[Playwright] API login failed, trying UI fallback...');
+    console.warn("[Playwright] API login failed, trying UI fallback...");
     const uiSuccess = await loginToQwenUI(email, password);
     if (uiSuccess) {
-      console.log('[Playwright] UI login fallback successful.');
+      console.log("[Playwright] UI login fallback successful.");
     } else {
-      console.warn('[Playwright] Both API and UI login failed. Manual login may be required.');
+      console.warn(
+        "[Playwright] Both API and UI login failed. Manual login may be required.",
+      );
     }
   } catch (err: any) {
-    console.error('[Playwright] Auto-login error:', err.message);
+    console.error("[Playwright] Auto-login error:", err.message);
   }
 }
 
-export async function resetBrowserProfile(cacheKey: string, accountId?: string): Promise<void> {
-  const profileId = accountId === 'guest' ? '_guest' : (accountId || '_default');
+export async function resetBrowserProfile(
+  cacheKey: string,
+  accountId?: string,
+): Promise<void> {
+  const profileId = accountId === "guest" ? "_guest" : accountId || "_default";
   const profilePath = path.join(PROFILES_DIR, profileId);
 
   try {
-    if (accountId === 'guest') {
+    if (accountId === "guest") {
       await clearPageRuntimeState(guestPage);
       if (guestContext) {
         await guestContext.close();
@@ -724,7 +967,7 @@ export async function resetBrowserProfile(cacheKey: string, accountId?: string):
     accountHeaderCaches.delete(cacheKey);
     cookieCaches.delete(cacheKey);
     cachedUserAgents.delete(cacheKey);
-    if (accountId === 'guest') {
+    if (accountId === "guest") {
       guestHeadersCache = null;
     }
     markAccountNotReady(accountId || cacheKey);
@@ -732,13 +975,20 @@ export async function resetBrowserProfile(cacheKey: string, accountId?: string):
     fs.rmSync(profilePath, { recursive: true, force: true });
     fs.rmSync(storageStatePath(profileId), { force: true });
 
-    console.warn(`[Playwright] Cleared browser profile for ${cacheKey}: ${profilePath}`);
+    console.warn(
+      `[Playwright] Cleared browser profile for ${cacheKey}: ${profilePath}`,
+    );
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to clear browser profile for ${cacheKey}: ${err.message}`);
+    console.warn(
+      `[Playwright] Failed to clear browser profile for ${cacheKey}: ${err.message}`,
+    );
   }
 }
 
-export async function initPlaywright(_headless = true, browserType: BrowserType = 'chromium') {
+export async function initPlaywright(
+  _headless = true,
+  browserType: BrowserType = "chromium",
+) {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
   if (context) {
     return;
@@ -747,10 +997,10 @@ export async function initPlaywright(_headless = true, browserType: BrowserType 
   const sharedBrowser = await getOrLaunchBrowser(browserType);
   console.log(`[Playwright] Creating default context on shared browser...`);
 
-  const storageState = loadStorageState('_default');
-  const defaultProfile = getFingerprintProfile('_default');
+  const storageState = loadStorageState("_default");
+  const defaultProfile = getFingerprintProfile("_default");
   context = await sharedBrowser.newContext({
-    ...sharedContextOptions('_default'),
+    ...sharedContextOptions("_default"),
     ...(storageState ? { storageState } : {}),
   });
 
@@ -758,11 +1008,15 @@ export async function initPlaywright(_headless = true, browserType: BrowserType 
 
   activePage = await context.newPage();
 
-  const hasCredentials = !!(process.env.QWEN_EMAIL && process.env.QWEN_PASSWORD);
+  const hasCredentials = !!(
+    process.env.QWEN_EMAIL && process.env.QWEN_PASSWORD
+  );
   const hasValidSession = await checkValidSession();
 
   if (!hasValidSession && !hasCredentials) {
-    console.warn('[Playwright] No valid session AND no credentials in .env. Manual login will be required.');
+    console.warn(
+      "[Playwright] No valid session AND no credentials in .env. Manual login will be required.",
+    );
   }
 
   if (!hasValidSession) {
@@ -770,7 +1024,7 @@ export async function initPlaywright(_headless = true, browserType: BrowserType 
   }
 
   if (await hasValidAuthCookie(activePage)) {
-    await saveStorageState(context, '_default');
+    await saveStorageState(context, "_default");
   }
 }
 
@@ -785,7 +1039,7 @@ export async function closePlaywright() {
     activePage = null;
     try {
       if (await hasValidAuthCookie(activePage)) {
-        await saveStorageState(ctx, '_default');
+        await saveStorageState(ctx, "_default");
       }
     } catch {
       /* the browser may already be gone */
@@ -800,7 +1054,7 @@ export async function closePlaywright() {
     guestPage = null;
     try {
       if (await hasValidAuthCookie(guestPage)) {
-        await saveStorageState(gctx, '_guest');
+        await saveStorageState(gctx, "_guest");
       }
     } catch {
       /* the browser may already be gone */
@@ -818,23 +1072,39 @@ export async function closePlaywright() {
 
 export async function dismissAgeModal(page: Page): Promise<void> {
   try {
-    const modal = page.locator('.age-confirmation-modal');
-    if (await modal.count() > 0 && await modal.first().isVisible({ timeout: 1500 }).catch(() => false)) {
-      const continueBtn = page.locator('.age-confirmation-modal .qwen-chat-v2-btn-black:has-text("Continuar")');
-      if (await continueBtn.count() > 0) {
+    const modal = page.locator(".age-confirmation-modal");
+    if (
+      (await modal.count()) > 0 &&
+      (await modal
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false))
+    ) {
+      const continueBtn = page.locator(
+        '.age-confirmation-modal .qwen-chat-v2-btn-black:has-text("Continuar")',
+      );
+      if ((await continueBtn.count()) > 0) {
         await continueBtn.first().click();
         await page.waitForTimeout(500);
-        console.log('[Playwright] Age confirmation modal dismissed.');
+        console.log("[Playwright] Age confirmation modal dismissed.");
       }
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
-export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = 'chromium') {
+export async function initPlaywrightForAccount(
+  account: QwenAccount,
+  _headless = true,
+  browserType: BrowserType = "chromium",
+) {
   const sharedBrowser = await getOrLaunchBrowser(browserType);
   const baseAccountId = getBaseAccountId(account.id);
 
-  console.log(`[Playwright] Creating context for account ${account.email} on shared browser...`);
+  console.log(
+    `[Playwright] Creating context for account ${account.email} on shared browser...`,
+  );
 
   const storageState = loadStorageState(baseAccountId);
   const acctProfile = getFingerprintProfile(account.id);
@@ -850,34 +1120,34 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   accountPages.set(account.id, acctPage);
   touchAccountActivity(account.id);
 
-  // Capture the Qwen access token from the auth refresh response. Qwen's
-  // frontend calls auth.qwen.ai/api/v2/auths/refresh right after signin and
-  // the response body carries the JWT used as `authorization: Bearer <token>`.
+  // Capture the Qwen access token from the auth refresh response.
   const tokenCapture = installAccessTokenCapture(acctPage);
 
   const storeAccessToken = (token: string | null): boolean => {
     if (!token) return false;
     const cache = getAccountHeaderCache(account.id);
-    cache.currentHeaders['authorization'] = `Bearer ${token}`;
+    cache.currentHeaders["authorization"] = `Bearer ${token}`;
     cache.lastHeadersTime = Date.now();
+    noteAccessToken(account.id, token, "login-capture");
     markAccountReady(account.id);
     return true;
   };
 
-  await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+  await acctPage.goto("https://chat.qwen.ai/auth", {
+    waitUntil: "domcontentloaded",
+    timeout: config.timeouts.navigation,
+  });
 
-  // Detect the live Qwen web version and Aliyun Baxia version so the
-  // `version` and `bx-v` headers always match what the deployment expects.
   await refreshQwenVersions(acctPage).catch(() => undefined);
 
-  // Always attempt UI login when credentials are available. The Bearer token
-  // (authorization header) is only issued by the signin flow, so a cached
-  // session without a valid refresh_token cookie cannot produce API calls.
   if (account.email && account.password) {
-    const ok = await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
+    const ok = await loginToQwenWithContext(
+      acctContext,
+      acctPage,
+      account.email,
+      account.password,
+    );
     if (ok) {
-      // The signin flow triggers auth.qwen.ai/api/v2/auths/refresh, whose
-      // response body contains the access token.
       for (let i = 0; i < 20; i++) {
         if (tokenCapture.getToken()) break;
         await sleep(500);
@@ -887,52 +1157,79 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
         token = await refreshQwenAccessToken(acctPage);
       }
       if (storeAccessToken(token)) {
-        console.log(`[Playwright] Captured Qwen access token for ${account.email}.`);
+        console.log(
+          `[Playwright] Captured Qwen access token for ${account.email}.`,
+        );
       } else {
-        console.warn(`[Playwright] Could not capture Qwen access token for ${account.email} after login.`);
+        console.warn(
+          `[Playwright] Could not capture Qwen access token for ${account.email} after login.`,
+        );
       }
       await saveStorageState(acctContext, baseAccountId);
     }
   }
 
   try {
-    await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+    await acctPage.goto("https://chat.qwen.ai/c/new-chat", {
+      waitUntil: "domcontentloaded",
+      timeout: config.timeouts.navigation,
+    });
     await dismissAgeModal(acctPage);
     await sleep(1500);
     const isAuth = await checkSessionAuthenticated(acctPage);
     if (!isAuth) {
       if (account.email && account.password) {
-        console.log(`[Playwright] Session expired or unauthenticated for ${account.email}, logging in...`);
-        const ok = await loginToQwenWithContext(acctContext, acctPage, account.email, account.password);
+        console.log(
+          `[Playwright] Session expired or unauthenticated for ${account.email}, logging in...`,
+        );
+        const ok = await loginToQwenWithContext(
+          acctContext,
+          acctPage,
+          account.email,
+          account.password,
+        );
         if (ok) {
-          await acctPage.goto('https://chat.qwen.ai/c/new-chat', { waitUntil: 'domcontentloaded', timeout: config.timeouts.navigation });
+          await acctPage.goto("https://chat.qwen.ai/c/new-chat", {
+            waitUntil: "domcontentloaded",
+            timeout: config.timeouts.navigation,
+          });
           await dismissAgeModal(acctPage);
           await saveStorageState(acctContext, baseAccountId);
         }
       } else {
-        console.warn(`[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`);
+        console.warn(
+          `[Playwright] Session expired for account ${account.id} but no credentials available for re-login.`,
+        );
       }
     } else {
       console.log(`[Playwright] Session validated for ${account.email}.`);
       await saveStorageState(acctContext, baseAccountId);
     }
   } catch (err: any) {
-    console.warn(`[Playwright] Failed to validate session for ${account.email}: ${err.message}`);
+    console.warn(
+      `[Playwright] Failed to validate session for ${account.email}: ${err.message}`,
+    );
   }
 
-  // If we still have no access token (e.g. session was already valid and the
-  // refresh happened before the listener was installed), force a refresh.
-  if (!getAccountHeaderCache(account.id).currentHeaders['authorization']) {
-    for (let i = 0; i < 20; i++) {
-      if (tokenCapture.getToken()) break;
-      await sleep(500);
-    }
-    let token = tokenCapture.getToken();
-    if (!token) {
-      token = await refreshQwenAccessToken(acctPage);
-    }
-    if (storeAccessToken(token)) {
-      console.log(`[Playwright] Captured Qwen access token for ${account.email}.`);
+  // GUARANTEED TOKEN FALLBACK: If we still have no access token, force a page reload
+  // so the frontend triggers its auth refresh API call and the listener captures it.
+  if (!getAccountHeaderCache(account.id).currentHeaders["authorization"]) {
+    console.log(
+      `[Playwright] Forcing token acquisition fallback for ${account.email}...`,
+    );
+    try {
+      await acctPage.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+      const token =
+        tokenCapture.getToken() || (await refreshQwenAccessToken(acctPage));
+      if (storeAccessToken(token)) {
+        console.log(
+          `[Playwright] Successfully captured fallback access token for ${account.email}.`,
+        );
+      }
+    } catch (err: any) {
+      console.warn(
+        `[Playwright] Fallback token capture failed for ${account.email}: ${err.message}`,
+      );
     }
   }
 
@@ -941,13 +1238,12 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   }
 }
 
-export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = 'chromium'): Promise<{ context: BrowserContext, page: Page }> {
-  const { engine, channel } = resolveBrowserEngine(browserType);
-
-  const manualBrowser = await engine.launch({
+export async function launchManualLoginAccount(
+  accountId: string,
+): Promise<{ context: BrowserContext; page: Page }> {
+  const manualBrowser = await chromium.launch({
     headless: false,
-    channel,
-    ignoreDefaultArgs: ['--enable-automation'],
+    ignoreDefaultArgs: ["--enable-automation"],
     args: getBrowserLaunchArgs(),
   });
 
@@ -961,23 +1257,35 @@ export async function launchManualLoginAccount(accountId: string, browserType: B
   await acctContext.addInitScript(getStealthScript(manualProfile));
 
   const acctPage = await acctContext.newPage();
-  await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
+  await acctPage.goto("https://chat.qwen.ai/auth", {
+    waitUntil: "domcontentloaded",
+  });
 
   return { context: acctContext, page: acctPage };
 }
 
-export async function extractAccountInfoFromContext(page: Page): Promise<{ email: string | null, hasSession: boolean }> {
+export async function extractAccountInfoFromContext(
+  page: Page,
+): Promise<{ email: string | null; hasSession: boolean }> {
   const cookies = await page.context().cookies();
-  const hasSession = cookies.some(c => c.name.toLowerCase().includes('token') || c.name.toLowerCase().includes('session'));
+  const hasSession = cookies.some(
+    (c) =>
+      c.name.toLowerCase().includes("token") ||
+      c.name.toLowerCase().includes("session"),
+  );
 
   let email: string | null = null;
   if (hasSession) {
     try {
       email = await page.evaluate(() => {
-        const el = document.querySelector('[data-testid="user-email"], .user-email, [class*="email"]');
+        const el = document.querySelector(
+          '[data-testid="user-email"], .user-email, [class*="email"]',
+        );
         return el?.textContent?.trim() || null;
       });
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   return { email, hasSession };
@@ -1005,7 +1313,7 @@ export async function closePlaywrightForAccount(accountId: string) {
 }
 
 export function getPageForAccount(accountId?: string): Page | null {
-  if (accountId === 'guest') return guestPage;
+  if (accountId === "guest") return guestPage;
   if (accountId) return accountPages.get(accountId) || null;
   return activePage;
 }
@@ -1020,7 +1328,9 @@ setFingerprintRotationListener((baseId) => {
   for (const key of [...accountContexts.keys()]) {
     const keyBase = getBaseAccountId(key) || key;
     if (keyBase === baseId) {
-      closePlaywrightForAccount(key).catch(() => { /* ignore */ });
+      closePlaywrightForAccount(key).catch(() => {
+        /* ignore */
+      });
     }
   }
   accountHeaderCaches.delete(baseId);
@@ -1040,7 +1350,9 @@ export function getAccountLastActivity(accountId: string): number | undefined {
   return accountLastActivity.get(accountId);
 }
 
-export async function hibernateAccountContext(accountId: string): Promise<boolean> {
+export async function hibernateAccountContext(
+  accountId: string,
+): Promise<boolean> {
   const acctContext = accountContexts.get(accountId);
   const acctPage = accountPages.get(accountId);
   if (!acctContext) return false;
@@ -1050,22 +1362,32 @@ export async function hibernateAccountContext(accountId: string): Promise<boolea
       await saveStorageState(acctContext, accountId);
     }
   } catch (err: any) {
-    console.warn(`[Playwright] Failed saving storage state during hibernation for ${accountId}:`, err.message);
+    console.warn(
+      `[Playwright] Failed saving storage state during hibernation for ${accountId}:`,
+      err.message,
+    );
   }
 
   try {
     await acctContext.close();
   } catch (err: any) {
-    console.warn(`[Playwright] Failed closing context during hibernation for ${accountId}:`, err.message);
+    console.warn(
+      `[Playwright] Failed closing context during hibernation for ${accountId}:`,
+      err.message,
+    );
   }
 
   accountContexts.delete(accountId);
   accountPages.delete(accountId);
-  console.log(`[Playwright] Hibernated idle browser context for account ${accountId} (freed RAM).`);
+  console.log(
+    `[Playwright] Hibernated idle browser context for account ${accountId} (freed RAM).`,
+  );
   return true;
 }
 
-export async function hibernateIdleAccountContexts(maxIdleMs?: number): Promise<number> {
+export async function hibernateIdleAccountContexts(
+  maxIdleMs?: number,
+): Promise<number> {
   const idleMs = maxIdleMs ?? config.browser.idleHibernateMs;
   if (!idleMs || idleMs <= 0) return 0;
   const now = Date.now();
@@ -1082,10 +1404,10 @@ export async function hibernateIdleAccountContexts(maxIdleMs?: number): Promise<
   return count;
 }
 
-if (config.browser.idleHibernateMs > 0 && typeof setInterval !== 'undefined') {
+if (config.browser.idleHibernateMs > 0 && typeof setInterval !== "undefined") {
   const timer = setInterval(() => {
     hibernateIdleAccountContexts().catch((err: any) => {
-      console.warn('[Playwright] Idle hibernation check error:', err.message);
+      console.warn("[Playwright] Idle hibernation check error:", err.message);
     });
   }, 60000);
   if (timer.unref) timer.unref();
@@ -1099,31 +1421,46 @@ if (config.browser.idleHibernateMs > 0 && typeof setInterval !== 'undefined') {
  * outside an active Qwen browser page". Wait briefly and — if possible — drive
  * the existing page back to a stable Qwen page instead of failing immediately.
  */
-export async function waitForAccountPage(accountId?: string, timeoutMs = 15000): Promise<Page | null> {
+export async function waitForAccountPage(
+  accountId?: string,
+  timeoutMs = 15000,
+): Promise<Page | null> {
   const deadline = Date.now() + timeoutMs;
   let attemptedNavigation = false;
 
   for (;;) {
-    let page = accountId === 'guest' ? guestPage : accountId ? accountPages.get(accountId) : activePage;
-    if ((!page || page.isClosed()) && accountId && accountId !== 'guest') {
-      const { getAccountCredentials } = await import('../core/accounts.js');
+    let page =
+      accountId === "guest"
+        ? guestPage
+        : accountId
+          ? accountPages.get(accountId)
+          : activePage;
+    if ((!page || page.isClosed()) && accountId && accountId !== "guest") {
+      const { getAccountCredentials } = await import("../core/accounts.js");
       const creds = getAccountCredentials(getBaseAccountId(accountId));
       if (creds) {
-        await initPlaywrightForAccount({ ...creds, id: accountId }, config.browser.headless);
+        await initPlaywrightForAccount(
+          { ...creds, id: accountId },
+          config.browser.headless,
+        );
         page = accountPages.get(accountId);
       }
     }
     if (page && !page.isClosed()) {
       touchAccountActivity(accountId);
-      if (page.url().includes('chat.qwen.ai')) {
+      if (page.url().includes("chat.qwen.ai")) {
         return page;
       }
       if (!attemptedNavigation) {
         attemptedNavigation = true;
-        page.goto('https://chat.qwen.ai/c/new-chat', {
-          waitUntil: 'domcontentloaded',
-          timeout: Math.min(15000, config.timeouts.navigation),
-        }).catch(() => { /* ignore navigation errors; polling continues */ });
+        page
+          .goto("https://chat.qwen.ai/c/new-chat", {
+            waitUntil: "domcontentloaded",
+            timeout: Math.min(15000, config.timeouts.navigation),
+          })
+          .catch(() => {
+            /* ignore navigation errors; polling continues */
+          });
       }
     }
     if (Date.now() >= deadline) {

@@ -1,5 +1,8 @@
-import type { Page } from 'playwright';
-import { QWEN_BX_VERSION_FALLBACK, QWEN_WEB_VERSION_FALLBACK } from '../utils/qwen-constants.js';
+import type { Page } from "patchright";
+import {
+  QWEN_BX_VERSION_FALLBACK,
+  QWEN_WEB_VERSION_FALLBACK,
+} from "../utils/qwen-constants.js";
 
 /**
  * The Qwen web client is published to a versioned CDN path, so the build
@@ -27,7 +30,10 @@ export function getBxVersion(): string {
 }
 
 /** Stores versions observed on real traffic so later requests reuse them. */
-export function rememberQwenVersions(versions: { webVersion?: string | null; bxVersion?: string | null }): void {
+export function rememberQwenVersions(versions: {
+  webVersion?: string | null;
+  bxVersion?: string | null;
+}): void {
   if (versions.webVersion) detectedWebVersion = versions.webVersion;
   if (versions.bxVersion) detectedBxVersion = versions.bxVersion;
 }
@@ -42,9 +48,11 @@ export async function detectQwenWebVersion(page: Page): Promise<string | null> {
       const re = new RegExp(source);
       const candidates: string[] = [];
 
-      for (const el of Array.from(document.querySelectorAll('link[href], script[src]'))) {
-        candidates.push(el.getAttribute('href') || '');
-        candidates.push(el.getAttribute('src') || '');
+      for (const el of Array.from(
+        document.querySelectorAll("link[href], script[src]"),
+      )) {
+        candidates.push(el.getAttribute("href") || "");
+        candidates.push(el.getAttribute("src") || "");
       }
 
       for (const url of candidates) {
@@ -52,7 +60,7 @@ export async function detectQwenWebVersion(page: Page): Promise<string | null> {
         if (match) return match[1];
       }
 
-      for (const entry of performance.getEntriesByType('resource')) {
+      for (const entry of performance.getEntriesByType("resource")) {
         const match = entry.name.match(re);
         if (match) return match[1];
       }
@@ -69,24 +77,33 @@ export async function detectQwenWebVersion(page: Page): Promise<string | null> {
  * Reads the Aliyun Baxia SDK version from the global it exposes. The entry
  * script loads asynchronously, so this polls until it appears.
  */
-export async function detectBaxiaVersion(page: Page, timeoutMs = 8000): Promise<string | null> {
+export async function detectBaxiaVersion(
+  page: Page,
+  timeoutMs = 8000,
+): Promise<string | null> {
   const read = (): Promise<string | null> =>
-    page.evaluate((source) => {
-      const re = new RegExp(source);
-      const baxia = (window as any).baxiaCommon;
-      if (baxia && typeof baxia.version === 'string' && /^\d+\.\d+\.\d+$/.test(baxia.version)) {
-        return baxia.version;
-      }
-      for (const entry of performance.getEntriesByType('resource')) {
-        const match = entry.name.match(re);
-        if (match) return match[1];
-      }
-      for (const el of Array.from(document.querySelectorAll('script[src]'))) {
-        const match = (el.getAttribute('src') || '').match(re);
-        if (match) return match[1];
-      }
-      return null;
-    }, BAXIA_VERSION_RE.source).catch(() => null);
+    page
+      .evaluate((source) => {
+        const re = new RegExp(source);
+        const baxia = (window as any).baxiaCommon;
+        if (
+          baxia &&
+          typeof baxia.version === "string" &&
+          /^\d+\.\d+\.\d+$/.test(baxia.version)
+        ) {
+          return baxia.version;
+        }
+        for (const entry of performance.getEntriesByType("resource")) {
+          const match = entry.name.match(re);
+          if (match) return match[1];
+        }
+        for (const el of Array.from(document.querySelectorAll("script[src]"))) {
+          const match = (el.getAttribute("src") || "").match(re);
+          if (match) return match[1];
+        }
+        return null;
+      }, BAXIA_VERSION_RE.source)
+      .catch(() => null);
 
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -101,10 +118,16 @@ export async function detectBaxiaVersion(page: Page, timeoutMs = 8000): Promise<
  * Detects both version constants from the live page and caches them.
  * Safe to call repeatedly; detection is skipped once both values are known.
  */
-export async function refreshQwenVersions(page: Page): Promise<{ webVersion: string; bxVersion: string }> {
+export async function refreshQwenVersions(
+  page: Page,
+): Promise<{ webVersion: string; bxVersion: string }> {
   const [webVersion, bxVersion] = await Promise.all([
-    detectedWebVersion ? Promise.resolve(detectedWebVersion) : detectQwenWebVersion(page),
-    detectedBxVersion ? Promise.resolve(detectedBxVersion) : detectBaxiaVersion(page),
+    detectedWebVersion
+      ? Promise.resolve(detectedWebVersion)
+      : detectQwenWebVersion(page),
+    detectedBxVersion
+      ? Promise.resolve(detectedBxVersion)
+      : detectBaxiaVersion(page),
   ]);
 
   rememberQwenVersions({ webVersion, bxVersion });

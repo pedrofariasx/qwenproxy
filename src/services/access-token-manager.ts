@@ -1,7 +1,15 @@
-import type { Page } from 'playwright';
-import { accountPages, getAccountHeaderCache, refreshQwenAccessToken, renewAccessTokenViaPage } from './browser-manager.js';
-import { getCookies } from './header-interceptor.js';
-import { hasExpiredBearerToken, isBearerTokenExpired } from '../utils/access-token.js';
+import type { Page } from "patchright";
+import {
+  accountPages,
+  getAccountHeaderCache,
+  refreshQwenAccessToken,
+  renewAccessTokenViaPage,
+} from "./browser-manager.js";
+import { getCookies } from "./header-interceptor.js";
+import {
+  hasExpiredBearerToken,
+  isBearerTokenExpired,
+} from "../utils/access-token.js";
 
 /**
  * Central place that keeps the Qwen access token usable.
@@ -15,10 +23,13 @@ import { hasExpiredBearerToken, isBearerTokenExpired } from '../utils/access-tok
  * to mint a new access token, no interactive login required.
  */
 
-type HeaderStore = { currentHeaders: Record<string, string>; lastHeadersTime: number };
+type HeaderStore = {
+  currentHeaders: Record<string, string>;
+  lastHeadersTime: number;
+};
 
 function storeFor(accountId?: string): HeaderStore {
-  return getAccountHeaderCache(accountId || 'global') as unknown as HeaderStore;
+  return getAccountHeaderCache(accountId || "global") as unknown as HeaderStore;
 }
 
 /**
@@ -27,7 +38,7 @@ function storeFor(accountId?: string): HeaderStore {
  */
 export function getUsableBearerToken(accountId?: string): string | null {
   const store = storeFor(accountId);
-  const authorization = store.currentHeaders['authorization'];
+  const authorization = store.currentHeaders["authorization"];
   if (!authorization) return null;
   if (isBearerTokenExpired(authorization)) return null;
   return authorization;
@@ -48,7 +59,10 @@ export function hasExpiredToken(accountId?: string): boolean {
  * missing or the renewal was rejected (in which case a full signin is
  * required).
  */
-export async function renewAccessToken(accountId?: string, page?: Page): Promise<string | null> {
+export async function renewAccessToken(
+  accountId?: string,
+  page?: Page,
+): Promise<string | null> {
   const target = page ?? resolveAccountPage(accountId);
   if (!target) return null;
 
@@ -63,7 +77,7 @@ export async function renewAccessToken(accountId?: string, page?: Page): Promise
 
   const authorization = `Bearer ${token}`;
   const store = storeFor(accountId);
-  store.currentHeaders['authorization'] = authorization;
+  store.currentHeaders["authorization"] = authorization;
   store.lastHeadersTime = Date.now();
   return authorization;
 }
@@ -74,12 +88,17 @@ export async function renewAccessToken(accountId?: string, page?: Page): Promise
  *
  * Returns true when a usable token is available afterwards.
  */
-export async function ensureUsableToken(accountId?: string, page?: Page): Promise<boolean> {
+export async function ensureUsableToken(
+  accountId?: string,
+  page?: Page,
+): Promise<boolean> {
   if (getUsableBearerToken(accountId)) return true;
 
   const renewed = await renewAccessToken(accountId, page);
   if (renewed) {
-    console.log(`[Token] Renewed expired Qwen access token for ${accountId || 'global'}.`);
+    console.log(
+      `[Token] Renewed expired Qwen access token for ${accountId || "global"}.`,
+    );
     return true;
   }
 
@@ -90,7 +109,10 @@ export async function ensureUsableToken(accountId?: string, page?: Page): Promis
  * Replaces the bearer token inside a header set, keeping every other header
  * untouched. Used to upgrade headers that were captured before a renewal.
  */
-export function applyBearerToken(headers: Record<string, string>, authorization: string): Record<string, string> {
+export function applyBearerToken(
+  headers: Record<string, string>,
+  authorization: string,
+): Record<string, string> {
   return { ...headers, authorization };
 }
 
@@ -98,7 +120,9 @@ export function applyBearerToken(headers: Record<string, string>, authorization:
  * Refreshes the cookie header of a header set from the live browser context,
  * so long-lived header sets do not keep using a stale cookie jar.
  */
-export async function refreshCookieHeader(accountId?: string): Promise<string | null> {
+export async function refreshCookieHeader(
+  accountId?: string,
+): Promise<string | null> {
   try {
     const cookie = await getCookies(accountId);
     return cookie || null;
