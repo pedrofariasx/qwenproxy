@@ -35,7 +35,7 @@
     "openai",
     "proxy",
     "qwen",
-    "playwright",
+    "patchright",
     "llm",
     "api",
     "chat-completions"

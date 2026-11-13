@@ -62,85 +62,88 @@ export async function extractAntiBotTokensFromPage(
   page: Page,
 ): Promise<{ bxUa: string; bxUmidtoken: string; authorization?: string }> {
   try {
-    return await page.evaluate(async () => {
-      const w = window as any;
-      let bxUa = "";
-      try {
-        if (w.AWSC && w.AWSC.use) {
-          bxUa = await new Promise((resolve) => {
-            w.AWSC.use("fy", (state: any, module: any) => {
-              if (state === "loaded" && module?.getFYToken) {
-                resolve(module.getFYToken() || "");
-              } else {
-                resolve("");
-              }
-            });
-            setTimeout(() => resolve(""), 3000);
-          });
-        }
-      } catch {
-        /* ignore */
-      }
-
-      let bxUmidtoken = "";
-      try {
-        if (w.__awsc_et__?.getETToken) {
-          bxUmidtoken = w.__awsc_et__.getETToken() || "";
-        }
-      } catch {
-        /* ignore */
-      }
-
-      if (!bxUmidtoken) {
+    return await page.evaluate(
+      async () => {
+        const w = window as any;
+        let bxUa = "";
         try {
           if (w.AWSC && w.AWSC.use) {
-            bxUmidtoken = await new Promise((resolve) => {
-              w.AWSC.use("umid", (state: any, module: any) => {
-                if (state === "loaded" && module?.getSecurityToken) {
-                  resolve(module.getSecurityToken() || "");
+            bxUa = await new Promise((resolve) => {
+              w.AWSC.use("fy", (state: any, module: any) => {
+                if (state === "loaded" && module?.getFYToken) {
+                  resolve(module.getFYToken() || "");
                 } else {
                   resolve("");
                 }
               });
-              setTimeout(() => resolve(""), 2000);
+              setTimeout(() => resolve(""), 3000);
             });
           }
         } catch {
           /* ignore */
         }
-      }
 
-      // Try to find authorization Bearer token in localStorage
-      let authorization = "";
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (!key) continue;
-          const val = localStorage.getItem(key) || "";
-          if (
-            key.toLowerCase().includes("token") ||
-            key.toLowerCase().includes("access")
-          ) {
-            if (val.startsWith("eyJ") || val.startsWith("Bearer ")) {
-              authorization = val.startsWith("Bearer ") ? val : `Bearer ${val}`;
-              break;
+        let bxUmidtoken = "";
+        try {
+          if (w.__awsc_et__?.getETToken) {
+            bxUmidtoken = w.__awsc_et__.getETToken() || "";
+          }
+        } catch {
+          /* ignore */
+        }
+
+        if (!bxUmidtoken) {
+          try {
+            if (w.AWSC && w.AWSC.use) {
+              bxUmidtoken = await new Promise((resolve) => {
+                w.AWSC.use("umid", (state: any, module: any) => {
+                  if (state === "loaded" && module?.getSecurityToken) {
+                    resolve(module.getSecurityToken() || "");
+                  } else {
+                    resolve("");
+                  }
+                });
+                setTimeout(() => resolve(""), 2000);
+              });
             }
+          } catch {
+            /* ignore */
           }
         }
-      } catch {
-        /* ignore */
-      }
 
-      return { bxUa, bxUmidtoken, authorization };
-    });
+        // Try to find authorization Bearer token in localStorage
+        let authorization = "";
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key) continue;
+            const val = localStorage.getItem(key) || "";
+            if (
+              key.toLowerCase().includes("token") ||
+              key.toLowerCase().includes("access")
+            ) {
+              if (val.startsWith("eyJ") || val.startsWith("Bearer ")) {
+                authorization = val.startsWith("Bearer ")
+                  ? val
+                  : `Bearer ${val}`;
+                break;
+              }
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+
+        return { bxUa, bxUmidtoken, authorization };
+      },
+      { world: "main" },
+    );
   } catch {
     return { bxUa: "", bxUmidtoken: "", authorization: "" };
   }
 }
 
-export async function getBasicHeaders(
-  accountId?: string,
-): Promise<{
+export async function getBasicHeaders(accountId?: string): Promise<{
   cookie: string;
   userAgent: string;
   bxV: string;
@@ -463,9 +466,7 @@ export async function getQwenHeaders(
   }
 }
 
-async function tryLightweightCookieRefresh(
-  accountId?: string,
-): Promise<{
+async function tryLightweightCookieRefresh(accountId?: string): Promise<{
   headers: Record<string, string>;
   chatSessionId: string;
   parentMessageId: string | null;
@@ -790,19 +791,21 @@ async function _getQwenHeadersInternalOnce(
 
   page.on("request", requestListener);
 
-  // Trigger a fetch from the page context. Qwen's frontend may add the
-  // authorization: Bearer header automatically via a fetch interceptor.
-  // The request listener above will capture it if present.
+  // Trigger a fetch from the page context in the main world. Qwen's frontend
+  // fetch interceptor will apply correctly here and add the authorization header.
   try {
     await page
-      .evaluate(async () => {
-        await fetch("/api/v2/users/status", {
-          method: "GET",
-          headers: {
-            accept: "application/json",
-          },
-        });
-      })
+      .evaluate(
+        async () => {
+          await fetch("/api/v2/users/status", {
+            method: "GET",
+            headers: {
+              accept: "application/json",
+            },
+          });
+        },
+        { world: "main" },
+      )
       .catch(() => {
         /* ignore fetch errors */
       });

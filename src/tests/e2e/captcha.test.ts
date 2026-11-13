@@ -1,9 +1,12 @@
-import { test } from 'node:test';
-import assert from 'node:assert';
-import type { Page, Locator, FrameLocator } from 'playwright';
-import { solveBaxiaCaptcha, startCaptchaWatcher } from '../../services/captcha-solver.js';
+import { test } from "node:test";
+import assert from "node:assert";
+import type { Page, Locator, FrameLocator } from "patchright";
+import {
+  solveBaxiaCaptcha,
+  startCaptchaWatcher,
+} from "../../services/captcha-solver.js";
 
-test('solveBaxiaCaptcha: returns false immediately if iframe is not visible', async () => {
+test("solveBaxiaCaptcha: returns false immediately if iframe is not visible", async () => {
   const mockLocator = {
     first: () => mockLocator,
     isVisible: async () => false,
@@ -17,7 +20,7 @@ test('solveBaxiaCaptcha: returns false immediately if iframe is not visible', as
   assert.strictEqual(result, false);
 });
 
-test('solveBaxiaCaptcha: handles successful solve workflow', async () => {
+test("solveBaxiaCaptcha: handles successful solve workflow", async () => {
   const mouseMoveCalls: any[] = [];
   let mouseDownCalls = 0;
   let mouseUpCalls = 0;
@@ -48,13 +51,13 @@ test('solveBaxiaCaptcha: handles successful solve workflow', async () => {
 
   const mockFrameLocator = {
     locator: (selector: string) => {
-      if (selector.includes('nc_1_n1z') || selector.includes('btn_slide')) {
+      if (selector.includes("nc_1_n1z") || selector.includes("btn_slide")) {
         return mockSlider;
       }
-      if (selector.includes('nc_1_n1t') || selector.includes('nc_scale')) {
+      if (selector.includes("nc_1_n1t") || selector.includes("nc_scale")) {
         return mockTrack;
       }
-      if (selector.includes('btn_ok') || selector.includes('nc_ok')) {
+      if (selector.includes("btn_ok") || selector.includes("nc_ok")) {
         return mockOkElement;
       }
       throw new Error(`Unexpected selector inside frame: ${selector}`);
@@ -63,13 +66,13 @@ test('solveBaxiaCaptcha: handles successful solve workflow', async () => {
 
   const mockPage = {
     locator: (selector: string) => {
-      if (selector.includes('iframe')) {
+      if (selector.includes("iframe")) {
         return mockIframeLocator;
       }
       throw new Error(`Unexpected page selector: ${selector}`);
     },
     frameLocator: (selector: string) => {
-      if (selector.includes('iframe')) {
+      if (selector.includes("iframe")) {
         return mockFrameLocator;
       }
       throw new Error(`Unexpected frame locator: ${selector}`);
@@ -94,7 +97,7 @@ test('solveBaxiaCaptcha: handles successful solve workflow', async () => {
   assert.ok(mouseMoveCalls.length > 0);
 });
 
-test('startCaptchaWatcher: starts loop and stops on call', async () => {
+test("startCaptchaWatcher: starts loop and stops on call", async () => {
   let isVisibleCalled = false;
   const mockLocator = {
     first: () => mockLocator,
@@ -111,7 +114,7 @@ test('startCaptchaWatcher: starts loop and stops on call', async () => {
 
   const watcher = startCaptchaWatcher(mockPage, 5000);
   // Wait a short duration to let the loop execute at least once
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   watcher.stop();
   await watcher.promise;
 
